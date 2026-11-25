@@ -16,6 +16,11 @@ function ip(request: Request): string {
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
+  @Get('captcha')
+  captcha(@Req() request: Request) {
+    return this.auth.registrationCaptcha(ip(request));
+  }
+
   @Post('register')
   register(@Body() input: RegisterDto, @Req() request: Request) {
     return this.auth.register(input, ip(request));

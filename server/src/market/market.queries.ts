@@ -2,9 +2,14 @@
 export function publicProfile(alias: string) {
   return `jsonb_build_object(
     'id', ${alias}.id, 'nickname', ${alias}.display_name, 'city', ${alias}.city, 'country', ${alias}.country,
-    'accountType', ${alias}.participant_type,
-    'rating', (SELECT round(avg(r.rating),1) FROM reviews r WHERE r.subject_id = ${alias}.id AND r.status = 'ACTIVE'),
-    'ratingCount', (SELECT count(*) FROM reviews r WHERE r.subject_id = ${alias}.id AND r.status = 'ACTIVE')
+    'accountType', ${alias}.participant_type
+  ) || (
+    SELECT jsonb_build_object('rating', round(avg(latest.rating), 1), 'ratingCount', count(*))
+    FROM (
+      SELECT DISTINCT ON (r.author_id) r.rating
+      FROM reviews r WHERE r.subject_id = ${alias}.id AND r.status = 'ACTIVE'
+      ORDER BY r.author_id, r.created_at DESC, r.id DESC
+    ) latest
   )`
 }
 

@@ -56,6 +56,7 @@ const labels: Record<string, string> = {
   'status-changed': 'Изменение статуса',
   'status-unchanged': 'Проверка статуса',
   'evidence-viewed': 'Просмотр переписки по жалобе',
+  'credentials-changed': 'Смена данных для входа',
 }
 
 type UserRow = {

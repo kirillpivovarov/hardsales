@@ -26,6 +26,10 @@ function SingleLineText(field: 'private' | 'public' = 'private') {
 }
 
 export class RegisterDto {
+  @IsString({ message: 'Пройдите проверку CAPTCHA.' })
+  @Length(1, 2048, { message: 'Повторите проверку CAPTCHA.' })
+  captchaToken!: string;
+
   @Transform(trimText)
   @Matches(USERNAME_PATTERN, { message: 'Логин должен содержать от 3 до 32 латинских букв, цифр, точек, дефисов или подчёркиваний и начинаться с буквы или цифры.' })
   username!: string;

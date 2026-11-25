@@ -2,6 +2,7 @@ import {
   BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException,
 } from '@nestjs/common'
 import type { PoolClient } from 'pg'
+import type { SessionUser } from '../auth/auth.types'
 import { isPublicProfileText } from '../contact'
 import { DatabaseService } from '../database/database.service'
 import { CatalogService } from './catalog.service'
@@ -18,7 +19,7 @@ const userColumns = `
   (u.email_verified_at IS NOT NULL) AS "emailVerified", u.created_at AS "createdAt", u.updated_at AS "updatedAt"
 `
 const auditColumns = `
-  a.id::float8 AS id, a.actor, a.entity, a.entity_id AS "entityId", a.action, a.reason,
+  a.id::float8 AS id, a.actor, a.actor_user_id AS "actorUserId", a.entity, a.entity_id AS "entityId", a.action, a.reason,
   a.before_data AS before, a.after_data AS after, a.created_at AS "createdAt"
 `
 
@@ -30,7 +31,9 @@ const statusTables = {
 } as const
 type Entity = keyof typeof statusTables
 type AuditData = Record<string, unknown> | null
+type AuditActor = Pick<SessionUser, 'id' | 'username'> | 'agent:moderation'
 type StatusAudit = { entity: string; entity_id: string; reason: string; action: string; after_data: { status: string } }
+const editableUserFields = new Set(['displayName', 'city', 'country', 'telegram', 'participantType', 'companyName'])
 
 @Injectable()
 export class AdminService {
@@ -49,9 +52,12 @@ export class AdminService {
     return this.listPage(userColumns, 'FROM users u', filters, params, query, 'u.created_at DESC, u.id')
   }
 
-  async editUser(actor: string, idInput: string, raw: unknown) {
+  async editUser(actor: AuditActor, idInput: string, raw: unknown) {
     const id = uuid(idInput)
     const body = object(raw)
+    if (Object.keys(body).some(key => !editableUserFields.has(key))) {
+      throw new BadRequestException('Запрос содержит поля, недоступные для редактирования профиля')
+    }
     return this.db.transaction(async client => {
       const { rows } = await client.query(`SELECT ${userColumns} FROM users u WHERE id = $1 FOR UPDATE`, [id])
       const before = rows[0]
@@ -78,13 +84,13 @@ export class AdminService {
         displayName: before.displayName, city: before.city, country: before.country,
         participantType: before.participantType, companyName: before.companyName,
       }, {
-        displayName, city, country: nation, participantType, companyName, telegramChanged: before.telegram !== handle,
+        displayName, city, country: nation, participantType, companyName, telegramChanged: before.telegram?.toLowerCase() !== handle,
       })
       return after
     })
   }
 
-  async editListing(actor: string, idInput: string, body: unknown, uploads?: ListingImageUpload[]) {
+  async editListing(actor: AuditActor, idInput: string, body: unknown, uploads?: ListingImageUpload[]) {
     const id = uuid(idInput)
     const raw = object(body)
     const images = await this.media.prepare(raw.imageOrder, uploads)
@@ -128,7 +134,7 @@ export class AdminService {
     filters, params, query, 'r.created_at DESC, r.id')
   }
 
-  async evidence(actor: string, idInput: string, query: Record<string, unknown>) {
+  async evidence(actor: AuditActor, idInput: string, query: Record<string, unknown>) {
     const id = uuid(idInput)
     const { page, limit, offset } = pageParams(query, 50)
     return this.db.transaction(async client => {
@@ -147,14 +153,17 @@ export class AdminService {
     })
   }
 
-  async status(actor: string, entity: Entity, idInput: string, raw: unknown, idempotency?: string) {
+  async status(actor: AuditActor, entity: Entity, idInput: string, raw: unknown, idempotency?: string) {
     const id = uuid(idInput)
     const body = object(raw)
+    if (Object.keys(body).some(key => key !== 'status' && key !== 'reason')) {
+      throw new BadRequestException('Для смены статуса укажите статус и причину')
+    }
     const { choices, table } = statusTables[entity]
     const status = oneOf(body.status, idempotency ? accountStatuses : choices, 'Статус')
     const reason = str(body.reason, 'Причина', 3, 500)
     return this.db.transaction(async client => {
-      if (idempotency) {
+      if (actor === 'agent:moderation' && idempotency) {
         await client.query('SELECT pg_advisory_xact_lock(32913, hashtext($1))', [idempotency])
         const previous = await client.query<StatusAudit>(`
           SELECT entity, entity_id, reason, action, after_data FROM moderation_audit WHERE actor = $1 AND idempotency_key = $2
@@ -201,7 +210,7 @@ export class AdminService {
     })
   }
 
-  async saveCategory(actor: string, idInput: string | null, raw: unknown) {
+  async saveCategory(actor: AuditActor, idInput: string | null, raw: unknown) {
     const id = idInput ? uuid(idInput) : null
     const body = object(raw)
     return this.db.transaction(async client => {
@@ -269,7 +278,7 @@ export class AdminService {
     return rows
   }
 
-  async saveLocale(actor: string, codeInput: string, raw: unknown) {
+  async saveLocale(actor: AuditActor, codeInput: string, raw: unknown) {
     const code = localeCode(codeInput)
     const body = object(raw)
     const name = str(body.name, 'Название языка', 2, 80)
@@ -307,7 +316,7 @@ export class AdminService {
     return rows
   }
 
-  async saveContent(actor: string, keyInput: string, raw: unknown) {
+  async saveContent(actor: AuditActor, keyInput: string, raw: unknown) {
     const key = slug(keyInput, 'Код страницы')
     const body = object(raw)
     const active = boolean(body.active ?? true, 'Публикация')
@@ -356,12 +365,14 @@ export class AdminService {
     return translations
   }
 
-  private async audit(client: PoolClient, actor: string, entity: string, id: string, action: string,
+  private async audit(client: PoolClient, actor: AuditActor, entity: string, id: string, action: string,
     reason: string | null, before: AuditData, after: AuditData, idempotency?: string) {
+    const username = actor === 'agent:moderation' ? actor : actor.username
+    const userId = actor === 'agent:moderation' ? null : actor.id
     await client.query(`
-      INSERT INTO moderation_audit (actor, entity, entity_id, action, reason, before_data, after_data, idempotency_key)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-    `, [actor, entity, id, action, reason, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null, idempotency ?? null])
+      INSERT INTO moderation_audit (actor, actor_user_id, entity, entity_id, action, reason, before_data, after_data, idempotency_key)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    `, [username, userId, entity, id, action, reason, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null, idempotency ?? null])
   }
 
   private async listPage(select: string, from: string, filters: string[], params: Parameters,

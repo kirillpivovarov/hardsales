@@ -36,7 +36,12 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   const kind = oppositeKind ?? (query.get('kind') === 'BUY' ? 'BUY' : 'SELL');
   const selectedCategory = query.get('category') ?? '';
   const selectedOrigin = query.get('country') ?? '';
-  const showFlexibleOriginHint = kind === 'SELL' && /^[A-Z]{2}$/.test(selectedOrigin);
+  const originScope = query.get('originScope') ?? '';
+  const showFlexibleOriginHint = /^[A-Z]{2}$/.test(selectedOrigin) && (kind === 'SELL' || !originScope || originScope === 'ANY');
+  const destination = query.get('destinationCountry') ?? '';
+  const priceMin = query.get('priceMin') ?? '';
+  const priceMax = query.get('priceMax') ?? '';
+  const currency = query.get('currency') || (priceMin || priceMax ? 'RUB' : '');
   const authenticated = Boolean(user?.emailVerified);
   const locked = !authenticated || results.locked;
   const requestedQuery = query.toString();
@@ -138,14 +143,16 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
             label={t(kind === 'BUY' ? 'Страна закупки' : 'Страна отгрузки')} name="originCountry"
             value={selectedOrigin} onChange={country => change({country})}
             leading={[{ value: '', label: t('Без ограничения') }, { value: 'ANY', label: t('Указана любая страна') }]}
-            hint={showFlexibleOriginHint ? t('Поиск также включает предложения с отгрузкой из любой страны.') : undefined}
+            hint={showFlexibleOriginHint ? t(kind === 'BUY'
+              ? 'Поиск также учитывает заявки на закупку из любой страны.'
+              : 'Поиск также включает предложения с отгрузкой из любой страны.') : undefined}
           />
           {kind === 'SELL' && <Field label={t('Наличие')}><select value={query.get('availability') ?? ''} onChange={event => change({availability:event.target.value})}>
             <option value="">{t('Любое')}</option>{options(['STOCK','TRANSIT','ORDER'])}
           </select></Field>}
           <details className="more-filters">
             <summary>{t('Ещё фильтры')} <Icon name="chevron-down" size={14} /></summary>
-            {kind === 'BUY' && <Field label={t('География закупки')}><select value={query.get('originScope') ?? ''} onChange={event => change({originScope:event.target.value})}>
+            {kind === 'BUY' && <Field label={t('География закупки')}><select value={originScope} onChange={event => change({originScope:event.target.value})}>
               <option value="">{t('Любая география')}</option>{options(['DOMESTIC','ANY','COUNTRY'])}
             </select></Field>}
             <Field label={t('Тип цены')}><select value={query.get('priceMode') ?? ''} onChange={event => change({priceMode:event.target.value})}>
@@ -153,8 +160,9 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
             </select></Field>
             <CountrySelect
               label={t('Страна поставки')} name="destinationCountry"
-              value={query.get('destinationCountry') ?? ''} onChange={destinationCountry => change({destinationCountry})}
+              value={destination} onChange={destinationCountry => change({destinationCountry})}
               leading={[{ value: '', label: t('Любая страна') }]}
+              hint={kind === 'SELL' && destination ? t('В результатах также будут предложения, где страну поставки можно обсудить.') : undefined}
             />
             <Field label={t('Состояние')}><select value={query.get('condition') ?? ''} onChange={event => change({condition:event.target.value})}>
               <option value="">{t('Любое')}</option>{options(['NEW','USED','REFURBISHED'])}
@@ -162,11 +170,16 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
             <form className="filter-price" key={['priceMin','priceMax','currency'].map(key => query.get(key) ?? '').join(':')} onSubmit={(event) => {
               event.preventDefault();
               const data = new FormData(event.currentTarget);
-              change({ priceMin: String(data.get('priceMin') ?? ''), priceMax: String(data.get('priceMax') ?? ''), currency: String(data.get('currency') ?? '') });
+              const minimum = String(data.get('priceMin') ?? '');
+              const maximum = String(data.get('priceMax') ?? '');
+              const selectedCurrency = String(data.get('currency') ?? '');
+              change({ priceMin: minimum, priceMax: maximum, currency: selectedCurrency || (minimum || maximum ? 'RUB' : '') });
             }}>
-              <Field label={t('Цена от')}><input type="number" min="0" max="999999999999" step="any" name="priceMin" defaultValue={query.get('priceMin') ?? ''} /></Field>
-              <Field label={t('Цена до')}><input type="number" min="0" max="999999999999" step="any" name="priceMax" defaultValue={query.get('priceMax') ?? ''} /></Field>
-              <Field label={t('Валюта')}><select name="currency" defaultValue={query.get('currency') ?? ''}><option value="">{t('Любая')}</option>{['RUB','USD','EUR','CNY','KZT','AED'].map(value => <option key={value}>{value}</option>)}</select></Field>
+              <Field label={t('Цена от')}><input type="number" min="0" max="9999999999999.99" step="0.01" name="priceMin" defaultValue={priceMin} /></Field>
+              <Field label={t('Цена до')}><input type="number" min="0" max="9999999999999.99" step="0.01" name="priceMax" defaultValue={priceMax} /></Field>
+              <Field label={t('Валюта')} hint={t('Если задать диапазон и оставить валюту пустой, поиск применит RUB.')}>
+                <select name="currency" defaultValue={currency}><option value="">{t('Любая')}</option>{['RUB','USD','EUR','CNY','KZT','AED'].map(value => <option key={value}>{value}</option>)}</select>
+              </Field>
               <Button type="submit" variant="secondary">{t('Применить цену')}</Button>
             </form>
             <Field label={t('Контрагент')}><select value={query.get('counterparty') ?? ''} onChange={event => change({counterparty:event.target.value})}>

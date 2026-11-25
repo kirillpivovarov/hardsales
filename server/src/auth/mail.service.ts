@@ -40,7 +40,7 @@ export class MailService {
     });
   }
 
-  async sendCode(email: string, code: string, expiresMinutes: number): Promise<void> {
+  async sendCode(email: string, code: string, expiresMinutes: number, purpose: 'REGISTER' | 'LOGIN'): Promise<void> {
     if (!this.transport) {
       this.logger.log(`Development email to ${email}: ${code}`);
       return;
@@ -48,8 +48,8 @@ export class MailService {
     await this.transport.sendMail({
       from: this.from,
       to: { address: email, name: '' },
-      subject: 'Код подтверждения hwforai',
-      text: `Ваш код подтверждения: ${code}. Он действует ${expiresMinutes} минут. Если вы не запрашивали код, проигнорируйте письмо.`,
+      subject: purpose === 'REGISTER' ? 'Подтверждение регистрации в hwforai' : 'Подтверждение входа в hwforai',
+      text: `Ваш код подтверждения: ${code}. Он действует ${expiresMinutes} минут. Введите код на сайте hwforai. Если вы не запрашивали код, проигнорируйте письмо.`,
     });
   }
 }

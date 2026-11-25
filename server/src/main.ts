@@ -62,6 +62,7 @@ async function bootstrap(): Promise<void> {
           upgradeInsecureRequests: isProduction() ? [] : null,
           imgSrc: ["'self'", 'data:', 'blob:'],
           fontSrc: ["'self'", 'data:'],
+          workerSrc: ["'self'"],
         },
       },
     }));

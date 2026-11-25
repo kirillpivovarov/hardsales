@@ -156,9 +156,10 @@ export function listingInput(body: unknown, existing: Record<string, unknown>, k
     : country(input.originCountry, 'Страна отгрузки')
   const stock = kind === 'SELL' ? oneOf(input.availability ?? 'STOCK', availability, 'Наличие') : null
   const stockCity = stock === 'STOCK' ? str(input.stockCity, 'Город склада', 2, 120) : null
-  const deliveryBy = kind === 'BUY' || input.deliveryBy ? calendarDate(input.deliveryBy, 'Срок поставки') : null
+  const dateLabel = kind === 'BUY' ? 'Срок поставки' : 'Срок действия предложения'
+  const deliveryBy = kind === 'BUY' || input.deliveryBy ? calendarDate(input.deliveryBy, dateLabel) : null
   if (deliveryBy && deliveryBy !== existing.deliveryBy && deliveryBy < new Date().toISOString().slice(0, 10)) {
-    throw new BadRequestException('Срок поставки не может быть в прошлом')
+    throw new BadRequestException(`${dateLabel} не может быть в прошлом`)
   }
   const deliveryIncluded = boolean(input.deliveryIncluded ?? false, 'Доставка')
   const customsIncluded = boolean(input.customsIncluded ?? false, 'Таможенные расходы')

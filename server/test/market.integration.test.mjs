@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
+import { solveCaptcha } from './captcha-helper.mjs';
 
 const apiOrigin = process.env.HWFORAI_MARKET_TEST_URL?.replace(/\/$/, '');
 const mailOrigin = process.env.MAILPIT_URL?.replace(/\/$/, '');
@@ -43,7 +44,7 @@ async function register(role, prefix, participantType = 'COMPANY') {
   const { payload: { challengeId } } = await call('/auth/register', {
     method: 'POST',
     body: {
-      username, email, password: fixturePassword, role,
+      username, email, password: fixturePassword, role, captchaToken: await solveCaptcha(apiOrigin),
       participantType,
       ...(participantType === 'COMPANY' ? { companyName: 'Тестовая компания' } : {}),
       city: 'Новосибирск', country: 'RU', telegram: username,
@@ -64,19 +65,69 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
   const seller = await register('SELLER', 'seller');
   const buyer = await register('BUYER', 'buyer');
   const outsider = await register('BUYER', 'outsider', 'INDIVIDUAL');
+  const adminCredentials = {
+    login: process.env.HWFORAI_MARKET_ADMIN_LOGIN || 'admin',
+    password: process.env.HWFORAI_MARKET_ADMIN_PASSWORD || 'admin',
+  };
   let admin = await call('/auth/login', {
-    method: 'POST',
-    body: {
-      login: process.env.HWFORAI_MARKET_ADMIN_LOGIN || 'admin',
-      password: process.env.HWFORAI_MARKET_ADMIN_PASSWORD || 'admin',
-    },
+    method: 'POST', body: adminCredentials,
   });
   if (admin.payload.user.mustChangePassword) {
+    const newPassword = 'Moderation-Test-fixture-74!';
     admin = await call('/auth/credentials', {
       method: 'PATCH', cookie: admin.cookie,
-      body: { currentPassword: 'admin', newPassword: fixturePassword },
+      body: { currentPassword: adminCredentials.password, newPassword },
     });
+    adminCredentials.password = newPassword;
   }
+
+  await t.test('administrator registration is closed and credentials are scoped to the session owner', async () => {
+    const administrator = admin.payload.user;
+    const username = 'invalid-admin-' + suffix;
+    const registration = await call('/auth/register', {
+      method: 'POST', status: 400, body: {
+        username, email: username + '@example.test', password: fixturePassword, role: 'ADMIN',
+        captchaToken: await solveCaptcha(apiOrigin),
+        participantType: 'INDIVIDUAL', city: 'Пермь', country: 'RU', telegram: 'invalid_admin_' + suffix,
+      },
+    });
+    assert.match(String(registration.payload.message), /Выберите роль покупателя или продавца/);
+
+    const passwordChange = { currentPassword: adminCredentials.password, newPassword: 'Unused-admin-replacement-' + suffix };
+    for (const { cookie } of [buyer, seller]) {
+      await call('/admin/users/' + administrator.id, {
+        method: 'PATCH', cookie, status: 403, body: { username, ...passwordChange },
+      });
+      await call('/auth/credentials', {
+        method: 'PATCH', cookie, status: 403, body: { username, ...passwordChange },
+      });
+      await call('/auth/credentials', {
+        method: 'PATCH', cookie, status: 400, body: { userId: administrator.id, ...passwordChange },
+      });
+      for (const target of [{ userId: administrator.id }, { username: administrator.username }]) {
+        await call('/auth/password', { method: 'POST', cookie, status: 400, body: { ...target, ...passwordChange } });
+      }
+      if (adminCredentials.password !== fixturePassword) {
+        await call('/auth/password', { method: 'POST', cookie, status: 401, body: passwordChange });
+      }
+    }
+    await call('/auth/credentials', {
+      method: 'PATCH', cookie: admin.cookie, status: 400, body: { userId: buyer.user.id, ...passwordChange },
+    });
+
+    const changed = await call('/auth/password', {
+      method: 'POST', cookie: outsider.cookie, body: {
+        currentPassword: fixturePassword, newPassword: 'Member-self-password-' + suffix,
+      },
+    });
+    assert.equal(changed.payload.user.id, outsider.user.id);
+    assert.equal(changed.payload.user.role, outsider.user.role);
+    outsider.cookie = changed.cookie;
+    const confirmed = await call('/auth/login', { method: 'POST', body: adminCredentials });
+    assert.equal(confirmed.payload.user.id, administrator.id);
+    assert.equal(confirmed.payload.user.username, administrator.username);
+    assert.equal(confirmed.payload.user.role, 'ADMIN');
+  });
 
   let listing;
   let chat;
@@ -219,24 +270,102 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
       method: 'POST', cookie: buyer.cookie, status: 400,
       body: { reason: 'OTHER', scope: 'VERIFIED_TELEGRAM', details: 'Согласие ещё не было получено.' },
     });
-    const reveal = (action, cookie, status = 200) => call('/chats/' + chat.id + '/reveal', {
-      method: 'PATCH', cookie, body: { action }, status,
+    const open = async (listingId, cookie) => (await call('/chats', {
+      method: 'POST', cookie, status: 201, body: { listingId },
+    })).payload;
+    const detail = async (chatId, cookie) => (await call('/chats/' + chatId, { cookie })).payload;
+    const reveal = async (chatId, action, cookie, requestId, status = 200) => (await call('/chats/' + chatId + '/reveal', {
+      method: 'PATCH', cookie, body: { action, requestId }, status,
+    })).payload;
+    const { payload: offer } = await call('/listings', {
+      method: 'POST', cookie: seller.cookie, status: 201,
+      body: { categoryId: listing.categoryId, title: 'Дополнительная поставка ' + suffix,
+        description: 'Второе объявление для проверки общего доступа к контакту.', availability: 'ORDER', originCountry: 'RU' },
     });
-    assert.equal((await reveal('REQUEST', buyer.cookie)).payload.telegram, null);
-    await reveal('ACCEPT', buyer.cookie, 409);
-    assert.equal((await reveal('ACCEPT', seller.cookie)).payload.telegram.partner, buyer.user.telegram);
-    const mine = (await call('/chats/' + chat.id, { cookie: buyer.cookie })).payload;
-    assert.equal(mine.telegram.partner, seller.user.telegram);
+    const sibling = await open(offer.id, buyer.cookie);
+    const foreignChat = await open(offer.id, outsider.cookie);
+    const pending = await reveal(chat.id, 'REQUEST', buyer.cookie);
+    assert.equal(pending.telegram, null);
+    assert.ok(pending.revealRequestId);
+    assert.equal((await detail(sibling.id, seller.cookie)).revealRequestId, pending.revealRequestId);
+    assert.equal((await detail(foreignChat.id, seller.cookie)).revealRequestId, null);
+    await reveal(chat.id, 'ACCEPT', buyer.cookie, pending.revealRequestId, 409);
+    await reveal(sibling.id, 'ACCEPT', seller.cookie, undefined, 400);
+    assert.equal((await reveal(sibling.id, 'ACCEPT', seller.cookie, pending.revealRequestId)).telegram.partner, buyer.user.telegram);
+    assert.equal((await detail(chat.id, buyer.cookie)).telegram.partner, seller.user.telegram);
+    assert.equal((await detail(foreignChat.id, outsider.cookie)).canReportTelegram, false);
+    const sendHandle = async () => (await call('/chats/' + sibling.id + '/messages', {
+      method: 'POST', cookie: buyer.cookie, status: 201, body: { body: 'Продолжим в @' + seller.user.telegram },
+    })).payload;
+    assert.equal((await sendHandle()).contactWarning, false);
 
-    await call('/auth/profile', {
-      method: 'PATCH', cookie: seller.cookie, body: { telegram: 'changed' + suffix },
+    const { payload: wanted } = await call('/listings', {
+      method: 'POST', cookie: buyer.cookie, status: 201,
+      body: { categoryId: listing.categoryId, title: 'Запрос на поставку ' + suffix,
+        description: 'Проверка общей истории контактов с обратными ролями в чате.',
+        destinationCountry: 'RU', deliveryBy: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10) },
     });
-    await call('/auth/profile', {
-      method: 'PATCH', cookie: seller.cookie, body: { telegram: seller.user.telegram },
+    const reversed = await open(wanted.id, seller.cookie);
+    assert.deepEqual(reversed.telegram, { mine: seller.user.telegram, partner: buyer.user.telegram });
+    assert.equal(reversed.canReportTelegram, true);
+    const moderateOffer = status => call('/admin/listings/' + offer.id + '/status', {
+      method: 'PATCH', cookie: admin.cookie, body: { status, reason: 'Проверка изоляции доступа к чату' },
     });
-    const reset = (await call('/chats/' + chat.id, { cookie: buyer.cookie })).payload;
-    assert.equal(reset.revealState, 'NONE');
-    assert.equal(reset.telegram, null);
+    await moderateOffer('FROZEN');
+    const restricted = await detail(sibling.id, buyer.cookie);
+    assert.equal(restricted.status, 'RESTRICTED');
+    assert.equal(restricted.telegram, null);
+    await reveal(sibling.id, 'REQUEST', buyer.cookie, undefined, 403);
+    assert.equal((await detail(chat.id, buyer.cookie)).telegram.partner, seller.user.telegram);
+    await moderateOffer('ACTIVE');
+
+    const changeHandle = (cookie, telegram) => call('/auth/profile', {
+      method: 'PATCH', cookie, body: { telegram },
+    });
+    await changeHandle(seller.cookie, seller.user.telegram.toUpperCase());
+    assert.equal((await detail(chat.id, buyer.cookie)).revealState, 'ACCEPTED');
+    await changeHandle(seller.cookie, 'changed' + suffix);
+    for (const chatId of [chat.id, sibling.id, reversed.id]) {
+      const reset = await detail(chatId, buyer.cookie);
+      assert.equal(reset.revealState, 'NONE');
+      assert.equal(reset.telegram, null);
+      assert.equal(reset.canReportTelegram, true);
+      assert.deepEqual(reset.telegramChanged, { mine: false, partner: true });
+    }
+    assert.deepEqual((await detail(reversed.id, seller.cookie)).telegramChanged, { mine: true, partner: false });
+    assert.equal((await detail(foreignChat.id, outsider.cookie)).telegramChanged, null);
+    assert.equal((await sendHandle()).contactWarning, true);
+
+    const renewal = await reveal(reversed.id, 'REQUEST', seller.cookie);
+    await changeHandle(seller.cookie, seller.user.telegram);
+    await reveal(chat.id, 'ACCEPT', buyer.cookie, renewal.revealRequestId, 409);
+    const newest = await reveal(sibling.id, 'REQUEST', seller.cookie);
+    assert.notEqual(newest.revealRequestId, renewal.revealRequestId);
+    await reveal(chat.id, 'ACCEPT', buyer.cookie, renewal.revealRequestId, 409);
+    assert.equal((await detail(chat.id, buyer.cookie)).telegram, null);
+    assert.deepEqual(newest.telegramChanged, { mine: true, partner: false });
+    const decline = await reveal(chat.id, 'DECLINE', buyer.cookie, newest.revealRequestId);
+    assert.equal(decline.revealState, 'DECLINED');
+    assert.deepEqual(decline.telegramChanged, { mine: false, partner: true });
+    const retry = await reveal(chat.id, 'REQUEST', buyer.cookie);
+    const acceptances = await Promise.allSettled([reversed.id, sibling.id].map(chatId =>
+      reveal(chatId, 'ACCEPT', seller.cookie, retry.revealRequestId),
+    ));
+    const successes = acceptances.filter(result => result.status === 'fulfilled');
+    const rejections = acceptances.filter(result => result.status === 'rejected');
+    assert.equal(successes.length, 1);
+    assert.equal(successes[0].value.telegramChanged, null);
+    assert.equal(rejections.length, 1);
+    assert.equal(rejections[0].reason.actual, 409);
+    assert.equal((await detail(chat.id, buyer.cookie)).telegram.partner, seller.user.telegram);
+    const index = (await call('/chats', { cookie: buyer.cookie })).payload.items;
+    assert.deepEqual(index.find(item => item.id === sibling.id).telegram, { mine: buyer.user.telegram, partner: seller.user.telegram });
+    assert.equal(index.find(item => item.id === sibling.id).telegramChanged, null);
+
+    // Historical reporting remains available after a change by the buyer too.
+    await changeHandle(buyer.cookie, 'changedbuyer' + suffix);
+    assert.equal((await detail(chat.id, seller.cookie)).telegram, null);
+    assert.deepEqual((await detail(sibling.id, seller.cookie)).telegramChanged, { mine: false, partner: true });
   });
 
   await t.test('review trust and historic evidence for moderation', async () => {
@@ -259,10 +388,84 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
     assert.equal((Array.isArray(evidence) ? evidence : evidence.items).length, 2);
   });
 
+  await t.test('one public reputation rating per counterparty across listing chats', async () => {
+    const { payload: anotherListing } = await call('/listings', {
+      method: 'POST', cookie: seller.cookie, status: 201,
+      body: {
+        categoryId: listing.categoryId, title: 'Другой GPU ' + suffix,
+        description: 'Карточка для проверки отзывов от повторного и нового собеседника.',
+        quantity: 1, priceMode: 'NEGOTIABLE', availability: 'ORDER', originScope: 'ANY',
+      },
+    });
+    const review = async (author, rating) => {
+      const { payload: thread } = await call('/chats', {
+        method: 'POST', cookie: author.cookie, body: { listingId: anotherListing.id }, status: 201,
+      });
+      for (const participant of [author, seller]) {
+        await call('/chats/' + thread.id + '/messages', {
+          method: 'POST', cookie: participant.cookie, body: { body: 'Можно обсудить совместимость?' }, status: 201,
+        });
+      }
+      return (await call('/chats/' + thread.id + '/reviews', {
+        method: 'POST', cookie: author.cookie, body: { rating }, status: 201,
+      })).payload;
+    };
+    const checkRating = async (rating, ratingCount) => {
+      const { payload } = await call('/listings/' + listing.id, { cookie: buyer.cookie });
+      assert.equal(payload.owner.rating, rating);
+      assert.equal(payload.owner.ratingCount, ratingCount);
+    };
+    const hideReview = id => call('/admin/reviews/' + id + '/status', {
+      method: 'PATCH', cookie: admin.cookie, body: { status: 'HIDDEN', reason: 'Проверка расчёта репутации' },
+    });
+    const latest = await review(buyer, 2);
+    await checkRating(2, 1);
+    const independent = await review(outsider, 5);
+    await checkRating(3.5, 2);
+    await hideReview(latest.id);
+    await checkRating(4.5, 2);
+    await hideReview(independent.id);
+  });
+
   await t.test('agent scope, idempotency and irreversible ban', async () => {
     const key = 'market-check-' + suffix;
     const path = '/agent/moderation/listings/' + listing.id;
     const freeze = { status: 'FROZEN', reason: 'Тестовая проверка объявления' };
+    const adminId = admin.payload.user.id;
+    const agentHeaders = { Authorization: 'Bearer ' + agentToken, 'Idempotency-Key': key + '.scope' };
+    const protectedRoutes = ['/admin/users', '/admin/audit', '/admin/reports/' + report.id + '/messages'];
+    for (const route of protectedRoutes) {
+      await call(route, { headers: agentHeaders, status: 401 });
+      await call(route, { cookie: buyer.cookie, status: 403 });
+      await call(route, { cookie: seller.cookie, status: 403 });
+    }
+    await call('/admin/categories', { method: 'POST', cookie: seller.cookie, body: {}, status: 403 });
+    await call('/admin/content/about', { method: 'PUT', cookie: buyer.cookie, body: {}, status: 403 });
+    await call('/auth/profile', { method: 'PATCH', cookie: seller.cookie, body: { role: 'ADMIN' }, status: 400 });
+    await call('/admin/users/' + buyer.user.id, {
+      method: 'PATCH', cookie: admin.cookie, body: { role: 'ADMIN' }, status: 400,
+    });
+    await call('/admin/users/' + adminId, {
+      method: 'PATCH', cookie: admin.cookie, body: { displayName: 'Непубличная правка' }, status: 403,
+    });
+    await call('/admin/users/' + adminId + '/status', {
+      method: 'PATCH', cookie: admin.cookie, body: freeze, status: 403,
+    });
+    await call('/agent/moderation/users/' + adminId, {
+      method: 'PATCH', headers: agentHeaders, body: freeze, status: 403,
+    });
+    await call('/agent/moderation/reports/' + report.id, {
+      method: 'PATCH', headers: agentHeaders, body: freeze, status: 400,
+    });
+    await call('/agent/moderation/users/' + buyer.user.id, {
+      method: 'PATCH', headers: agentHeaders, body: { ...freeze, role: 'ADMIN' }, status: 400,
+    });
+    const amended = (await call('/admin/users/' + buyer.user.id, {
+      method: 'PATCH', cookie: admin.cookie, body: { city: 'Казань' },
+    })).payload;
+    assert.equal(amended.role, 'BUYER');
+    assert.equal(amended.city, 'Казань');
+
     await call(path, { method: 'PATCH', body: freeze, status: 401 });
     const agent = (body, idempotencyKey, status = 200) => call(path, {
       method: 'PATCH', body, status,
@@ -287,7 +490,16 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
     const audit = (await call('/admin/audit?limit=100', { cookie: admin.cookie })).payload;
     const events = audit.items.filter(event => event.entityId === listing.id && event.actor === 'agent:moderation');
     assert.equal(events.length, 3);
-    assert.ok(audit.items.some(event => event.entityId === report.id));
+    assert.ok(events.every(event => event.actorUserId === null));
+    const evidenceAudit = audit.items.filter(event => event.entityId === report.id && event.action === 'evidence-viewed');
+    assert.equal(evidenceAudit.length, 1);
+    assert.equal(evidenceAudit[0].actorUserId, adminId);
+    assert.deepEqual(evidenceAudit[0].after, { page: 1 });
+    const editAudit = audit.items.find(event => event.entityId === buyer.user.id && event.action === 'edited');
+    assert.equal(editAudit.actorUserId, adminId);
+    assert.ok(!('telegram' in editAudit.before) && !('email' in editAudit.before));
+    assert.ok(!('telegram' in editAudit.after) && !('email' in editAudit.after));
+    assert.equal(editAudit.after.telegramChanged, false);
   });
 
   await t.test('administrator freezes profiles and moderates review visibility', async () => {

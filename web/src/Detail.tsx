@@ -56,7 +56,7 @@ export function ListingDetail({ user }: { user: User | null }) {
     ['Город склада', listing.stockCity],
     ['Страна поставки', localCountry(listing.destinationCountry)],
     ['География закупки', listing.kind === 'BUY' ? stringTerm(listing.originScope) : ''],
-    [listing.kind === 'BUY' ? 'Поставка до' : 'Ориентировочная дата готовности', listing.deliveryBy ? new Intl.DateTimeFormat(locale, {dateStyle:'medium', timeZone:'UTC'}).format(new Date(listing.deliveryBy)) : ''],
+    [listing.kind === 'BUY' ? 'Поставка до' : 'Предложение действительно до', listing.deliveryBy ? new Intl.DateTimeFormat(locale, {dateStyle:'medium', timeZone:'UTC'}).format(new Date(listing.deliveryBy)) : ''],
     ['Доставка в стоимости', inclusion(listing.deliveryIncluded)],
     ['Таможня и пошлины в стоимости', inclusion(listing.customsIncluded)],
     ['НДС', stringTerm(listing.vat)],

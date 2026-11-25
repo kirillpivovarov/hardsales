@@ -30,12 +30,12 @@ export class AdminController {
 
   @Patch('users/:id')
   async editUser(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.editUser((await this.auth.admin(request)).username, id, body)
+    return this.admin.editUser(await this.auth.admin(request), id, body)
   }
 
   @Patch('users/:id/status')
   async userStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.status((await this.auth.admin(request)).username, 'users', id, body)
+    return this.admin.status(await this.auth.admin(request), 'users', id, body)
   }
 
   @Get('listings')
@@ -56,12 +56,12 @@ export class AdminController {
   editListing(@Req() request: ListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
     @UploadedFiles() files?: ListingImageUpload[]) {
     const { data, uploads } = listingMutation(request, body, files)
-    return this.admin.editListing(request.listingEditor.username, id, data, uploads)
+    return this.admin.editListing(request.listingEditor, id, data, uploads)
   }
 
   @Patch('listings/:id/status')
   async listingStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.status((await this.auth.admin(request)).username, 'listings', id, body)
+    return this.admin.status(await this.auth.admin(request), 'listings', id, body)
   }
 
   @Get('categories')
@@ -72,12 +72,12 @@ export class AdminController {
 
   @Post('categories')
   async createCategory(@Req() request: Request, @Body() body: unknown) {
-    return this.admin.saveCategory((await this.auth.admin(request)).username, null, body)
+    return this.admin.saveCategory(await this.auth.admin(request), null, body)
   }
 
   @Patch('categories/:id')
   async editCategory(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.saveCategory((await this.auth.admin(request)).username, id, body)
+    return this.admin.saveCategory(await this.auth.admin(request), id, body)
   }
 
   @Get('reviews')
@@ -88,7 +88,7 @@ export class AdminController {
 
   @Patch('reviews/:id/status')
   async reviewStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.status((await this.auth.admin(request)).username, 'reviews', id, body)
+    return this.admin.status(await this.auth.admin(request), 'reviews', id, body)
   }
 
   @Get('reports')
@@ -99,12 +99,12 @@ export class AdminController {
 
   @Get('reports/:id/messages')
   async evidence(@Req() request: Request, @Param('id') id: string, @Query() query: Record<string, unknown>) {
-    return this.admin.evidence((await this.auth.admin(request)).username, id, query)
+    return this.admin.evidence(await this.auth.admin(request), id, query)
   }
 
   @Patch('reports/:id/status')
   async reportStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.status((await this.auth.admin(request)).username, 'reports', id, body)
+    return this.admin.status(await this.auth.admin(request), 'reports', id, body)
   }
 
   @Get('locales')
@@ -115,7 +115,7 @@ export class AdminController {
 
   @Put('locales/:code')
   async locale(@Req() request: Request, @Param('code') code: string, @Body() body: unknown) {
-    return this.admin.saveLocale((await this.auth.admin(request)).username, code, body)
+    return this.admin.saveLocale(await this.auth.admin(request), code, body)
   }
 
   @Get('content')
@@ -126,7 +126,7 @@ export class AdminController {
 
   @Put('content/:key')
   async page(@Req() request: Request, @Param('key') key: string, @Body() body: unknown) {
-    return this.admin.saveContent((await this.auth.admin(request)).username, key, body)
+    return this.admin.saveContent(await this.auth.admin(request), key, body)
   }
 
   @Get('audit')

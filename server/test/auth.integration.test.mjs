@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
 import { test } from 'node:test';
 import pg from 'pg';
+import { solveCaptcha } from './captcha-helper.mjs';
 
 const api = process.env.HWFORAI_AUTH_TEST_URL;
 const mailpit = process.env.MAILPIT_URL;
@@ -27,8 +28,8 @@ async function request(path, { method = 'GET', body, cookie, headers = {} } = {}
 
 async function emailCode(email, excluded = []) {
   for (let attempt = 0; attempt < 50; attempt++) {
-    const inbox = await fetch(`${mailpit}/api/v1/messages`).then((response) => response.json());
-    const message = inbox.messages.find((entry) =>
+    const inbox = await mailbox(email);
+    const message = inbox.find((entry) =>
       !excluded.includes(entry.ID) && entry.To.some(({ Address }) => Address === email),
     );
     if (message) {
@@ -41,6 +42,13 @@ async function emailCode(email, excluded = []) {
     await setTimeout(100);
   }
   assert.fail('Email did not arrive in Mailpit within five seconds');
+}
+
+async function mailbox(email) {
+  const search = new URLSearchParams({ query: `to:${email}` });
+  const response = await fetch(`${mailpit}/api/v1/search?${search}`);
+  assert.ok(response.ok);
+  return (await response.json()).messages ?? [];
 }
 
 test('registration, SMTP verification, session revocation and admin bootstrap gate', async (t) => {
@@ -93,17 +101,23 @@ test('registration, SMTP verification, session revocation and admin bootstrap ga
   assert.equal(incomplete.status, 400);
   for (const fields of [{ city: 'Пермь +7 (900) 123-45-67' }, { companyName: 'Компания\0QA' }]) {
     const invalid = await request('/auth/register', {
-      method: 'POST', body: { ...registration, companyName: 'Тестовая компания', ...fields },
+      method: 'POST', body: { ...registration, captchaToken: 'placeholder', companyName: 'Тестовая компания', ...fields },
     });
     assert.equal(invalid.status, 400);
   }
-  const signup = await request('/auth/register', {
-    method: 'POST', body: { ...registration, companyName: 'Тестовая компания' },
-  });
+  const valid = { ...registration, companyName: 'Тестовая компания' };
+  for (const candidate of [valid, { ...valid, captchaToken: 'invalid' }]) {
+    assert.equal((await request('/auth/register', { method: 'POST', body: candidate })).status, 400);
+  }
+  assert.deepEqual(await mailbox(email), []);
+  const captchaToken = await solveCaptcha(api);
+  const submit = (token) => request('/auth/register', { method: 'POST', body: { ...valid, captchaToken: token } });
+  const signup = await submit(captchaToken);
   assert.equal(signup.status, 201);
   assert.deepEqual(Object.keys(signup.data).sort(), ['challengeId', 'email', 'expiresIn']);
   assert.equal(signup.data.expiresIn, 600);
   assert.equal(signup.setCookie, null);
+  assert.equal((await submit(captchaToken.replace(/=+$/, '') + ' ')).status, 429);
   assert.equal((await request('/auth/login', { method: 'POST', body: { login: username, password } })).status, 401);
 
   const initial = await emailCode(email);
@@ -177,4 +191,70 @@ test('registration, SMTP verification, session revocation and admin bootstrap ga
     assert.equal((await verify(lockedLogin.data.challengeId, inaccurate)).status, 400);
   }
   assert.equal((await verify(lockedLogin.data.challengeId, lockedMessage.code)).status, 400);
+});
+
+test('registration races cannot reserve or duplicate account identifiers', async (t) => {
+  const db = new pg.Pool({ connectionString: databaseUrl });
+  const username = `qa-${randomBytes(5).toString('hex')}`;
+  const addresses = ['first', 'second', 'third'].map(suffix => `${username}-${suffix}@example.test`);
+  t.after(async () => {
+    try {
+      await db.query('DELETE FROM email_challenges WHERE email = ANY($1::text[])', [addresses]);
+      await db.query('DELETE FROM users WHERE lower(email) = ANY($1::text[])', [addresses]);
+    } finally {
+      await db.end();
+    }
+  });
+
+  const password = 'Registration test password 76!';
+  const telegram = 'example_check';
+  const registration = {
+    username, password, telegram,
+    role: 'SELLER', participantType: 'INDIVIDUAL', city: 'Томск', country: 'RU',
+  };
+  const signup = async (email, login) => request('/auth/register', {
+    method: 'POST', body: { ...registration, email, username: login, captchaToken: await solveCaptcha(api) },
+  });
+  const verify = (challengeId, code) => request('/auth/verify', { method: 'POST', body: { challengeId, code } });
+  const [first, second, third] = addresses;
+  const sameMailbox = await Promise.all([signup(first, username), signup(first.toUpperCase(), username)]);
+  assert.deepEqual(sameMailbox.map(response => response.status).sort(), [201, 429]);
+  assert.equal((await mailbox(first)).length, 1);
+  assert.equal((await db.query('SELECT id FROM users WHERE lower(username) = $1', [username])).rowCount, 0);
+
+  const otherMailbox = await signup(second, username.toUpperCase());
+  assert.equal(otherMailbox.status, 201);
+  const codes = await Promise.all([emailCode(first), emailCode(second)]);
+  const challenges = [sameMailbox.find(response => response.status === 201), otherMailbox];
+  const completions = await Promise.all(challenges.map((response, index) =>
+    verify(response.data.challengeId, codes[index].code),
+  ));
+  assert.deepEqual(completions.map(response => response.status).sort(), [200, 409]);
+  const winner = completions.find(response => response.status === 200).data.user;
+  const duplicate = await signup(winner.email.toUpperCase(), `${username}-another`);
+  assert.equal(duplicate.status, 201);
+  assert.ok(duplicate.data.challengeId);
+  assert.equal(duplicate.setCookie, null);
+  assert.equal((await mailbox(winner.email)).length, 1, 'Duplicate email did not receive another email');
+  assert.equal((await verify(duplicate.data.challengeId, codes[addresses.indexOf(winner.email)].code)).status, 400);
+
+  const independent = await signup(third, `${username}-third`);
+  assert.equal(independent.status, 201);
+  const thirdCode = await emailCode(third);
+  const thirdUser = await verify(independent.data.challengeId, thirdCode.code);
+  assert.equal(thirdUser.status, 200);
+  assert.equal(thirdUser.data.user.telegram, winner.telegram);
+  const profile = await request('/auth/profile', {
+    method: 'PATCH', cookie: thirdUser.setCookie.split(';')[0], body: { displayName: winner.displayName },
+  });
+  assert.equal(profile.status, 200);
+  assert.equal(profile.data.user.displayName, winner.displayName);
+
+  const login = await request('/auth/login', {
+    method: 'POST', body: { login: winner.username.toUpperCase(), password },
+  });
+  assert.equal(login.status, 200);
+  const loginCode = await emailCode(winner.email, [codes[addresses.indexOf(winner.email)].id]);
+  await db.query("UPDATE email_challenges SET expires_at = now() - interval '1 second' WHERE id = $1", [login.data.challengeId]);
+  assert.equal((await verify(login.data.challengeId, loginCode.code)).status, 400);
 });

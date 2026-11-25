@@ -9,12 +9,13 @@
     "build": "tsc -p tsconfig.json",
     "start": "node --enable-source-maps dist/main.js",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test:auth": "node --test test/auth.integration.test.mjs"
+    "test:auth": "node --test test/auth.integration.test.mjs test/captcha.test.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.0",
     "@nestjs/core": "^11.1.0",
     "@nestjs/platform-express": "^11.1.0",
+    "altcha-lib": "2.10.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.2",
     "dotenv": "^17.2.3",

@@ -78,6 +78,7 @@ def main():
         popup = open_countries(guest, "country")
         control.click()
         expect(popup).to_be_hidden()
+        expect(guest.locator("altcha-widget").get_by_role("checkbox")).to_be_visible(timeout=15000)
 
         login(guest, "test1", "/account")
         check_control(guest, "country")

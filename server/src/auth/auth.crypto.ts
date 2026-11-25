@@ -2,6 +2,17 @@ import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual } from 'no
 
 const scryptOptions = { N: 32_768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 };
 const OTP_SECRET = process.env.OTP_SECRET || randomBytes(32).toString('hex');
+export const registrationCaptchaSecret = createHmac('sha256', OTP_SECRET).update('hwforai:registration-captcha:v1').digest('hex');
+const predictableAdminPassword = /^(?:admin(?:istrator)?|password|qwerty|letmein|changeme|hwforai|1234567890)[\d!@#$%^&*._-]*$/u;
+
+export function strongAdminPassword(password: string, username: string): boolean {
+  const candidate = password.normalize('NFKC').trim().toLowerCase();
+  const defaultWords = /^(?:admin|password|qwerty|hwforai)+$/u;
+  const repeatedPattern = /^(.{1,4})\1+$/su;
+  return Array.from(candidate).length >= 12 && Array.from(password).length <= 128 &&
+    candidate !== username.toLowerCase() && !predictableAdminPassword.test(candidate) &&
+    !defaultWords.test(candidate) && !repeatedPattern.test(candidate);
+}
 
 function stretch(password: string, salt: Buffer): Promise<Buffer> {
   return new Promise((resolve, reject) => {

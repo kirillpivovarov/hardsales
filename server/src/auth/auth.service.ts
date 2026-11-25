@@ -7,11 +7,12 @@ import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import type { PoolClient } from 'pg';
 import { appOrigin, demoMode, isProduction } from '../config';
-import { DatabaseService } from '../database/database.service';
-import { codesMatch, hashCode, hashPassword, hashToken, passwordMatches } from './auth.crypto';
+import { DatabaseService, type Queryable } from '../database/database.service';
+import { codesMatch, hashCode, hashPassword, hashToken, passwordMatches, strongAdminPassword } from './auth.crypto';
 import type { CredentialsDto, LoginDto, ProfileDto, RegisterDto } from './auth.dto';
 import { SessionUser, UserRow, sessionUser } from './auth.types';
 import { MailService } from './mail.service';
+import { CAPTCHA_TTL, createRegistrationCaptcha, verifyRegistrationCaptcha } from './captcha';
 
 export type { SessionUser } from './auth.types';
 
@@ -27,12 +28,15 @@ const DEMO_ACCOUNT_IDS = new Set([
   '00000000-0000-4000-8000-000000000003',
 ]);
 
-const INVALID_CODE = 'Код неверен, истёк или уже использован. Запросите новый код.';
+const INVALID_CODE = 'Код неверен, истёк или уже использован. Если повторная отправка недоступна, вернитесь к форме.';
+const REGISTRATION_COOLDOWN = 'Код можно запросить ещё раз через минуту.';
 const DUMMY_PASSWORD_HASH = `scrypt$${'0'.repeat(32)}$${'0'.repeat(128)}`;
 
-interface PendingRegistration extends Omit<RegisterDto, 'password'> {
+interface PendingProfile extends Omit<RegisterDto, 'password' | 'captchaToken'> {
   passwordHash: string;
 }
+
+type PendingRegistration = PendingProfile | { suppressed: true };
 
 type ChallengePurpose = 'REGISTER' | 'LOGIN';
 
@@ -53,8 +57,9 @@ interface ChallengeRow {
 
 interface NewChallenge {
   id: string;
-  code: string;
+  code: string | null;
   email: string;
+  purpose: ChallengePurpose;
 }
 
 export interface ChallengeResult {
@@ -113,19 +118,27 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     clearInterval(this.cleanupTimer);
   }
 
+  async registrationCaptcha(ip: string) {
+    await this.limit('registration-captcha-ip', ip, 40, 900);
+    return createRegistrationCaptcha();
+  }
+
   async register(input: RegisterDto, ip: string): Promise<ChallengeResult> {
     await this.limit('register-ip', ip, 12, 3600);
-    await this.limit('register-email', input.email, 5, 3600);
-    const { rows } = await this.db.query<{ exists: boolean }>(
-      'SELECT EXISTS(SELECT 1 FROM users WHERE lower(username) = lower($1)) AS exists', [input.username],
-    );
-    if (rows[0].exists) throw new ConflictException('Этот логин занят.');
-    // The account is inserted only after mailbox control is confirmed.
-    const { password, ...profile } = input;
+    const { captchaToken, password, ...profile } = input;
+    const signature = await verifyRegistrationCaptcha(captchaToken);
+    // A challenge can be submitted only once, even across application replicas or encoded differently.
+    await this.limit('registration-captcha-used', signature, 1, CAPTCHA_TTL);
+
     const passwordHash = await hashPassword(password);
-    const challenge = await this.db.transaction((client) => this.insertChallenge(
-      client, 'REGISTER', input.email, null, { ...profile, passwordHash }, null,
-    ));
+    const challenge = await this.db.transaction(async (client) => {
+      await this.lockRegistrationMailbox(client, profile.email);
+      await this.checkRegistrationCooldown(client, profile.email);
+      const pending: PendingRegistration = await this.registeredEmail(client, profile.email)
+        ? { suppressed: true }
+        : { ...profile, passwordHash };
+      return this.insertChallenge(client, 'REGISTER', profile.email, null, pending, null);
+    });
     return this.deliverChallenge(challenge);
   }
 
@@ -149,7 +162,6 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
         return this.issueSession(client, current);
       });
     }
-    await this.limit('login-otp-email', user.email, 6, 3600);
     const challenge = await this.db.transaction((client) => this.insertChallenge(
       client, 'LOGIN', user.email, user.id, null, user.credential_version,
     ));
@@ -160,8 +172,8 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     await this.limit('resend-ip', ip, 15, 3600);
     const existing = (await this.db.query<ChallengeRow>('SELECT * FROM email_challenges WHERE id = $1', [id])).rows[0];
     if (!existing) throw new BadRequestException(INVALID_CODE);
-    await this.limit('resend-email', existing.email, 5, 3600);
     const newChallenge = await this.db.transaction(async (client) => {
+      if (existing.purpose === 'REGISTER') await this.lockRegistrationMailbox(client, existing.email);
       const { rows } = await client.query<ChallengeRow>('SELECT * FROM email_challenges WHERE id = $1 FOR UPDATE', [id]);
       const challenge = rows[0];
       if (!challenge || challenge.consumed_at || !challenge.delivered_at || challenge.attempts >= OTP_ATTEMPTS ||
@@ -169,11 +181,16 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
         throw new BadRequestException(INVALID_CODE);
       }
       if (challenge.resend_at.getTime() > Date.now()) {
-        throw new HttpException('Повторно отправить код можно через минуту.', HttpStatus.TOO_MANY_REQUESTS);
+        throw new HttpException(REGISTRATION_COOLDOWN, HttpStatus.TOO_MANY_REQUESTS);
+      }
+      let pending = challenge.pending_registration;
+      if (challenge.purpose === 'REGISTER') {
+        await this.checkRegistrationCooldown(client, challenge.email);
+        if (await this.registeredEmail(client, challenge.email)) pending = { suppressed: true };
       }
       await client.query('UPDATE email_challenges SET consumed_at = now() WHERE id = $1', [id]);
       return this.insertChallenge(client, challenge.purpose, challenge.email, challenge.user_id,
-        challenge.pending_registration, challenge.credential_version, challenge.attempts);
+        pending, challenge.credential_version, challenge.attempts);
     });
 
     try {
@@ -191,14 +208,15 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       const challenge = rows[0];
       if (!challenge || !challenge.delivered_at || challenge.consumed_at || expired(challenge) ||
           challenge.attempts >= OTP_ATTEMPTS) return null;
-      if (!codesMatch(id, code, challenge.code_hash)) {
+      const pending = challenge.pending_registration;
+      if (!codesMatch(id, code, challenge.code_hash) || (pending && 'suppressed' in pending)) {
         await client.query('UPDATE email_challenges SET attempts = attempts + 1 WHERE id = $1', [id]);
         return null;
       }
 
       let user: UserRow | undefined;
       if (challenge.purpose === 'REGISTER') {
-        const pending = challenge.pending_registration!;
+        if (!pending || (pending.role !== 'BUYER' && pending.role !== 'SELLER')) return null;
         user = (await client.query<UserRow>(`
           INSERT INTO users (username, display_name, email, password_hash, role, participant_type,
             company_name, city, country, telegram, email_verified_at)
@@ -223,7 +241,9 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     });
     if (!result) throw new BadRequestException(INVALID_CODE);
     if ('token' in result) return result;
-    if (result.error === 'conflict') throw new ConflictException('Этот логин или адрес уже зарегистрирован. Войдите в свой аккаунт.');
+    if (result.error === 'conflict') {
+      throw new ConflictException('Этот логин или адрес уже используется. Вернитесь к форме и выберите другой логин или войдите в свой аккаунт.');
+    }
     if (result.error === 'missing') throw new UnauthorizedException('Запросите вход заново.');
     throw statusError(result.error);
   }
@@ -282,11 +302,15 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
 
   async changeCredentials(request: Request, input: CredentialsDto): Promise<SessionResult> {
     const owner = (await this.resolve(request, true))!;
+    const token = sessionToken(request)!;
     if (input.username !== undefined && owner.role !== 'ADMIN') {
       throw new ForbiddenException('Смена логина доступна администратору.');
     }
     if (input.currentPassword === input.newPassword) {
       throw new BadRequestException('Новый пароль должен отличаться от текущего.');
+    }
+    if (owner.role === 'ADMIN' && !strongAdminPassword(input.newPassword, input.username ?? owner.username)) {
+      throw new BadRequestException('Выберите длинный непредсказуемый пароль, отличный от логина.');
     }
     await this.limit('change-password', owner.id, 10, 900);
     const current = (await this.db.query<UserRow>('SELECT * FROM users WHERE id = $1', [owner.id])).rows[0];
@@ -300,10 +324,19 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
           UPDATE users SET
             password_hash = $2, username = COALESCE($3, username),
             must_change_password = false, credential_version = credential_version + 1, updated_at = now()
-          WHERE id = $1 AND password_hash = $4 AND status = 'ACTIVE' RETURNING *
-        `, [owner.id, passwordHash, input.username, current.password_hash]);
+          WHERE id = $1 AND password_hash = $4 AND credential_version = $5
+            AND status = 'ACTIVE' AND email_verified_at IS NOT NULL
+            AND EXISTS (SELECT 1 FROM auth_sessions WHERE token_hash = $6 AND user_id = $1 AND expires_at > now())
+          RETURNING *
+        `, [owner.id, passwordHash, input.username, current.password_hash, current.credential_version, hashToken(token)]);
         if (!rows[0]) throw new UnauthorizedException('Профиль изменился. Войдите снова.');
         await client.query('DELETE FROM auth_sessions WHERE user_id = $1', [owner.id]);
+        if (owner.role === 'ADMIN') {
+          await client.query(`
+            INSERT INTO moderation_audit (actor, actor_user_id, entity, entity_id, action, after_data)
+            VALUES ($1, $2::uuid, 'users', $2::text, 'credentials-changed', jsonb_build_object('usernameChanged', $3::boolean))
+          `, [current.username, owner.id, current.username !== rows[0].username]);
+        }
         return this.issueSession(client, rows[0]);
       });
     } catch (error) {
@@ -325,18 +358,20 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     client: PoolClient, purpose: ChallengePurpose, email: string, userId: string | null,
     pending: PendingRegistration | null, credentialVersion: number | null, attempts = 0,
   ): Promise<NewChallenge> {
+    if (purpose === 'REGISTER') await this.limit('register-email', email, 5, 3600, client);
+    else await this.limit('login-otp-email', email, 6, 3600, client);
     const id = randomUUID();
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
     await client.query(`
       INSERT INTO email_challenges (id, purpose, email, code_hash, user_id, pending_registration, credential_version, expires_at, resend_at, attempts)
       VALUES ($1, $2, $3, $4, $5, $6, $7, now() + $8::integer * interval '1 second', now() + $9::integer * interval '1 second', $10)
     `, [id, purpose, email, hashCode(id, code), userId, pending, credentialVersion, OTP_TTL, RESEND_DELAY, attempts]);
-    return { id, code, email };
+    return { id, code: pending && 'suppressed' in pending ? null : code, email, purpose };
   }
 
   private async deliverChallenge(challenge: NewChallenge): Promise<ChallengeResult> {
     try {
-      await this.mail.sendCode(challenge.email, challenge.code, OTP_TTL / 60);
+      if (challenge.code) await this.mail.sendCode(challenge.email, challenge.code, OTP_TTL / 60, challenge.purpose);
     } catch {
       await this.db.query('DELETE FROM email_challenges WHERE id = $1 AND delivered_at IS NULL', [challenge.id]);
       this.logger.warn('Email transport could not deliver an authentication challenge');
@@ -352,8 +387,30 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     return { challengeId: challenge.id, expiresIn: OTP_TTL, email: maskEmail(challenge.email) };
   }
 
-  private async limit(namespace: string, key: string, limit: number, seconds: number): Promise<void> {
-    const { rows } = await this.db.query<{ count: number }>(`
+  private async lockRegistrationMailbox(client: PoolClient, email: string): Promise<void> {
+    // Different requests for the same mailbox share a cooldown, including across application processes.
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 7723904))', [email]);
+  }
+
+  private async checkRegistrationCooldown(client: PoolClient, email: string): Promise<void> {
+    const { rows } = await client.query<{ exists: boolean }>(`
+      SELECT EXISTS(
+        SELECT 1 FROM email_challenges WHERE purpose = 'REGISTER' AND email = $1
+          AND consumed_at IS NULL AND resend_at > now()
+      ) AS exists
+    `, [email]);
+    if (rows[0].exists) throw new HttpException(REGISTRATION_COOLDOWN, HttpStatus.TOO_MANY_REQUESTS);
+  }
+
+  private async registeredEmail(client: PoolClient, email: string): Promise<boolean> {
+    const { rows } = await client.query<{ exists: boolean }>(
+      'SELECT EXISTS(SELECT 1 FROM users WHERE lower(email) = $1) AS exists', [email],
+    );
+    return rows[0].exists;
+  }
+
+  private async limit(namespace: string, key: string, limit: number, seconds: number, connection: Queryable = this.db): Promise<void> {
+    const { rows } = await connection.query<{ count: number }>(`
       INSERT INTO auth_rate_limits (bucket, count, expires_at)
       VALUES ($1, 1, now() + $2::integer * interval '1 second')
       ON CONFLICT (bucket) DO UPDATE SET

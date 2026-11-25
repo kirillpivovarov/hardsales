@@ -97,16 +97,14 @@ export class CatalogService {
       const origin = query[key]
       if (!origin) continue
       const matching = origin === 'ANY' ? "l.origin_scope = 'ANY'"
-        : `(l.origin_country = ${params.add(country(origin, 'Страна отгрузки'))} OR (l.kind = 'SELL' AND l.origin_scope = 'ANY'))`
+        : `(l.origin_country = ${params.add(country(origin, 'Страна отгрузки'))} OR l.origin_scope = 'ANY')`
       filters.push(matching)
     }
-    const countries = [
-      ['destinationCountry', 'l.destination_country', 'Страна доставки'],
-      ['ownerCountry', 'u.country', 'Страна участника'],
-    ] as const
-    for (const [key, field, label] of countries) {
-      if (query[key]) filters.push(`${field} = ${params.add(country(query[key], label))}`)
+    if (query.destinationCountry) {
+      const destination = params.add(country(query.destinationCountry, 'Страна доставки'))
+      filters.push(`(l.destination_country = ${destination} OR (l.kind = 'SELL' AND l.destination_country IS NULL))`)
     }
+    if (query.ownerCountry) filters.push(`u.country = ${params.add(country(query.ownerCountry, 'Страна участника'))}`)
     if (query.city) {
       const city = params.add(escapedSearch(query.city))
       filters.push(`(u.city ILIKE ${city} OR l.stock_city ILIKE ${city})`)
@@ -252,7 +250,8 @@ export class CatalogService {
   async assertRepublishable(client: PoolClient, existing: ListingRow) {
     await this.categoryReady(client, existing.categoryId)
     if (typeof existing.deliveryBy === 'string' && existing.deliveryBy < new Date().toISOString().slice(0, 10)) {
-      throw new BadRequestException('Перед публикацией обновите срок поставки')
+      throw new BadRequestException(existing.kind === 'BUY' ? 'Перед публикацией обновите срок поставки'
+        : 'Перед публикацией обновите срок действия предложения')
     }
   }
 

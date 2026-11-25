@@ -265,8 +265,8 @@ function ListingFields({
               hint={t('Можно оставить пустым, чтобы обсудить географию поставок в чате.')}
             />
           )}
-          <Field label={t(isBuyer ? 'Требуется доставка до' : 'Ориентировочная дата готовности')}
-            hint={isBuyer ? undefined : t('После этой даты объявление перестанет показываться в каталоге.')}>
+          <Field label={t(isBuyer ? 'Требуется доставка до' : 'Предложение действительно до')}
+            hint={isBuyer ? undefined : t('Если указать дату, предложение будет видно в каталоге до конца этого дня по UTC.')}>
             <input name="deliveryBy" type="date" min={hasPreviousDate ? undefined : earliestDate} defaultValue={listing?.deliveryBy?.slice(0, 10)} required={isBuyer} />
           </Field>
         </div>

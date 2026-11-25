@@ -123,6 +123,9 @@ def main():
             checked(expired_login.status == 401, "Old admin credentials still work")
             user = api(admin.request, "POST", "auth/login", {"login": username, "password": PASSWORD})["user"]
             checked(user["username"] == username and not user["mustChangePassword"], "New admin credentials did not persist")
+            section(page, "Журнал действий")
+            expect(page.locator(".admin-table").get_by_text("Смена данных для входа", exact=True)).to_be_visible()
+            section(page, "Пользователи")
         complete("Гостевой редирект, вход и смена реквизитов администратора")
 
         api(buyer.request, "POST", "auth/login", {"login": "test2", "password": "test2"})

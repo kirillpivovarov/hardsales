@@ -1,10 +1,12 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, type User } from './api';
 import { useI18n } from './i18n';
 import { CountrySelect } from './CountrySelect';
 import { Button, Field, Notice } from './ui';
 import './workflows.css';
+
+const RegistrationCaptcha = lazy(() => import('./RegistrationCaptcha'));
 
 interface Challenge {
   challengeId: string;
@@ -15,6 +17,17 @@ interface Challenge {
 interface PendingChallenge extends Challenge {
   expiresAt: number;
   resendAt: number;
+}
+
+interface RegistrationDraft {
+  username: string;
+  email: string;
+  role: string;
+  participantType: string;
+  companyName?: string;
+  city: string;
+  country: string;
+  telegram: string;
 }
 
 interface AccountProps {
@@ -66,6 +79,9 @@ function AuthForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [draft, setDraft] = useState<RegistrationDraft>();
+  const [captchaToken, setCaptchaToken] = useState<string>();
+  const [captchaAttempt, setCaptchaAttempt] = useState(0);
   const isRegistering = mode === 'register';
 
   useEffect(() => {
@@ -87,6 +103,7 @@ function AuthForm({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy || (isRegistering && !challenge && !captchaToken)) return;
     setError('');
     setNotice('');
     const form = new FormData(event.currentTarget);
@@ -100,27 +117,38 @@ function AuthForm({
         finish(result.user);
         return;
       }
-      const body = isRegistering ? {
-        username: valueOf(form, 'username'),
-        email: valueOf(form, 'email'),
-        password: passwordOf(form),
-        role: valueOf(form, 'role'),
-        participantType,
-        ...(participantType === 'COMPANY' && { companyName: valueOf(form, 'companyName') }),
-        country: valueOf(form, 'country'),
-        city: valueOf(form, 'city'),
-        telegram: valueOf(form, 'telegram'),
-      } : { login: valueOf(form, 'login'), password: passwordOf(form) };
-
-      const result = await api<Challenge | { user: User }>(isRegistering ? '/auth/register' : '/auth/login', {
+      if (isRegistering) {
+        const fields: RegistrationDraft = {
+          username: valueOf(form, 'username'),
+          email: valueOf(form, 'email'),
+          role: valueOf(form, 'role'),
+          participantType,
+          ...(participantType === 'COMPANY' && { companyName: valueOf(form, 'companyName') }),
+          country: valueOf(form, 'country'),
+          city: valueOf(form, 'city'),
+          telegram: valueOf(form, 'telegram'),
+        };
+        const result = await api<Challenge>('/auth/register', {
+          method: 'POST',
+          body: { ...fields, password: passwordOf(form), captchaToken },
+        });
+        setDraft(fields);
+        storeChallenge(result);
+        return;
+      }
+      const result = await api<Challenge | { user: User }>('/auth/login', {
         method: 'POST',
-        body,
+        body: { login: valueOf(form, 'login'), password: passwordOf(form) },
       });
       if ('challengeId' in result) storeChallenge(result);
       else finish(result.user);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Не удалось завершить действие. Попробуйте ещё раз.');
     } finally {
+      if (isRegistering && !challenge) {
+        setCaptchaToken(undefined);
+        setCaptchaAttempt(attempt => attempt + 1);
+      }
       setBusy(false);
     }
   }
@@ -132,7 +160,7 @@ function AuthForm({
     setBusy(true);
     try {
       storeChallenge(await api<Challenge>('/auth/resend', { method: 'POST', body: { challengeId: challenge.challengeId } }));
-      setNotice('Новый код отправлен на почту.');
+      setNotice(isRegistering ? 'Запрос на повторную отправку принят.' : 'Новый код отправлен на почту.');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Не удалось отправить новый код.');
     } finally {
@@ -148,7 +176,9 @@ function AuthForm({
       <section className={`panel workflow-auth ${isRegistering && !challenge ? 'workflow-auth-wide' : ''}`} aria-labelledby="auth-title">
         <div className="workflow-intro">
           <h1 id="auth-title">{t(challenge ? isRegistering ? 'Подтвердите почту' : 'Подтвердите вход' : isRegistering ? 'Регистрация' : 'Вход в аккаунт')}</h1>
-          {challenge && <p>{t('Введите шестизначный код, отправленный на {email}.', { email: challenge.email })}</p>}
+          {challenge && <p>{t(isRegistering
+            ? 'Если на {email} пришло письмо, введите шестизначный код. Проверьте папку «Спам».'
+            : 'Введите шестизначный код, отправленный на {email}.', { email: challenge.email })}</p>}
           {isRegistering && !challenge && <p>{t('Создайте профиль, чтобы просматривать объявления и общаться с контрагентами.')}</p>}
         </div>
         <form className={challenge || !isRegistering ? 'workflow-stack' : 'form-grid workflow-form'} onSubmit={submit} aria-busy={busy} key={challenge ? challenge.challengeId : mode}>
@@ -176,7 +206,7 @@ function AuthForm({
           ) : isRegistering ? (
             <>
               <Field label={t('Роль')}>
-                <select name="role" defaultValue="BUYER">
+                <select name="role" defaultValue={draft?.role ?? 'BUYER'}>
                   <option value="BUYER">{t('Покупатель')}</option>
                   <option value="SELLER">{t('Продавец')}</option>
                 </select>
@@ -190,28 +220,33 @@ function AuthForm({
               {participantType === 'COMPANY' && (
                 <div className="workflow-span">
                   <Field label={t('Название компании')}>
-                    <input name="companyName" autoComplete="organization" minLength={2} maxLength={120} required />
+                    <input name="companyName" autoComplete="organization" defaultValue={draft?.companyName} minLength={2} maxLength={120} required />
                   </Field>
                 </div>
               )}
               <Field label={t('Логин')} hint={t('Введите от 3 до 32 латинских букв, цифр, точек, дефисов или подчёркиваний.')}>
-                <input name="username" autoComplete="username" pattern={usernameRules} minLength={3} maxLength={32} required />
+                <input name="username" autoComplete="username" autoCapitalize="none" spellCheck={false} defaultValue={draft?.username} pattern={usernameRules} minLength={3} maxLength={32} required />
               </Field>
               <Field label={t('Электронная почта')}>
-                <input name="email" type="email" autoComplete="email" maxLength={254} required />
+                <input name="email" type="email" autoComplete="email" defaultValue={draft?.email} maxLength={254} required />
               </Field>
-              <CountrySelect label={t('Страна')} name="country" autoComplete="country" defaultValue="RU" required />
+              <CountrySelect label={t('Страна')} name="country" autoComplete="country" defaultValue={draft?.country ?? 'RU'} required />
               <Field label={t('Город')}>
-                <input name="city" autoComplete="address-level2" minLength={2} maxLength={80} required />
+                <input name="city" autoComplete="address-level2" defaultValue={draft?.city} minLength={2} maxLength={80} required />
               </Field>
-              <Field label={t('Имя пользователя в Telegram')} hint={t('Контакт откроется собеседнику только по взаимному согласию.')}>
-                <input name="telegram" placeholder="@username" pattern={telegramRules} minLength={5} maxLength={33} required />
+              <Field label={t('Имя пользователя в Telegram')} hint={t('Укажите свой контакт. Он откроется собеседнику только по взаимному согласию.')}>
+                <input name="telegram" placeholder="@username" autoCapitalize="none" spellCheck={false} defaultValue={draft?.telegram} pattern={telegramRules} minLength={5} maxLength={33} required />
               </Field>
               <Field label={t('Пароль')} hint={t('Не менее 12 символов.')}>
                 <input name="password" type="password" autoComplete="new-password" minLength={12} maxLength={128} required />
               </Field>
+              <div className="workflow-span">
+                <Suspense fallback={<p role="status">{t('Загружаем проверку CAPTCHA…')}</p>}>
+                  <RegistrationCaptcha key={captchaAttempt} onToken={setCaptchaToken} />
+                </Suspense>
+              </div>
               {error && <div className="workflow-span"><Notice tone="error">{t(error)}</Notice></div>}
-              <div className="workflow-span"><Button type="submit" disabled={busy}>{t('Получить код')}</Button></div>
+              <div className="workflow-span"><Button type="submit" disabled={busy || !captchaToken}>{t('Получить код')}</Button></div>
             </>
           ) : (
             <>
@@ -228,7 +263,14 @@ function AuthForm({
         </form>
         <div className="workflow-auth-links">
           {challenge ? (
-            <Button type="button" variant="ghost" disabled={busy} onClick={() => { setChallenge(undefined); setError(''); setNotice(''); }}>{t('Вернуться к форме')}</Button>
+            <>
+              <Button type="button" variant="ghost" disabled={busy} onClick={() => {
+                setChallenge(undefined);
+                setError('');
+                setNotice('');
+              }}>{t('Вернуться к форме')}</Button>
+              {isRegistering && <p>{t('Уже есть аккаунт?')} <Link to={`/login${nextQuery}`}>{t('Войти')}</Link></p>}
+            </>
           ) : isRegistering ? (
             <p>{t('Уже есть аккаунт?')} <Link to={`/login${nextQuery}`}>{t('Войти')}</Link></p>
           ) : (
@@ -325,7 +367,7 @@ export function AccountPage({ user, onUser }: AccountProps) {
                   <input name="companyName" autoComplete="organization" defaultValue={user.companyName ?? ''} minLength={2} maxLength={120} required />
                 </Field>
               )}
-              <Field label={t('Имя пользователя в Telegram')} hint={t('Контакт открывается в чате по взаимному согласию.')}>
+              <Field label={t('Имя пользователя в Telegram')} hint={t('Контакт открывается в чате по взаимному согласию. После смены имени пользователя нужно обменяться контактами заново.')}>
                 <input name="telegram" defaultValue={user.telegram ?? ''} pattern={telegramRules} minLength={5} maxLength={33} required />
               </Field>
               {profileFeedback.error && <div className="workflow-span"><Notice tone="error">{t(profileFeedback.error)}</Notice></div>}

@@ -34,6 +34,8 @@ type Chat = {
   unreadCount: number;
   revealState: 'NONE' | 'REQUESTED' | 'ACCEPTED' | 'DECLINED';
   revealRequestedBy: string | null;
+  revealRequestId: string | null;
+  telegramChanged: { mine: boolean; partner: boolean } | null;
   telegram: { mine: string; partner: string } | null;
   status: 'ACTIVE' | 'RESTRICTED';
   hasReview: boolean;
@@ -62,10 +64,10 @@ function mergeMessages(previous: ChatMessage[], additions: ChatMessage[]) {
 
 function hasUnverifiedContact(body: string, telegram: Chat['telegram']) {
   const knownHandles = new Set(telegram ? [telegramName(telegram.mine).toLowerCase(), telegramName(telegram.partner).toLowerCase()] : []);
-  const contacts = body.matchAll(/(?:^|[^\p{L}\p{N}._%+-])@([a-z0-9_]{5,32})\b|\b(?:(?:t\.me|telegram\.me|telegram\.dog)\/|tg:\/\/resolve(?:\?|\/))([^\s<>]*)/giu);
+  const contacts = body.matchAll(/(?:^|[^\p{L}\p{N}._%+-])@([a-z0-9_]{5,32})\b|\b(?:(?:t\.me|telegram\.me|telegram\.dog)\/|tg:\/\/)([^\s<>]*)/giu);
   return [...contacts].some((match) => {
     const target = match[2]?.replace(/[.,!?;:)\]}]+$/, '') ?? '';
-    const handle = match[1] ?? (match[0].toLowerCase().startsWith('tg:') ? /^domain=([a-z0-9_]+)$/i.exec(target)?.[1] : target);
+    const handle = match[1] ?? (match[0].toLowerCase().startsWith('tg:') ? /^resolve[?/]+domain=([a-z0-9_]+)$/i.exec(target)?.[1] : target);
     return !handle || !knownHandles.has(handle.toLowerCase());
   });
 }
@@ -329,10 +331,10 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
     setBanner('');
     try {
       await work();
-      setRefresh((value) => value + 1);
     } catch (cause) {
       setActionError(errorMessage(cause, t));
     } finally {
+      setRefresh((value) => value + 1);
       setPending(false);
     }
   }
@@ -351,8 +353,11 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
   }
 
   function reveal(revealAction: RevealAction) {
+    const requestId = chat?.revealRequestId;
+    if (revealAction !== 'REQUEST' && !requestId) return;
     void action(async () => {
-      const updated = await api<Chat>(`/chats/${id}/reveal`, { method: 'PATCH', body: { action: revealAction } });
+      const body = revealAction === 'REQUEST' ? { action: revealAction } : { action: revealAction, requestId };
+      const updated = await api<Chat>(`/chats/${id}/reveal`, { method: 'PATCH', body });
       setChat(updated);
     });
   }
@@ -362,6 +367,7 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
   </section>;
 
   const isActive = chat.status === 'ACTIVE';
+  const currentTelegram = loadError ? null : chat.telegram;
   const mayReview = isActive && !chat.hasReview && (chat.canReview ?? (messages.some((message) => message.senderId === userId) && messages.some((message) => message.senderId !== userId)));
   const partnersPlace = [chat.partner.city, countryName(chat.partner.country, locale)].filter(Boolean).join(', ');
   const partnerRating = typeof chat.partner.rating === 'number' ? new Intl.NumberFormat(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(chat.partner.rating) : null;
@@ -374,7 +380,7 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
         <div className="chat-partner-details">
           {partnersPlace && <span>{partnersPlace}</span>}
           {partnerRating && chat.partner.ratingCount > 0
-            ? <span className="chat-partner-rating" role="img" aria-label={t('Рейтинг {rating} из 5, отзывов: {count}', { rating: partnerRating, count: chat.partner.ratingCount })}><span aria-hidden="true">★ {partnerRating} ({chat.partner.ratingCount})</span></span>
+            ? <span className="chat-partner-rating" role="img" aria-label={t('Рейтинг {rating} из 5, оценок: {count}', { rating: partnerRating, count: chat.partner.ratingCount })}><span aria-hidden="true">★ {partnerRating} ({chat.partner.ratingCount})</span></span>
             : <span>{t('Пока без отзывов')}</span>}
         </div>
         {chat.listing.status === 'ACTIVE' ? <Link to={`/listings/${chat.listing.id}`}>{chat.listing.title}</Link> : <span className="muted">{chat.listing.title}</span>}
@@ -386,7 +392,8 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
     </header>
 
     <div className="chat-notices">
-      <TelegramPanel chat={chat} userId={userId} pending={pending} reveal={reveal} />
+      {chat.telegramChanged && <TelegramChangeNotice change={chat.telegramChanged} />}
+      {!loadError && <TelegramPanel chat={chat} userId={userId} pending={pending} reveal={reveal} />}
       {!isActive && <Notice>{t('Переписка ограничена. Новые сообщения и обмен Telegram недоступны.')}</Notice>}
       {banner && <Notice tone="success">{banner}</Notice>}
       {loadError && <Notice tone="error">{loadError}</Notice>}
@@ -399,7 +406,7 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
       setForm(null);
       setBanner(t('Отзыв отправлен.'));
     })} />}
-    {form === 'report' && !chat.hasReport && <ReportForm pending={pending} close={() => setForm(null)} allowTelegram={chat.canReportTelegram ?? Boolean(chat.telegram)} submit={(reason, scope, details) => void action(async () => {
+    {form === 'report' && !chat.hasReport && <ReportForm pending={pending} close={() => setForm(null)} allowTelegram={chat.canReportTelegram ?? Boolean(currentTelegram)} submit={(reason, scope, details) => void action(async () => {
       await api(`/chats/${id}/reports`, { method: 'POST', body: { reason, scope, details } });
       setChat((previous) => previous && { ...previous, hasReport: true });
       setForm(null);
@@ -428,12 +435,21 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
     </div>
 
     {isActive && <form className="chat-composer" onSubmit={send}>
-      {hasUnverifiedContact(messageBody, chat.telegram) && <div className="chat-composer-warning"><Notice>{t(CONTACT_WARNING)}</Notice></div>}
+      {hasUnverifiedContact(messageBody, currentTelegram) && <div className="chat-composer-warning"><Notice>{t(CONTACT_WARNING)}</Notice></div>}
       <label className="chat-sr-only" htmlFor="chat-message-input">{t('Сообщение')}</label>
       <textarea id="chat-message-input" placeholder={t('Напишите сообщение…')} rows={2} value={messageBody} maxLength={MESSAGE_MAX_LENGTH} onChange={(event) => setMessageBody(event.target.value)} />
       <Button type="submit" disabled={pending || !messageBody.trim()}><Icon name="send" size={17} /> {t('Отправить')}</Button>
     </form>}
   </section>;
+}
+
+function TelegramChangeNotice({ change }: { change: NonNullable<Chat['telegramChanged']> }) {
+  const { t } = useI18n();
+  let message = 'Имя пользователя в Telegram изменилось.';
+  if (change.mine && change.partner) message = 'Вы оба изменили имена пользователей в Telegram.';
+  else if (change.mine) message = 'Вы изменили имя пользователя в Telegram.';
+  else if (change.partner) message = 'Собеседник изменил имя пользователя в Telegram.';
+  return <Notice>{t(message)} {t('Для повторного обмена контактами нужно новое согласие.')}</Notice>;
 }
 
 function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: string; pending: boolean; reveal: (action: RevealAction) => void }) {
@@ -443,7 +459,7 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
     const partner = telegramName(chat.telegram.partner);
     return <div className="chat-telegram chat-telegram-accepted">
       <Icon name="check" size={18} />
-      <div className="chat-telegram-copy">
+      <div className="chat-telegram-copy" role="status">
         <strong>{t('Telegram открыт для обоих')}</strong>
         <span>{t('Ваш Telegram: @{handle}', { handle: telegramName(chat.telegram.mine) })}</span>
       </div>
@@ -454,23 +470,23 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
     const outgoing = chat.revealRequestedBy === userId;
     return <div className="chat-telegram">
       <Icon name="lock" size={18} />
-      <div className="chat-telegram-copy">
+      <div className="chat-telegram-copy" role="status">
         <strong>{outgoing ? t('Запрос на обмен Telegram отправлен') : t('Собеседник предлагает обменяться Telegram')}</strong>
-        <span>{outgoing ? t('Когда собеседник согласится, вы оба увидите ники из профилей.') : t('При согласии ваш ник из профиля станет виден собеседнику, а вы увидите его ник.')}</span>
+        <span>{outgoing ? t('Когда собеседник согласится, вы оба увидите контакты во всех ваших чатах.') : t('При согласии вы оба увидите контакты из профилей во всех ваших чатах.')}</span>
       </div>
       {!outgoing && <div className="chat-telegram-actions">
-        <Button variant="ghost" disabled={pending} onClick={() => reveal('DECLINE')}>{t('Отклонить')}</Button>
-        <Button variant="secondary" disabled={pending} onClick={() => reveal('ACCEPT')}>{t('Согласиться')}</Button>
+        <Button variant="ghost" disabled={pending || !chat.revealRequestId} onClick={() => reveal('DECLINE')}>{t('Отклонить')}</Button>
+        <Button variant="secondary" disabled={pending || !chat.revealRequestId} onClick={() => reveal('ACCEPT')}>{t('Согласиться')}</Button>
       </div>}
     </div>;
   }
   return <div className="chat-telegram">
     <Icon name="lock" size={18} />
-    <div className="chat-telegram-copy">
+    <div className="chat-telegram-copy" role="status">
       <strong>{chat.revealState === 'DECLINED' ? t('Запрос на обмен Telegram отклонён') : t('Telegram скрыт')}</strong>
-      <span>{t('Ники из профилей откроются после согласия обоих собеседников.')}</span>
+      {!chat.telegramChanged && <span>{t('По взаимному согласию контакты откроются во всех ваших чатах с этим собеседником.')}</span>}
     </div>
-    <Button variant="secondary" disabled={pending} onClick={() => reveal('REQUEST')}>{t('Предложить обмен')}</Button>
+    <Button variant="secondary" disabled={pending} onClick={() => reveal('REQUEST')}>{chat.telegramChanged ? t('Предложить обмен заново') : t('Предложить обмен')}</Button>
   </div>;
 }
 
@@ -525,7 +541,7 @@ function ReportForm({ pending, close, allowTelegram, submit }: { pending: boolea
       {allowTelegram && <Field label={t('Где это произошло')}>
         <select value={scope} onChange={(event) => setScope(event.target.value as ReportScope)}>
           <option value="ON_PLATFORM">{t('В чате hwforai')}</option>
-          <option value="VERIFIED_TELEGRAM">{t('В Telegram из этого чата')}</option>
+          <option value="VERIFIED_TELEGRAM">{t('В Telegram, раскрытом на площадке')}</option>
         </select>
       </Field>}
     </div>

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { isEmail } from 'class-validator';
-import { hashPassword } from '../auth/auth.crypto';
+import { hashPassword, strongAdminPassword } from '../auth/auth.crypto';
 import { USERNAME_PATTERN } from '../auth/auth.dto';
 import { demoMode, isProduction } from '../config';
 import { DatabaseService } from './database.service';
@@ -13,11 +13,18 @@ const DEMO_ADMIN = '00000000-0000-4000-8000-000000000003';
 export async function seedConfiguredUsers(database: DatabaseService): Promise<void> {
   await database.transaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(18403, 2)');
+    const { rows: [admin] } = await client.query<{
+      id: string; status: string; email_verified_at: Date | null;
+    }>("SELECT id, status, email_verified_at FROM users WHERE role = 'ADMIN'");
     if (demoMode()) {
+      if (admin && admin.id !== DEMO_ADMIN) throw new Error('DEMO_MODE requires a separate database');
       const { rows: seeded } = await client.query(
         'SELECT 1 FROM schema_migrations WHERE file_name = $1', ['seed:demo-market'],
       );
-      if (seeded.length) return;
+      if (seeded.length) {
+        if (!admin) throw new Error('The seeded demo administrator is missing');
+        return;
+      }
 
       const demoUsers = [
         { id: DEMO_SELLER, username: 'test1', displayName: 'TechSupply', role: 'SELLER', city: 'Москва', company: 'ТехСапплай', telegram: 'hwforai_demo_seller' },
@@ -47,18 +54,20 @@ export async function seedConfiguredUsers(database: DatabaseService): Promise<vo
     if (isProduction()) {
       const demo = await client.query('SELECT 1 FROM users WHERE id = ANY($1::uuid[]) LIMIT 1', [[DEMO_SELLER, DEMO_BUYER, DEMO_ADMIN]]);
       if (demo.rowCount) throw new Error('Use a database without demo accounts for production');
+      if (admin && (admin.status !== 'ACTIVE' || !admin.email_verified_at)) {
+        throw new Error('The production administrator must be active and have a verified email');
+      }
     }
 
-    const administrators = await client.query("SELECT 1 FROM users WHERE role = 'ADMIN' LIMIT 1");
-    if (administrators.rowCount) return;
+    if (admin) return;
 
     const username = process.env.BOOTSTRAP_ADMIN_USERNAME?.trim() || 'admin';
     const email = process.env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
     const password = process.env.BOOTSTRAP_ADMIN_PASSWORD;
     if (!email && !password && !isProduction()) return;
-    if (!USERNAME_PATTERN.test(username) || !email || !isEmail(email) || !password ||
-        password.length < 12 || password.length > 128) {
-      throw new Error('Configure BOOTSTRAP_ADMIN_EMAIL and a 12–128 character BOOTSTRAP_ADMIN_PASSWORD');
+    if (!USERNAME_PATTERN.test(username) || !email || email.length > 254 || !isEmail(email) || !password ||
+        !strongAdminPassword(password, username)) {
+      throw new Error('Configure a valid BOOTSTRAP_ADMIN_USERNAME, BOOTSTRAP_ADMIN_EMAIL and a strong 12–128 character BOOTSTRAP_ADMIN_PASSWORD');
     }
     await client.query(`
       INSERT INTO users (username, display_name, email, password_hash, role, email_verified_at, must_change_password)
