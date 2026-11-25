@@ -30,7 +30,7 @@ interface Content {
 }
 
 function Brand() {
-  return <Link to="/" className="brand" aria-label="hwforai"><img src="/mark.svg" width="37" height="37" alt="" />
+  return <Link to="/" className="brand" aria-label="hwforai"><img src="/mark.svg" width="34" height="34" alt="" />
     <span>hwfor<span>ai</span></span></Link>;
 }
 
@@ -82,7 +82,7 @@ function Header({ user, onLogout, notificationRevision }: {
           {!user.mustChangePassword && Object.entries(features).some(([key, value]) => key.startsWith('feature_') && value === true) &&
             <NotificationLink key={user.id} revision={notificationRevision} />}
           <details className="account-menu" key={location.key}>
-            <summary className="button button-secondary" aria-label={t('{name}, меню профиля', { name: user.displayName || user.username })}><Icon name="user-round" size={17} /><span>{user.displayName || user.username}</span><Icon name="chevron-down" size={14} /></summary>
+            <summary className="button button-secondary" aria-label={t('{name}, меню профиля', { name: user.displayName || user.username })}><Icon name="user-round" size={17} /><span>{user.displayName || user.username}</span><Icon name="chevron-down" size={14} className="account-chevron" /></summary>
             <div className="menu-popover">
               <Link to="/account">{t('Профиль')}</Link>
               {member && features.feature_matching === true && <MatchesLink />}
@@ -200,12 +200,11 @@ function AppRoutes() {
         <Route path="/register" element={checking ? <Spinner /> : user ? <Navigate to={authDestination(user, location.search)} replace /> : <AuthPage mode="register" onUser={setUser}
           registrationMode={Object.hasOwn(features, 'feature_invites')
             ? features.feature_invites && features.registration_mode === 'INVITE' ? 'INVITE' : 'OPEN' : registrationMode} />} />
-        <Route path="/account" element={secure(user && <>
-          <AccountPage user={user} onUser={setUser} onboardingAvailable={features.feature_invites === true} />
-          {!isStaff(user) && features.feature_actuality === true && <div className="container workflow-page"><AccountActuality /></div>}
-          {!isStaff(user) && features.feature_representation === true && <div className="container workflow-page"><RepresentationAccount user={user} /></div>}
-          {!isStaff(user) && features.feature_trust_rating === true && <div className="container workflow-page"><TrustAccount /></div>}
-        </>)} />
+        <Route path="/account" element={secure(user && <AccountPage user={user} onUser={setUser} onboardingAvailable={features.feature_invites === true}>
+          {!isStaff(user) && features.feature_actuality === true && <AccountActuality />}
+          {!isStaff(user) && features.feature_representation === true && <RepresentationAccount user={user} />}
+          {!isStaff(user) && features.feature_trust_rating === true && <TrustAccount />}
+        </AccountPage>)} />
         <Route path="/onboarding" element={secure(user && <OnboardingPage user={user} onUser={setUser} />, 'MEMBER')} />
         <Route path="/notifications" element={secure(<NotificationsPage onRead={() => setNotificationRevision(value => value + 1)} />)} />
         <Route path="/matches" element={secure(<MatchesPage />, 'MEMBER')} />

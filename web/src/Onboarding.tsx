@@ -124,7 +124,7 @@ export function OnboardingPage({ user, onUser }: UserUpdateProps) {
   return (
     <div className="container workflow-page">
       <div className="workflow-intro">
-        <h1>{t('Анкета входа')}</h1>
+        <h1>{t('Анкета участника')}</h1>
         <p>{t('Ответы доступны администрации площадки.')}</p>
       </div>
       {!data ? (
@@ -150,7 +150,7 @@ export function OnboardingPage({ user, onUser }: UserUpdateProps) {
           <section className="panel workflow-section workflow-stack" aria-labelledby="onboarding-questions">
             <h2 id="onboarding-questions">{t('Анкета')}</h2>
             <p className="onboarding-count" aria-live="polite">
-              {t('Обязательных отвечено {done} из {total}', { done, total: required.length })}
+              {t('Заполнено {done} из {total} обязательных полей', { done, total: required.length })}
             </p>
             {required.map(questionField)}
             <h3>{t(data.optionalHeading)}</h3>

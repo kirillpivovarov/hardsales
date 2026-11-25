@@ -41,18 +41,22 @@ def main():
             executable_path=CHROMIUM_PATH, headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
-        desktop = browser.new_context(viewport={"width": 1440, "height": 1000})
+        desktop = browser.new_context(viewport={"width": 1440, "height": 1000}, color_scheme="dark")
         page = desktop.new_page()
         errors = []
+        home_image_requests = []
         page.on("pageerror", lambda error: errors.append(str(error)))
+        page.on("request", lambda request: home_image_requests.append(urlparse(request.url).path) if request.resource_type == "image" else None)
 
         page.goto(BASE_URL)
-        expect(page.get_by_role("heading", name="Серверное железо для ИИ")).to_be_visible()
+        expect(page.get_by_role("heading", name="Железо для ИИ", exact=True, level=1)).to_be_in_viewport()
+        expect(page.get_by_role("search")).to_be_in_viewport()
+        expect(page.locator("html")).to_have_css("color-scheme", "light")
         expect(page.get_by_role("heading", name="Войдите, чтобы увидеть объявления")).to_be_visible()
         expect(page.locator(".category-tile")).to_have_count(6)
         expect(page.locator(".listing-card")).to_have_count(0)
-        expect(page.locator(".hero-art img")).to_have_js_property("complete", True)
-        assert page.locator(".hero-art img").evaluate("(img) => img.naturalWidth > 0")
+        expect(page.locator(".market-hero img")).to_have_count(0)
+        assert "/images/rack.webp" not in home_image_requests, home_image_requests
         assert page.evaluate("document.fonts.check('800 28px Manrope', 'Каталог')")
         page.keyboard.press("Tab")
         expect(page.get_by_role("link", name="Перейти к содержимому")).to_be_focused()
@@ -99,6 +103,8 @@ def main():
             touch = mobile.new_page()
             touch.on("pageerror", lambda error: errors.append(str(error)))
             touch.goto(BASE_URL)
+            expect(touch.get_by_role("heading", name="Железо для ИИ", exact=True, level=1)).to_be_in_viewport()
+            expect(touch.get_by_role("search")).to_be_in_viewport()
             expect(touch.locator(".category-tile").first).to_be_visible()
             expect(touch.get_by_role("heading", name="Войдите, чтобы увидеть объявления")).to_be_visible()
             check_width(touch)
@@ -137,7 +143,7 @@ def main():
         expect(seller_page.locator(".listing-card").first).to_be_visible()
 
         assert not errors, errors
-        print("Catalogue UI passed: responsive layouts, guest lock, keyboard focus, filter draft, login and detail returns, both roles and empty state.")
+        print("Catalogue UI passed: image-free search header, responsive layouts, guest lock, keyboard focus, filter draft, login and detail returns, both roles and empty state.")
         browser.close()
 
 

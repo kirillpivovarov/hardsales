@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from './api'
 import { useExchange } from './Exchange'
 import { useI18n } from './i18n'
+import { StaffDialog } from './StaffDialog'
 import { DocumentDownload, documentKinds, documentStatuses, useTrustData, verificationLevels, type TrustDocument } from './Trust'
 import { Button, Field, Notice, Spinner } from './ui'
 
@@ -29,8 +30,9 @@ const chainStatuses: Record<string, string> = {
 const archiveStatuses: Record<string, string> = { APPROVED: 'Принят', REJECTED: 'Отклонён', PENDING: 'На проверке' }
 
 type Mutation = { path: string; method?: string; body?: unknown }
-function DecisionForm({ save, children, onSaved, label }: {
-  save: (data: FormData) => Mutation; children: React.ReactNode; onSaved: () => void; label?: string
+function DecisionForm({ save, children, onSaved, label, onCancel, onBusy, destructive = false }: {
+  save: (data: FormData) => Mutation; children: React.ReactNode; onSaved: () => void; label?: string;
+  onCancel?: () => void; onBusy?: (busy: boolean) => void; destructive?: boolean
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
@@ -38,18 +40,21 @@ function DecisionForm({ save, children, onSaved, label }: {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy) return
-    setBusy(true); setError('')
+    setBusy(true); onBusy?.(true); setError('')
     try {
       const { path, method = 'POST', body } = save(new FormData(event.currentTarget))
       await api(path, { method, body })
       onSaved()
     } catch (error) { setError((error as Error).message) }
-    finally { setBusy(false) }
+    finally { setBusy(false); onBusy?.(false) }
   }
   return <form className="trust-admin-form" onSubmit={submit} aria-busy={busy}>
     {children}
     {error && <Notice tone="error">{t(error)}</Notice>}
-    <Button type="submit" disabled={busy}>{t(label ?? 'Сохранить решение')}</Button>
+    <div className="admin-actions">
+      <Button type="submit" variant={destructive ? 'danger' : 'primary'} disabled={busy}>{t(label ?? 'Сохранить решение')}</Button>
+      {onCancel && <Button variant="secondary" onClick={onCancel} disabled={busy}>{t('Отмена')}</Button>}
+    </div>
   </form>
 }
 
@@ -215,40 +220,83 @@ function DealReviewForm({ deal, onSaved }: { deal: DealReview; onSaved: () => vo
 }
 
 const bases: Record<string, string> = { SELLER_WAREHOUSE: 'Склад продавца', DELIVERED: 'С доставкой' }
+type CorridorAction = { kind: 'create' } | { kind: 'edit' | 'delete'; row: Corridor }
+
 export function PriceCorridorsAdmin() {
   const { t, locale } = useI18n()
   const [version, setVersion] = useState(0)
-  const [target, setTarget] = useState<Corridor>()
-  const [error, setError] = useState('')
-  const result = useTrustData<Corridor[]>('/admin/corridors', version)
-  const refresh = () => { setTarget(undefined); setVersion(value => value + 1); setError('') }
-  async function remove(row: Corridor) {
-    try {
-      await api('/admin/corridors/' + encodeURIComponent(row.modelId) + '/' + row.basis, { method: 'DELETE' })
-      refresh()
-    } catch (cause) { setError((cause as Error).message) }
+  const [action, setAction] = useState<CorridorAction>()
+  const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState<{ key?: string; text: string }>()
+  const trigger = useRef<HTMLButtonElement>(null)
+  const heading = useRef<HTMLHeadingElement>(null)
+  const focusOverride = useRef<HTMLElement>(null)
+  const result = useTrustData<Corridor[]>('/admin/corridors', version, true)
+  const target = action?.kind !== 'create' ? action?.row : undefined
+  const targetKey = target && target.modelId + ':' + target.basis
+  const close = () => setAction(undefined)
+  function open(next: CorridorAction, button: HTMLButtonElement) {
+    trigger.current = button
+    focusOverride.current = null
+    setSaved(undefined)
+    setAction(next)
+  }
+  function refresh() {
+    if (action?.kind !== 'edit') focusOverride.current = heading.current
+    close()
+    setVersion(value => value + 1)
+    setSaved(action?.kind === 'delete'
+      ? { text: 'Ценовой ориентир удалён.' }
+      : { key: targetKey, text: 'Ценовой ориентир сохранён.' })
+  }
+  function save(form: FormData): Mutation {
+    const modelId = target?.modelId ?? String(form.get('modelId') ?? '').trim()
+    const basis = target?.basis ?? String(form.get('basis') ?? '')
+    if (!target && result.data?.some(row => row.modelId === modelId && row.basis === basis)) {
+      throw new Error('Для этой модели и условий поставки ориентир уже есть. Используйте «Редактировать» в списке.')
+    }
+    return {
+      path: '/admin/corridors/' + encodeURIComponent(modelId) + '/' + basis, method: 'PUT',
+      body: { minUsd: Number(form.get('min')), maxUsd: Number(form.get('max')) },
+    }
   }
   return <section className="workflow-stack">
-    <h3>{t('Коридоры цен')}</h3>
-    <p className="muted">{t('Диапазон указывается в USD за единицу. Значения доступны администратору.')}</p>
+    <h3 ref={heading} tabIndex={-1}>{t('Ценовые ориентиры')}</h3>
+    <p className="muted">{t('Диапазон указывается в долларах США за единицу оборудования. Его видит только администратор.')}</p>
+    <div className="admin-actions"><Button aria-haspopup="dialog" disabled={result.loading || !result.data}
+      onClick={event => open({ kind: 'create' }, event.currentTarget)}>
+      {t('Добавить ценовой ориентир')}
+    </Button></div>
     {result.loading && <Spinner />}
-    {(error || result.error) && <Notice tone="error">{t(error || result.error || '')}</Notice>}
-    <ul className="trust-item-list">{result.data?.map(row => <li key={row.modelId + row.basis}>
+    {result.error && <Notice tone="error">{t(result.error)}</Notice>}
+    {saved && !saved.key && <Notice tone="success">{t(saved.text)}</Notice>}
+    {result.data?.length === 0 && <p className="muted">{t('Ценовые ориентиры пока не настроены.')}</p>}
+    <ul className="trust-item-list">{result.data?.map(row => <li key={row.modelId + ':' + row.basis}>
       <strong>{row.modelName || row.modelId}</strong> · {t(bases[row.basis] ?? row.basis)}
       <p>{new Intl.NumberFormat(locale).format(Number(row.minUsd))} – {new Intl.NumberFormat(locale).format(Number(row.maxUsd))} USD</p>
-      <div className="admin-actions trust-admin-actions"><Button variant="secondary" onClick={() => setTarget(row)}>{t('Редактировать')}</Button>
-        <Button variant="ghost" onClick={() => void remove(row)}>{t('Убрать коридор')}</Button></div>
+      <div className="admin-actions trust-admin-actions">
+        <Button variant="secondary" aria-haspopup="dialog" onClick={event => open({ kind: 'edit', row }, event.currentTarget)}>{t('Редактировать')}</Button>
+        <Button variant="ghost" aria-haspopup="dialog" onClick={event => open({ kind: 'delete', row }, event.currentTarget)}>{t('Удалить')}</Button>
+      </div>
+      {saved?.key === row.modelId + ':' + row.basis && <Notice tone="success">{t(saved.text)}</Notice>}
     </li>)}</ul>
-    <DecisionForm key={target ? target.modelId + target.basis : 'new'} onSaved={refresh} label="Сохранить коридор" save={form => ({
-      path: '/admin/corridors/' + encodeURIComponent(String(form.get('modelId') ?? '').trim()) + '/' + form.get('basis'), method: 'PUT',
-      body: { minUsd: Number(form.get('min')), maxUsd: Number(form.get('max')) },
-    })}>
-      <Field label={t('Код модели')}><input name="modelId" required defaultValue={target?.modelId} placeholder="hgx-h100-8" maxLength={48} /></Field>
-      <Field label={t('Условия поставки')}><select name="basis" defaultValue={target?.basis}>
-        {Object.entries(bases).map(([code, text]) => <option key={code} value={code}>{t(text)}</option>)}
-      </select></Field>
-      <Field label={t('Минимум, USD')}><input name="min" type="number" min="0.01" step="0.01" required defaultValue={target?.minUsd} /></Field>
-      <Field label={t('Максимум, USD')}><input name="max" type="number" min="0.01" step="0.01" required defaultValue={target?.maxUsd} /></Field>
-    </DecisionForm>
+    {action && <StaffDialog title={t(action.kind === 'delete' ? 'Удалить ценовой ориентир' : action.kind === 'edit'
+      ? 'Изменить ценовой ориентир' : 'Добавить ценовой ориентир')} onClose={close} closeDisabled={busy}
+      returnFocus={trigger.current} returnFocusOverride={focusOverride}>
+      {action.kind === 'delete' ? <DecisionForm onSaved={refresh} onCancel={close} onBusy={setBusy} destructive label="Удалить"
+        save={() => ({ path: '/admin/corridors/' + encodeURIComponent(action.row.modelId) + '/' + action.row.basis, method: 'DELETE' })}>
+        <p>{t('Удалить ценовой ориентир для модели {model}?', { model: action.row.modelName || action.row.modelId })}</p>
+        <p>{t(bases[action.row.basis] ?? action.row.basis)}</p>
+      </DecisionForm> : <DecisionForm onSaved={refresh} onCancel={close} onBusy={setBusy} label="Сохранить" save={save}>
+        {target ? <p><strong>{target.modelName || target.modelId}</strong> · {t(bases[target.basis] ?? target.basis)}</p> : <>
+          <Field label={t('Код модели')}><input name="modelId" required placeholder="hgx-h100-8" maxLength={100} /></Field>
+          <Field label={t('Условия поставки')}><select name="basis">
+            {Object.entries(bases).map(([code, name]) => <option key={code} value={code}>{t(name)}</option>)}
+          </select></Field>
+        </>}
+        <Field label={t('Минимум, USD')}><input name="min" type="number" min="0.01" step="0.01" required defaultValue={target?.minUsd} /></Field>
+        <Field label={t('Максимум, USD')}><input name="max" type="number" min="0.01" step="0.01" required defaultValue={target?.maxUsd} /></Field>
+      </DecisionForm>}
+    </StaffDialog>}
   </section>
 }

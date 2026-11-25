@@ -1,7 +1,8 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api, isStaff, type User } from './api';
 import { useI18n } from './i18n';
+import { StaffDialog } from './StaffDialog';
 import { Button, Field, Notice, Spinner } from './ui';
 import './exchange-detail.css';
 
@@ -364,23 +365,56 @@ export function AdminPrincipals() {
   const [status, setStatus] = useState('UNCONFIRMED');
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
-  const [selected, setSelected] = useState('');
+  const [selected, setSelected] = useState<Principal>();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const focusOverride = useRef<HTMLElement>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
+  const [decisionError, setDecisionError] = useState('');
+  const [saved, setSaved] = useState<{ rowId?: string }>();
   useEffect(() => {
     const abort = new AbortController();
-    void api<NonNullable<typeof rows>>('/admin/principals?' + new URLSearchParams({ status, page: String(page) }), { signal: abort.signal }).then(setRows)
+    setError('');
+    void api<NonNullable<typeof rows>>('/admin/principals?' + new URLSearchParams({ status, page: String(page) }), { signal: abort.signal }).then(result => {
+      if (abort.signal.aborted) return;
+      const lastPage = Math.max(1, Math.ceil(result.total / result.limit));
+      if (page > lastPage) setPage(lastPage);
+      else setRows(result);
+    })
       .catch((cause: Error) => { if (!abort.signal.aborted) setError(cause.message); });
     return () => abort.abort();
   }, [page, status, revision]);
+  async function confirm(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected || pending) return;
+    const data = new FormData(event.currentTarget);
+    setPending(true);
+    setDecisionError('');
+    try {
+      await api('/admin/users/' + selected.userId + '/principals/' + selected.id + '/confirm', {
+        method: 'POST', body: { feeConfirmed: data.get('feeConfirmed') === 'true', reason: data.get('reason') },
+      });
+      const disappears = status !== '' && status !== 'CONFIRMED';
+      if (disappears) focusOverride.current = heading.current;
+      setSaved(disappears ? {} : { rowId: selected.id });
+      setSelected(undefined);
+      setRevision(value => value + 1);
+    } catch (cause) {
+      setDecisionError(cause instanceof Error ? cause.message : 'Не удалось подтвердить принципала.');
+    } finally {
+      setPending(false);
+    }
+  }
   return <div className="exchange-page">
-    <h2>{t('Принципалы')}</h2>
-    <Field label={t('Статус принципала')}><select value={status} onChange={event => { setStatus(event.target.value); setPage(1); setSelected(''); }}>
+    <h2 ref={heading} tabIndex={-1}>{t('Принципалы')}</h2>
+    <Field label={t('Статус принципала')}><select value={status} onChange={event => { setStatus(event.target.value); setPage(1); setSaved(undefined); }}>
       <option value="">{t('Все')}</option><option value="UNCONFIRMED">{t('Неподтверждённые')}</option>
       <option value="PUBLIC_ACK">{t('Ответ с общей почты')}</option><option value="DENIED">{t('Получен отказ')}</option>
       <option value="CONFIRMED">{t('Подтверждённые')}</option>
     </select></Field>
     {error && <Notice tone="error">{t(error)}</Notice>}
+    {saved && !saved.rowId && <Notice tone="success">{t('Полномочия принципала подтверждены.')}</Notice>}
     {!rows ? !error && <Spinner /> : !rows.items.length ? <Notice>{t('Записей нет.')}</Notice> : <ul className="exchange-records">
       {rows.items.map(principal => <li key={principal.id} className="panel exchange-record">
         <strong>{'PR-' + principal.number} · {principal.name}{principal.company ? ' · ' + principal.company : ''}</strong>
@@ -389,29 +423,31 @@ export function AdminPrincipals() {
         {principal.sameDomain && <Notice>{t('Домен совпадает с почтой агента.')}</Notice>}
         {principal.emailAck && <p>{t('Имя в ответе: {name}', { name: principal.emailAck.name ?? '' })}</p>}
         {principal.confirmedBy?.name && <p>{[principal.confirmedBy.name, principal.confirmedBy.position].filter(Boolean).join(', ')}</p>}
-        {selected === principal.id ? <form className="exchange-representation" onSubmit={async event => {
-          event.preventDefault();
-          const data = new FormData(event.currentTarget);
-          setPending(true);
-          setError('');
-          try {
-            await api('/admin/users/' + principal.userId + '/principals/' + principal.id + '/confirm', {
-              method: 'POST', body: { feeConfirmed: data.get('feeConfirmed') === 'true', reason: data.get('reason') },
-            });
-            setSelected('');
-            setRevision(value => value + 1);
-          } catch (cause) { setError(cause instanceof Error ? cause.message : 'Не удалось подтвердить принципала.'); }
-          finally { setPending(false); }
-        }}>
-          <Field label={t('Что проверено')}><select name="feeConfirmed">
+        <div className="exchange-actions"><Button variant="secondary" aria-haspopup="dialog" onClick={event => {
+          trigger.current = event.currentTarget;
+          focusOverride.current = null;
+          setSaved(undefined);
+          setDecisionError('');
+          setSelected(principal);
+        }}>{t('Подтвердить вручную')}</Button></div>
+        {saved?.rowId === principal.id && <Notice tone="success">{t('Полномочия принципала подтверждены.')}</Notice>}
+      </li>)}
+    </ul>}
+    {selected && <StaffDialog title={t('Подтвердить полномочия')} onClose={() => setSelected(undefined)}
+      returnFocus={trigger.current} returnFocusOverride={focusOverride} closeDisabled={pending}>
+        <form className="exchange-representation" onSubmit={confirm} aria-busy={pending}>
+          <p><strong>{'PR-' + selected.number} · {selected.name}{selected.company ? ' · ' + selected.company : ''}</strong></p>
+          {selected.confirmed && <Notice>{t('Повторная проверка обновит текущий результат.')}</Notice>}
+          <Field label={t('Что проверено')}><select name="feeConfirmed" required defaultValue={selected.confirmed ? '' : 'false'}>
+            {selected.confirmed && <option value="" disabled>{t('Выберите результат проверки')}</option>}
             <option value="false">{t('Только представительство')}</option><option value="true">{t('Представительство и вознаграждение')}</option>
           </select></Field>
           <Field label={t('Причина')}><textarea name="reason" minLength={3} maxLength={500} rows={2} required /></Field>
+          {decisionError && <Notice tone="error">{t(decisionError)}</Notice>}
           <div className="exchange-actions"><Button type="submit" disabled={pending}>{t('Подтвердить')}</Button>
-            <Button variant="ghost" onClick={() => setSelected('')}>{t('Отмена')}</Button></div>
-        </form> : <div className="exchange-actions"><Button variant="secondary" onClick={() => setSelected(principal.id)}>{t('Подтвердить вручную')}</Button></div>}
-      </li>)}
-    </ul>}
+            <Button variant="secondary" disabled={pending} onClick={() => setSelected(undefined)}>{t('Отмена')}</Button></div>
+        </form>
+    </StaffDialog>}
     {rows && rows.total > rows.limit && <nav className="exchange-actions" aria-label={t('Страницы принципалов')}>
       <Button variant="secondary" disabled={page <= 1} onClick={() => setPage(page - 1)}>{t('Назад')}</Button>
       <Button variant="secondary" disabled={page * rows.limit >= rows.total} onClick={() => setPage(page + 1)}>{t('Дальше')}</Button>

@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from './api';
 import { useI18n } from './i18n';
 import { countryName, formatMoney, terms } from './market';
+import { StaffDialog } from './StaffDialog';
 import { Button, Field, Notice, Spinner } from './ui';
 import './exchange-detail.css';
 
@@ -41,7 +42,9 @@ function localDate(date: string, locale: string, timezone: string) {
   return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: timezone }).format(new Date(date));
 }
 
-function SummaryRows({ records, admin, onSelect, reload }: { records: Page; admin?: boolean; onSelect?: (id: string) => void; reload: () => void }) {
+function SummaryRows({ records, admin, onSelect, reload }: {
+  records: Page; admin?: boolean; onSelect?: (id: string, trigger: HTMLButtonElement) => void; reload: () => void;
+}) {
   const { t, locale } = useI18n();
   if (!records.items.length) return <Notice>{t('Записей раскрытия пока нет.')}</Notice>;
   return <ul className="exchange-records">
@@ -52,7 +55,7 @@ function SummaryRows({ records, admin, onSelect, reload }: { records: Page; admi
       {record.partner && <span>{record.partner.nickname} · {record.partner.companyName ?? t('Компания не указана')}</span>}
       {admin && <span>{[record.partyA?.nickname, record.partyB?.nickname].filter(Boolean).join(' / ')}</span>}
       <div className="exchange-actions">
-        {onSelect ? <Button variant="secondary" onClick={() => onSelect(record.id)}>{t('Открыть запись')}</Button>
+        {onSelect ? <Button variant="secondary" aria-haspopup="dialog" onClick={event => onSelect(record.id, event.currentTarget)}>{t('Открыть запись')}</Button>
           : <Link className="button button-secondary" to={'/disclosures/' + record.id}>{t('Открыть запись {number}', { number: record.number })}</Link>}
         {!admin && <Known record={record} reload={reload} />}
       </div>
@@ -136,6 +139,7 @@ function DisclosureRecord({ id, admin = false }: { id: string; admin?: boolean }
   const [revision, setRevision] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
+  const [noteAdded, setNoteAdded] = useState(false);
   const path = (admin ? '/admin/disclosures/' : '/disclosures/') + encodeURIComponent(id);
   const result = useRecord<RecordDetail>(path, revision);
   const reload = () => setRevision(value => value + 1);
@@ -167,13 +171,16 @@ function DisclosureRecord({ id, admin = false }: { id: string; admin?: boolean }
     {!admin && <div className="exchange-actions"><Link className="button button-secondary" to={'/chats/' + record.chatId}>{t('Открыть чат')}</Link><Known record={record} reload={reload} /></div>}
     {admin && <form className="panel exchange-record" onSubmit={async event => {
       event.preventDefault();
+      if (pending) return;
       const form = event.currentTarget;
       const data = new FormData(form);
       setError('');
+      setNoteAdded(false);
       setPending(true);
       try {
         await api(path + '/notes', { method: 'POST', body: { text: data.get('text') } });
         form.reset();
+        setNoteAdded(true);
         reload();
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : 'Не удалось добавить заметку.');
@@ -184,6 +191,7 @@ function DisclosureRecord({ id, admin = false }: { id: string; admin?: boolean }
       <p className="muted">{t('Идентификатор чата')}: <code>{record.chatId}</code></p>
       <Field label={t('Заметка модератора')}><textarea name="text" rows={3} minLength={10} maxLength={2000} required /></Field>
       {error && <Notice tone="error">{t(error)}</Notice>}
+      {noteAdded && <Notice tone="success">{t('Заметка добавлена.')}</Notice>}
       <Button type="submit" disabled={pending}>{t('Добавить заметку')}</Button>
     </form>}
   </>;
@@ -203,39 +211,52 @@ export function AdminDisclosures() {
   const { t } = useI18n();
   const [params, setParams] = useSearchParams();
   const selected = params.get('id') ?? '';
+  const trigger = useRef<HTMLButtonElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const focusOverride = useRef<HTMLElement>(null);
   const [filters, setFilters] = useState('');
   const [page, setPage] = useState(1);
   const result = useRecord<Page>('/admin/disclosures?page=' + page + filters, 0);
-  function setSelected(id: string) {
+  function setSelected(id: string, target?: HTMLButtonElement) {
     const next = new URLSearchParams(params);
-    if (id) next.set('id', id);
-    else next.delete('id');
+    if (id) {
+      trigger.current = target ?? null;
+      focusOverride.current = null;
+      next.set('id', id);
+    } else {
+      next.delete('id');
+      if (!trigger.current?.isConnected) focusOverride.current = heading.current;
+    }
     setParams(next, { replace: !id, preventScrollReset: true });
   }
   return <div className="exchange-page">
-    <h2>{t('Журнал раскрытий')}</h2>
-    {selected ? <><Button variant="ghost" onClick={() => setSelected('')}>{t('К журналу раскрытий')}</Button><DisclosureRecord key={selected} id={selected} admin /></> :
-      <>
-        <form className="exchange-filter" onSubmit={event => {
-          event.preventDefault();
-          const data = new FormData(event.currentTarget);
-          const params = new URLSearchParams();
-          for (const key of ['q', 'from', 'to', 'userId']) {
-            const value = String(data.get(key) ?? '').trim();
-            if (value) params.set(key, value);
-          }
-          setFilters(params.size ? '&' + params : '');
-          setPage(1);
-        }}>
-          <Field label={t('Поиск')}><input name="q" type="search" maxLength={200} /></Field>
-          <Field label={t('Участник (ID)')}><input name="userId" maxLength={36} /></Field>
-          <Field label={t('Дата от')}><input name="from" type="date" /></Field>
-          <Field label={t('Дата до')}><input name="to" type="date" /></Field>
-          <Button type="submit" variant="secondary">{t('Найти')}</Button>
-        </form>
-        {!result ? <Spinner /> : result.error ? <Notice tone="error">{t(result.error)}</Notice> : result.data && <>
-          <SummaryRows records={result.data} onSelect={setSelected} reload={() => {}} admin /><Pager records={result.data} setPage={setPage} />
-        </>}
-      </>}
+    <h2 ref={heading} tabIndex={-1}>{t('Журнал раскрытий')}</h2>
+    <form className="exchange-filter" onSubmit={event => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      const params = new URLSearchParams();
+      for (const key of ['q', 'from', 'to', 'userId']) {
+        const value = String(data.get(key) ?? '').trim();
+        if (value) params.set(key, value);
+      }
+      setFilters(params.size ? '&' + params : '');
+      setPage(1);
+    }}>
+      <Field label={t('Поиск')}><input name="q" type="search" maxLength={200} /></Field>
+      <Field label={t('Участник (ID)')}><input name="userId" maxLength={36} /></Field>
+      <Field label={t('Дата от')}><input name="from" type="date" /></Field>
+      <Field label={t('Дата до')}><input name="to" type="date" /></Field>
+      <Button type="submit" variant="secondary">{t('Найти')}</Button>
+    </form>
+    {!result ? <Spinner /> : result.error ? <Notice tone="error">{t(result.error)}</Notice> : result.data && <>
+      <SummaryRows records={result.data} onSelect={setSelected} reload={() => {}} admin /><Pager records={result.data} setPage={setPage} />
+    </>}
+    {selected && <StaffDialog key={selected} title={t('Запись раскрытия')} onClose={() => setSelected('')}
+      returnFocus={trigger.current} returnFocusOverride={focusOverride}>
+      <div className="exchange-page">
+        <DisclosureRecord id={selected} admin />
+      </div>
+      <Button variant="secondary" onClick={() => setSelected('')}>{t('К журналу раскрытий')}</Button>
+    </StaffDialog>}
   </div>;
 }

@@ -14,7 +14,7 @@
   gap: 8px;
   text-align: left;
   padding: 9px 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--control-line);
   border-radius: 8px;
   background: var(--bg);
   color: var(--fg);
@@ -42,7 +42,7 @@
   background: var(--surface);
   color: var(--fg);
   font-size: 14px;
-  box-shadow: 0 8px 20px #0007;
+  box-shadow: var(--shadow-popover);
 }
 
 .country-select-options [role='option'] {
@@ -55,7 +55,8 @@
 }
 
 .country-select-options [aria-selected='true'] {
-  color: var(--accent);
+  color: var(--blue-strong);
+  font-weight: 750;
 }
 
 .country-select-options [role='option']:hover,

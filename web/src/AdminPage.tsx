@@ -1,9 +1,9 @@
-import { lazy, Suspense, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, isStaff, type User } from './api'
 import { useI18n } from './i18n'
 import { ListingForm } from './ListingForm'
+import { StaffDialog } from './StaffDialog'
 import { CountrySelect } from './CountrySelect'
 import { categoryIcons, countryName } from './market'
 import { Button, Field, Notice, Spinner } from './ui'
@@ -455,28 +455,6 @@ function ReferenceRecords({ tab, version, edit }: { tab: 'categories' | 'content
   </>
 }
 
-function AdminDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  const dialog = useRef<HTMLDialogElement>(null)
-  const titleId = useId()
-  const { t } = useI18n()
-  useEffect(() => {
-    const node = dialog.current
-    const trigger = document.activeElement
-    node?.showModal()
-    return () => {
-      node?.close()
-      if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({ preventScroll: true })
-    }
-  }, [])
-  return createPortal(<dialog ref={dialog} className="admin-dialog panel" aria-labelledby={titleId} onCancel={event => { event.preventDefault(); onClose() }}>
-    <div className="admin-dialog-header">
-      <h2 id={titleId}>{title}</h2>
-      <Button variant="ghost" type="button" onClick={onClose}>{t('Закрыть')}</Button>
-    </div>
-    {children}
-  </dialog>, document.body)
-}
-
 function MutationForm({
   onClose, onSaved, save, children, buttonLabel,
 }: {
@@ -881,7 +859,7 @@ export function ListingModeration({ user, listing, owner, onSaved }: {
       {t('Действия модерации')}
     </Button>
     {saved && <span className="context-moderation-feedback" role="status">{t('Изменения сохранены.')}</span>}
-    {open && <AdminDialog title={t('Действия модерации')} onClose={close}>
+    {open && <StaffDialog title={t('Действия модерации')} onClose={close}>
       {choice && selected ? <>
         <Button variant="ghost" onClick={() => setChoice(undefined)}>{t('К списку действий')}</Button>
         <h3 ref={targetHeading} tabIndex={-1} className="context-moderation-target">{selected.title}</h3>
@@ -897,7 +875,7 @@ export function ListingModeration({ user, listing, owner, onSaved }: {
         </button>
         {owner && <Button variant="secondary" onClick={() => setChoice('user')}>{t('Модерировать профиль')}</Button>}
       </div>}
-    </AdminDialog>}
+    </StaffDialog>}
   </div>
 }
 
@@ -1010,7 +988,7 @@ export function AdminPage({ user }: { user?: User | null }) {
         {(tab === 'categories' || tab === 'content' || tab === 'locales') && <ReferenceRecords tab={tab} {...props} />}
       </section>
     </div>
-    {editor && <AdminDialog title={editorTitle(editor, t)} onClose={close}><EditorFields editor={editor} close={close} saved={refresh} /></AdminDialog>}
+    {editor && <StaffDialog title={editorTitle(editor, t)} onClose={close}><EditorFields editor={editor} close={close} saved={refresh} /></StaffDialog>}
   </div>
 }
 

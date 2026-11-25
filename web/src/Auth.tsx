@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react';
+import { lazy, Suspense, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, isStaff, type User } from './api';
 import { useI18n } from './i18n';
@@ -35,6 +35,7 @@ interface AccountProps {
   user: User;
   onUser: (user: User) => void;
   onboardingAvailable?: boolean;
+  children?: ReactNode;
 }
 
 const usernameRules = String.raw`[A-Za-z0-9][A-Za-z0-9_.\-]{2,31}`;
@@ -301,7 +302,7 @@ function AuthForm({
   );
 }
 
-export function AccountPage({ user, onUser, onboardingAvailable = false }: AccountProps) {
+export function AccountPage({ user, onUser, onboardingAvailable = false, children }: AccountProps) {
   const { t } = useI18n();
   const navigate = useNavigate();
   const [profileFeedback, setProfileFeedback] = useState({ error: '', notice: '', busy: false });
@@ -403,7 +404,7 @@ export function AccountPage({ user, onUser, onboardingAvailable = false }: Accou
         )}
         {!staff && (onboardingAvailable || user.onboardingState === 'REQUIRED') && (
           <section className="panel workflow-section" aria-labelledby="account-onboarding-title">
-            <h2 id="account-onboarding-title">{t('Анкета входа')}</h2>
+            <h2 id="account-onboarding-title">{t('Анкета участника')}</h2>
             <Link className="button button-secondary" to="/onboarding">
               {t(user.onboardingState === 'DONE' ? 'Открыть анкету' : 'Заполнить анкету')}
             </Link>
@@ -437,6 +438,7 @@ export function AccountPage({ user, onUser, onboardingAvailable = false }: Accou
           <Link className="button button-secondary" to="/my-listings">{t('Мои объявления')}</Link>
           <Link className="button button-secondary" to="/chats">{t('Сообщения')}</Link>
         </nav>}
+        {children}
       </div>
     </div>
   );

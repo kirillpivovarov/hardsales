@@ -115,29 +115,30 @@ export function ExchangeSettings() {
   const { reload } = useExchange();
   const [values, setValues] = useState<{ key: string; value: Settings[string] }[]>();
   const [busy, setBusy] = useState<string>();
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
-  useEffect(() => { void api<typeof values>('/admin/settings').then(setValues).catch(err => setError(err.message)); }, []);
+  const [feedback, setFeedback] = useState<{ key: string; text: string; tone: 'error' | 'success' }>();
+  const [loadError, setLoadError] = useState('');
+  useEffect(() => { void api<typeof values>('/admin/settings').then(setValues).catch(err => setLoadError(err.message)); }, []);
   async function save(event: FormEvent<HTMLFormElement>, key: string, current: Settings[string]) {
     event.preventDefault();
+    if (busy) return;
     const field = new FormData(event.currentTarget).get('value');
     const value = typeof current === 'boolean' ? field === 'on' : typeof current === 'number' ? Number(field)
       : Array.isArray(current) ? String(field ?? '').trim().split(/[,\s]+/).filter(Boolean) : String(field ?? '');
-    setBusy(key); setError(''); setMessage('');
+    setBusy(key); setFeedback(undefined);
     try {
       const row = await api<{ key: string; value: Settings[string] }>('/admin/settings/' + key, { method: 'PUT', body: { value } });
       setValues(list => list?.map(item => item.key === key ? row : item));
       reload();
-      setMessage(t('Изменения сохранены.'));
-    } catch (err) { setError((err as Error).message); }
+      setFeedback({ key, text: 'Изменения сохранены.', tone: 'success' });
+    } catch (err) { setFeedback({ key, text: (err as Error).message, tone: 'error' }); }
     finally { setBusy(undefined); }
   }
   return <div className="workflow-stack">
     <h2>{t('Настройки биржи')}</h2>
-    {error && <Notice tone="error">{t(error)}</Notice>}
-    {message && <Notice tone="success">{message}</Notice>}
-    {!values && !error && <Spinner />}
-    {values?.map(row => <form key={row.key} className="exchange-setting" onSubmit={event => void save(event, row.key, row.value)}>
+    {loadError && <Notice tone="error">{t(loadError)}</Notice>}
+    {!values && !loadError && <Spinner />}
+    {values?.map(row => <div key={row.key} className="workflow-stack">
+      <form className="exchange-setting" aria-busy={busy === row.key} onSubmit={event => void save(event, row.key, row.value)}>
       <Field label={t(settingNames[row.key] ?? row.key)}>
         {typeof row.value === 'boolean' ? <input type="checkbox" name="value" defaultChecked={row.value} /> :
           row.key === 'registration_mode' ? <select name="value" defaultValue={String(row.value)}>
@@ -145,8 +146,10 @@ export function ExchangeSettings() {
           </select> : <input type={typeof row.value === 'number' ? 'number' : 'text'} name="value"
             defaultValue={Array.isArray(row.value) ? row.value.join(', ') : row.value} required />}
       </Field>
-      <Button type="submit" variant="secondary" disabled={busy === row.key}>{t('Сохранить')}</Button>
-    </form>)}
+        <Button type="submit" variant="secondary" disabled={Boolean(busy)}>{t('Сохранить')}</Button>
+      </form>
+      {feedback?.key === row.key && <Notice tone={feedback.tone}>{t(feedback.text)}</Notice>}
+    </div>)}
   </div>;
 }
 

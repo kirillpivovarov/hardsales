@@ -10,7 +10,7 @@
 }
 
 .match-filters {
-  margin-bottom: 1rem;
+  margin-bottom: 1.2rem;
 }
 
 .match-card-header {
@@ -27,7 +27,7 @@
 
 .match-card,
 .match-dialog {
-  padding: 1.25rem;
+  padding: clamp(1rem, 2.8vw, 1.65rem);
   overflow-wrap: anywhere;
 }
 
@@ -50,7 +50,15 @@
   margin-inline-start: 0.45rem;
 }
 
+.match-card-listings > div {
+  min-width: 0;
+  padding: .85rem .95rem;
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
 .match-card-listings a {
+  color: var(--blue-strong);
   text-decoration: underline;
   text-underline-offset: 0.2em;
 }
@@ -75,25 +83,25 @@
 }
 
 .match-badge {
-  background: var(--surface, var(--panel));
+  background: var(--surface-raised);
   border: 1px solid var(--line);
   color: var(--text);
   display: inline-block;
   font-size: 0.82rem;
   font-weight: 600;
   padding: 0.2rem 0.55rem;
-  border-radius: 0.35rem;
+  border-radius: 6px;
 }
 
 .match-badge.match-full {
-  background: #e5f6ec;
-  color: #175331;
-  border-color: #b8e6cc;
+  background: var(--success-bg);
+  color: var(--success);
+  border-color: #bfdecd;
 }
 
 .match-badge.match-partial {
-  background: #fff5dc;
-  color: #714c09;
+  background: var(--warning-bg);
+  color: var(--warning);
   border-color: #ecd8a3;
 }
 
@@ -105,7 +113,7 @@
 }
 
 .match-dialog::backdrop {
-  background: rgb(10 20 30 / 60%);
+  background: rgb(17 32 50 / 48%);
 }
 
 .match-dialog h2 {
@@ -127,6 +135,13 @@
 
 .match-rate-row small {
   align-self: center;
+}
+
+.match-filters .button,
+.match-actions .button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 600px) {

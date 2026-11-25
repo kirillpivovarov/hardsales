@@ -7,7 +7,7 @@ import { ListingExchangeBadges } from './ListingExchangeBadges';
 import { ListingProof, PaymentRisk } from './Trust';
 import { useExchange } from './Exchange';
 import { ListingModeration } from './AdminPage';
-import { ListingVisual } from './Catalog';
+import { ListingVisual, listingIllustration } from './Catalog';
 import { StartChatButton } from './ChatPage';
 import { useI18n } from './i18n';
 import { ListingGallery } from './ListingImages';
@@ -21,6 +21,23 @@ const nonPublicStatus: Record<string, string> = {
   FROZEN: 'Заморожено',
   BANNED: 'Заблокировано',
 };
+
+type ListingFact = [label: string, value: string | number | null];
+
+function ListingFacts({ title, facts, translate }: {
+  title: string;
+  facts: ListingFact[];
+  translate: (source: string) => string;
+}) {
+  const visible = facts.filter(([, value]) => value !== null && value !== '');
+  if (!visible.length) return null;
+  return <section className="detail-section">
+    <h2>{title}</h2>
+    <dl className="detail-facts">
+      {visible.map(([label, value]) => <div key={label}><dt>{translate(label)}</dt><dd>{value}</dd></div>)}
+    </dl>
+  </section>;
+}
 
 export function ListingDetail({ user }: { user: User | null }) {
   const { features } = useExchange();
@@ -85,7 +102,10 @@ export function ListingDetail({ user }: { user: User | null }) {
   const stringTerm = (value: string | null) => value ? t(terms[value] ?? value) : '';
   const localCountry = (value: string | null) => value ? countryName(value, locale) : '';
   const inclusion = (value: boolean) => t(value ? 'Включено' : 'Отдельно');
-  const properties = [
+  const ownerPlace = [listing.owner.city, localCountry(listing.owner.country)].filter(Boolean).join(', ');
+  const illustration = listingIllustration(listing);
+  const hasMedia = Boolean(listing.images?.length || illustration);
+  const properties: ListingFact[] = [
     ['Количество', listing.quantity],
     ['Наличие', stringTerm(listing.availability)],
     ['Состояние', listing.condition === 'ANY' ? t('Любое') : stringTerm(listing.condition)],
@@ -100,7 +120,6 @@ export function ListingDetail({ user }: { user: User | null }) {
     ['НДС', stringTerm(listing.vat)],
     ['Контрагенты', t(listing.counterparty === 'COMPANY' ? 'Только компании' : 'Компании и частные лица')],
     ['Способы оплаты', listing.paymentMethods.map(stringTerm).join(', ')],
-    ...Object.entries(listing.specs ?? {}),
   ];
   return <div className="container detail-page">
     {back}
@@ -114,33 +133,36 @@ export function ListingDetail({ user }: { user: User | null }) {
         {Object.hasOwn(nonPublicStatus, listing.status) && <span className="contextual-status">{t(nonPublicStatus[listing.status])}</span>}
       </div>}
     </div>
-    <div className="detail-layout">
-      <div className="detail-main">
+    <div className={'detail-layout' + (hasMedia ? ' detail-layout-with-media' : '')}>
+      {hasMedia && <div className="detail-media">
         {listing.images?.length ? <ListingGallery key={listing.id} images={listing.images} /> : <>
           <ListingVisual listing={listing} category={category} />
-          {listing.imageKey && <span className="illustration-note">{t('Иллюстрация оборудования')}</span>}
+          <span className="illustration-note">{t('Иллюстрация оборудования')}</span>
         </>}
-        <section className="panel detail-panel"><h2>{t('Описание')}</h2><p className="preserve-text">{listing.description}</p></section>
-        <section className="panel detail-panel"><h2>{t('Условия сделки')}</h2><dl>
-          {properties.filter(([,value]) => value !== null && value !== undefined && value !== '').map(([label, value]) => <div key={label}><dt>{t(String(label))}</dt><dd>{value}</dd></div>)}
-        </dl></section>
-        {features.feature_trust_rating === true && <PaymentRisk listing={listing} />}
-        {myListing && features.feature_trust_rating === true && <ListingProof listingId={listing.id} kind={listing.kind} />}
-      </div>
+      </div>}
       <aside className="panel detail-panel detail-seller">
-        <span className="muted">{t(listing.kind === 'SELL' ? 'Цена' : 'Бюджет')}</span>
-        <strong className="detail-price">{price}</strong>
-        <div className="detail-divider" />
-        <div className="profile-inline"><span className="profile-avatar"><Icon name="user-round" size={21} /></span><div>
-          <strong>{ownerName}</strong><span>{listing.owner.city}{listing.owner.country ? ', ' + countryName(listing.owner.country, locale) : ''}</span>
-        </div></div>
-        <div className="reputation"><Icon name="star" size={16} /> {listing.owner.ratingCount > 0 && listing.owner.rating != null ?
-          <span>{new Intl.NumberFormat(locale, {maximumFractionDigits:1}).format(listing.owner.rating)} · {t('Оценок: {count}', {count:listing.owner.ratingCount})}</span> : <span>{t('Пока без оценок')}</span>}</div>
+        <div className="detail-offer-price">
+          <span className="muted">{t(listing.kind === 'SELL' ? 'Цена' : 'Бюджет')}</span>
+          <strong className="detail-price">{price}</strong>
+        </div>
+        {features.feature_trust_rating === true && <PaymentRisk listing={listing} />}
         {myListing && ['ACTIVE','ARCHIVED'].includes(listing.status) && <Link className="button button-secondary" to={`/listings/${listing.id}/edit`}>{t('Редактировать')}</Link>}
         {compatible && listing.status === 'ACTIVE' && (companyOnly
           ? <p className="muted">{t('Автор принимает обращения только от компаний.')}</p>
           : <StartChatButton listingId={listing.id} />)}
+        <div className="detail-divider" />
+        <div className="profile-inline"><span className="profile-avatar"><Icon name="user-round" size={21} /></span><div>
+          <strong>{ownerName}</strong>{ownerPlace && <span>{ownerPlace}</span>}
+        </div></div>
+        <div className="reputation"><Icon name="star" size={16} /> {listing.owner.ratingCount > 0 && listing.owner.rating != null ?
+          <span>{new Intl.NumberFormat(locale, {maximumFractionDigits:1}).format(listing.owner.rating)} · {t('Оценок: {count}', {count:listing.owner.ratingCount})}</span> : <span>{t('Пока без оценок')}</span>}</div>
       </aside>
+      <div className="detail-main">
+        <section className="detail-section"><h2>{t('Описание')}</h2><p className="preserve-text">{listing.description}</p></section>
+        <ListingFacts title={t('Характеристики')} facts={Object.entries(listing.specs ?? {})} translate={t} />
+        <ListingFacts title={t('Условия сделки')} facts={properties} translate={t} />
+        {myListing && features.feature_trust_rating === true && <ListingProof listingId={listing.id} kind={listing.kind} />}
+      </div>
     </div>
   </div>;
 }

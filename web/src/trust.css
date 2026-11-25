@@ -3,21 +3,23 @@
   flex-wrap: wrap;
   gap: .4rem;
   padding: 0;
-  margin: .65rem 0;
+  margin: .55rem 0;
   list-style: none;
 }
 .trust-tag {
   display: inline-block;
   padding: .22rem .6rem;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 6px;
+  background: var(--surface-raised);
   font-size: .83rem;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 .trust-level-0 { color: var(--muted); }
-.trust-level-1 { color: #184970; background: #edf5fc; border-color: #b9d4eb; }
-.trust-level-2 { color: #235131; background: #eff7ee; border-color: #b9d7bc; }
-.trust-warning { color: #872f31; background: #fdf1f1; border-color: #edc3c5; }
+.trust-level-1 { color: var(--blue-strong); background: var(--blue-soft); border-color: #c4ddf5; }
+.trust-level-2 { color: var(--success); background: var(--success-bg); border-color: #bfdecd; }
+.trust-warning { color: var(--warning); background: var(--warning-bg); border-color: #ecd8a3; }
 .trust-heading {
   display: flex;
   align-items: baseline;
@@ -25,7 +27,8 @@
   flex-wrap: wrap;
   gap: .55rem;
 }
-.trust-heading > strong { white-space: nowrap; }
+.trust-heading > strong { overflow-wrap: anywhere; }
+.trust-heading > h2 + strong { color: var(--blue-strong); font-size: 1.25rem; font-variant-numeric: tabular-nums; }
 .trust-item-list {
   padding: 0;
   list-style: none;
@@ -36,8 +39,9 @@
 .trust-item-list > li,
 .trust-card {
   border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: .8rem;
+  border-radius: 10px;
+  background: var(--surface-raised);
+  padding: .85rem 1rem;
   min-width: 0;
 }
 .trust-item-list p, .trust-card p { margin: .3rem 0; }
@@ -50,13 +54,18 @@
   display: grid;
   gap: .6rem;
   min-width: 0;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  border: 1px solid var(--line);
+  border-radius: 12px;
 }
+.trust-payment-fields legend { padding-inline: .45rem; font-weight: 750; }
 .trust-payment-option {
   display: grid;
   gap: .35rem;
   padding: .45rem 0;
   border-bottom: 1px solid var(--line);
 }
+.trust-payment-option:last-child { border-bottom: 0; }
 .trust-payment-option summary { color: var(--muted); font-size: .9rem; }
 .trust-payment-option p { margin: .35rem 0; }
 .trust-upload { min-width: 0; }

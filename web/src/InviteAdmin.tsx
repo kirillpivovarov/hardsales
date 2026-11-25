@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api } from './api';
 import { useI18n } from './i18n';
+import { StaffDialog } from './StaffDialog';
 import { Button, Field, Notice } from './ui';
 
 type InviteStatus = 'OPEN' | 'USED' | 'REVOKED' | 'EXPIRED';
@@ -40,6 +41,12 @@ export function InvitesPanel() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [revoking, setRevoking] = useState<Invite>();
+  const revokeTrigger = useRef<HTMLButtonElement>(null);
+  const revokeFallback = useRef<HTMLElement>(null);
+  const revokeFocusOverride = useRef<HTMLElement>(null);
+  const searchField = useRef<HTMLInputElement>(null);
+  const [revokeError, setRevokeError] = useState('');
+  const [rowFeedback, setRowFeedback] = useState<{ id: string; text: string; tone: 'success' | 'error' }>();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -47,7 +54,12 @@ export function InvitesPanel() {
     if (status) query.set('status', status);
     if (search) query.set('q', search);
     setLoading(true);
-    void api<InvitePage>('/admin/invites?' + query, { signal: controller.signal }).then(setData)
+    void api<InvitePage>('/admin/invites?' + query, { signal: controller.signal }).then(result => {
+      if (controller.signal.aborted) return;
+      const lastPage = Math.max(1, Math.ceil(result.total / result.limit));
+      if (page > lastPage) setPage(lastPage);
+      else setData(result);
+    })
       .catch((cause) => {
         if (!controller.signal.aborted) setError(errorMessage(cause, 'Не удалось загрузить приглашения.'));
       }).finally(() => {
@@ -63,6 +75,7 @@ export function InvitesPanel() {
     const form = new FormData(event.currentTarget);
     setError('');
     setNotice('');
+    setRowFeedback(undefined);
     setPage(1);
     setSearch(String(form.get('q') ?? '').trim());
     setStatus(String(form.get('status') ?? ''));
@@ -77,6 +90,7 @@ export function InvitesPanel() {
     setBusy(true);
     setError('');
     setNotice('');
+    setRowFeedback(undefined);
     try {
       const { items } = await api<{ items: Invite[] }>('/admin/invites', {
         method: 'POST',
@@ -103,31 +117,35 @@ export function InvitesPanel() {
     if (!revoking || busy) return;
     const form = new FormData(event.currentTarget);
     setBusy(true);
-    setError('');
-    setNotice('');
+    setRevokeError('');
     try {
       await api('/admin/invites/' + revoking.id + '/revoke', {
         method: 'PATCH', body: { reason: String(form.get('reason') ?? '').trim() },
       });
+      revokeFocusOverride.current = revokeFallback.current;
       setRevoking(undefined);
-      setNotice(t('Приглашение отозвано.'));
+      if (status === 'OPEN') {
+        setNotice(t('Приглашение отозвано.'));
+      } else {
+        setRowFeedback({ id: revoking.id, text: t('Приглашение отозвано.'), tone: 'success' });
+      }
       setRevision((current) => current + 1);
     } catch (cause) {
-      setError(errorMessage(cause, 'Не удалось отозвать приглашение.'));
+      setRevokeError(errorMessage(cause, 'Не удалось отозвать приглашение.'));
     } finally {
       setBusy(false);
     }
   }
 
-  async function copy(code: string, link: boolean) {
+  async function copy(invite: Invite, link: boolean) {
     setNotice('');
     setError('');
     try {
-      const value = link ? new URL('/register?invite=' + encodeURIComponent(code), window.location.origin).href : code;
+      const value = link ? new URL('/register?invite=' + encodeURIComponent(invite.code), window.location.origin).href : invite.code;
       await navigator.clipboard.writeText(value);
-      setNotice(t(link ? 'Ссылка скопирована.' : 'Код скопирован.'));
+      setRowFeedback({ id: invite.id, text: t(link ? 'Ссылка скопирована.' : 'Код скопирован.'), tone: 'success' });
     } catch {
-      setError(t('Копирование недоступно. Выделите и скопируйте код в таблице.'));
+      setRowFeedback({ id: invite.id, text: t('Копирование недоступно. Выделите и скопируйте код в таблице.'), tone: 'error' });
     }
   }
 
@@ -148,22 +166,24 @@ export function InvitesPanel() {
 
       {(error || notice) && <Notice tone={error ? 'error' : 'success'}>{t(error || notice)}</Notice>}
       {revoking && (
-        <section className="panel workflow-section workflow-stack" aria-labelledby="revoke-invite">
-          <h2 id="revoke-invite">{t('Отозвать приглашение {code}', { code: revoking.code })}</h2>
+        <StaffDialog title={t('Отозвать приглашение {code}', { code: revoking.code })}
+          onClose={() => setRevoking(undefined)} closeDisabled={busy}
+          returnFocus={revokeTrigger.current} returnFocusOverride={revokeFocusOverride}>
           <form className="workflow-stack" onSubmit={revoke} aria-busy={busy}>
-            <Field label={t('Причина отзыва')}><textarea name="reason" minLength={3} maxLength={500} rows={3} autoFocus required /></Field>
+            <Field label={t('Причина отзыва')}><textarea name="reason" minLength={3} maxLength={500} rows={3} required /></Field>
+            {revokeError && <Notice tone="error">{t(revokeError)}</Notice>}
             <div className="onboarding-notice">
-              <Button type="submit" disabled={busy}>{t('Отозвать приглашение')}</Button>
-              <Button type="button" variant="secondary" onClick={() => setRevoking(undefined)}>{t('Отмена')}</Button>
+              <Button type="submit" variant="danger" disabled={busy}>{t('Отозвать приглашение')}</Button>
+              <Button type="button" variant="secondary" disabled={busy} onClick={() => setRevoking(undefined)}>{t('Отмена')}</Button>
             </div>
           </form>
-        </section>
+        </StaffDialog>
       )}
 
       <section className="panel workflow-section workflow-stack" aria-labelledby="invite-list">
         <h2 id="invite-list">{t('Приглашения')}</h2>
         <form className="form-grid workflow-form" onSubmit={applySearch}>
-          <Field label={t('Поиск по приглашениям')}><input type="search" name="q" maxLength={120} /></Field>
+          <Field label={t('Поиск по приглашениям')}><input ref={searchField} type="search" name="q" maxLength={120} /></Field>
           <Field label={t('Статус')}><select name="status">
             <option value="">{t('Все статусы')}</option>
             {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}
@@ -185,14 +205,19 @@ export function InvitesPanel() {
                   <td data-label={t('Действует до')}><time dateTime={invite.expiresAt}>{dates.format(new Date(invite.expiresAt))}</time></td>
                   <td data-label={t('Статус')}>{t(statusLabels[invite.status])}{invite.usedBy && ' · ' + invite.usedBy.displayName}</td>
                   <td><div className="onboarding-notice">
-                    <Button type="button" variant="ghost" onClick={() => void copy(invite.code, false)}>{t('Копировать код')}</Button>
+                    <Button type="button" variant="ghost" onClick={() => void copy(invite, false)}>{t('Копировать код')}</Button>
                     {invite.status === 'OPEN' && <>
-                      <Button type="button" variant="ghost" onClick={() => void copy(invite.code, true)}>{t('Копировать ссылку')}</Button>
-                      <Button type="button" variant="ghost" onClick={() => { setError(''); setNotice(''); setRevoking(invite); }}>
+                      <Button type="button" variant="ghost" onClick={() => void copy(invite, true)}>{t('Копировать ссылку')}</Button>
+                      <Button type="button" variant="ghost" aria-haspopup="dialog" onClick={event => {
+                        revokeTrigger.current = event.currentTarget;
+                        revokeFallback.current = status === 'OPEN' ? searchField.current : event.currentTarget.parentElement?.querySelector('button') ?? null;
+                        revokeFocusOverride.current = null;
+                        setError(''); setNotice(''); setRowFeedback(undefined); setRevokeError(''); setRevoking(invite);
+                      }}>
                         {t('Отозвать')}
                       </Button>
                     </>}
-                  </div></td>
+                  </div>{rowFeedback?.id === invite.id && <Notice tone={rowFeedback.tone}>{rowFeedback.text}</Notice>}</td>
                 </tr>
               ))}</tbody>
             </table>

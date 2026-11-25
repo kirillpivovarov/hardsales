@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api, type User } from './api';
 import { useI18n } from './i18n';
+import { StaffDialog } from './StaffDialog';
 import { Button, Field, Notice, Spinner } from './ui';
 import './models.css';
 
@@ -29,21 +30,27 @@ interface ModelOptions {
 }
 interface ModelSuggestion { id: string; nameRu: string; matchedAlias: string }
 
-function useModelData<T>(path: string | null, revision = 0) {
-  const key = path === null ? null : `${path}:${revision}`;
-  const [result, setResult] = useState<{ key: string; data?: T; error?: string }>();
+function useModelData<T>(path: string | null, revision = 0, keepPreviousData = false) {
+  const [result, setResult] = useState<{ path: string; revision: number; data?: T; error?: string }>();
   useEffect(() => {
-    if (!path || !key) return;
+    if (!path) return;
     const abort = new AbortController();
     void api<T>(path, { signal: abort.signal }).then(data => {
-      if (!abort.signal.aborted) setResult({ key, data });
+      if (!abort.signal.aborted) setResult({ path, revision, data });
     }).catch((error: Error) => {
-      if (!abort.signal.aborted) setResult({ key, error: error.message });
+      if (!abort.signal.aborted) setResult(previous => ({
+        path, revision, error: error.message, data: keepPreviousData && previous?.path === path ? previous.data : undefined,
+      }));
     });
     return () => abort.abort();
-  }, [path, key]);
-  const current = key && result?.key === key ? result : undefined;
-  return { data: current?.data, error: current?.error, loading: Boolean(key && !current) };
+  }, [path, revision, keepPreviousData]);
+  const previous = result?.path === path ? result : undefined;
+  const current = previous?.revision === revision ? previous : undefined;
+  return {
+    data: (keepPreviousData ? previous : current)?.data,
+    error: current?.error,
+    loading: Boolean(path && !current),
+  };
 }
 
 function useDebounce(value: string, delay: number) {
@@ -206,7 +213,9 @@ const decisions: Record<string, string> = { ACCEPT: 'Принять', MERGE: 'О
 const codes: Record<string, string> = { PCI_IDS: 'База PCI ID', NVIDIA_PAGES: 'Страницы NVIDIA', WIKIPEDIA_DGX: 'Википедия DGX' };
 const lines = (value: FormDataEntryValue | null) => String(value ?? '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
 
-function AdminModelEditor({ model, options, done, cancel }: { model?: AdminModel; options: ModelOptions; done: (message?: string) => void; cancel: () => void }) {
+function AdminModelEditor({ model, options, done, cancel, returnFocus }: {
+  model?: AdminModel; options: ModelOptions; done: (message?: string) => void; cancel: () => void; returnFocus: HTMLButtonElement;
+}) {
   const { t } = useI18n();
   const [category, setCategory] = useState(model?.categorySlug ?? options.categories[0]?.slug ?? '');
   const [family, setFamily] = useState(model?.family ?? '');
@@ -214,7 +223,7 @@ function AdminModelEditor({ model, options, done, cancel }: { model?: AdminModel
   const [group, setGroup] = useState(model?.analogGroupId ?? '');
   const familyCode = options.families.find(item => item.key === family)?.code;
   const groups = options.groups.filter(item => item.categorySlug === category && item.familyCode === familyCode && item.rack === (formFactor === 'rack'));
-  return <StaffForm title={t(model ? 'Редактирование модели' : 'Новая модель')} cancel={cancel} done={done} save={async fields => {
+  return <StaffForm title={t(model ? 'Редактирование модели' : 'Новая модель')} cancel={cancel} done={done} returnFocus={returnFocus} save={async fields => {
     const body = Object.fromEntries(fields);
     const result = await api<{ aliasConflicts?: { alias: string; modelId: string }[] }>(`/admin/models${model ? `/${model.id}` : ''}`, {
       method: model ? 'PATCH' : 'POST', body: { ...body, aliases: lines(fields.get('aliases')), pciIds: lines(fields.get('pciIds')), source: lines(fields.get('source')) },
@@ -222,7 +231,7 @@ function AdminModelEditor({ model, options, done, cancel }: { model?: AdminModel
     return result.aliasConflicts?.length ? t('Сохранено. Совпадающие псевдонимы: {aliases}', { aliases: result.aliasConflicts.map(item => `${item.alias} (${item.modelId})`).slice(0, 5).join(', ') }) : undefined;
   }}>
     <div className="form-grid model-form">
-      <Field label={t('Код модели')} hint={t('Можно оставить пустым, чтобы сформировать код из названия.') }>
+      <Field label={t('Код модели')} hint={model ? undefined : t('Можно оставить пустым, чтобы сформировать код из названия.')}>
         <input name="id" defaultValue={model?.id} pattern={String.raw`[a-z0-9][a-z0-9\-]{1,47}`} maxLength={48} disabled={Boolean(model)} />
       </Field>
       <Field label={t('Название на русском')}><input name="nameRu" defaultValue={model?.nameRu} minLength={2} maxLength={120} required /></Field>
@@ -250,15 +259,16 @@ function AdminModelEditor({ model, options, done, cancel }: { model?: AdminModel
   </StaffForm>;
 }
 
-function StaffForm({ title, children, save, done, cancel, submit }: {
+function StaffForm({ title, children, save, done, cancel, returnFocus, submit, submitDisabled = false }: {
   title: string; children?: ReactNode; save: (form: FormData) => Promise<string | void>;
-  done: (message?: string) => void; cancel: () => void; submit?: string;
+  done: (message?: string) => void; cancel: () => void; returnFocus: HTMLButtonElement; submit?: string; submitDisabled?: boolean;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   async function handle(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy || submitDisabled) return;
     const data = new FormData(event.currentTarget);
     setBusy(true);
     setError('');
@@ -266,11 +276,40 @@ function StaffForm({ title, children, save, done, cancel, submit }: {
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Не удалось сохранить изменения.'); }
     finally { setBusy(false); }
   }
-  return <form className="model-editor" onSubmit={handle} aria-busy={busy}>
-    <h3>{title}</h3>{children}{error && <Notice tone="error">{t(error)}</Notice>}
-    <div className="admin-actions"><Button variant="ghost" onClick={cancel} disabled={busy}>{t('Отмена')}</Button>
-      <Button type="submit" disabled={busy}>{t(submit ?? 'Сохранить')}</Button></div>
-  </form>;
+  return <StaffDialog title={title} onClose={cancel} closeDisabled={busy} returnFocus={returnFocus}>
+    <form className="model-editor" onSubmit={handle} aria-busy={busy}>
+      <fieldset className="model-editor-fields" disabled={busy}>{children}</fieldset>
+      {error && <Notice tone="error">{t(error)}</Notice>}
+      <div className="admin-actions"><Button variant="ghost" onClick={cancel} disabled={busy}>{t('Отмена')}</Button>
+        <Button type="submit" disabled={busy || submitDisabled}>{t(busy ? 'Сохранение…' : submit ?? 'Сохранить')}</Button></div>
+    </form>
+  </StaffDialog>;
+}
+
+function useModelListFocus(loading: boolean) {
+  const list = useRef<HTMLUListElement>(null);
+  const pending = useRef<{ trigger: HTMLButtonElement; row: HTMLLIElement; index: number } | undefined>(undefined);
+  function restoreAfterSave(trigger: HTMLButtonElement) {
+    const row = trigger.closest('li');
+    if (!row || !list.current) return;
+    pending.current = { trigger, row, index: Array.from(list.current.children).indexOf(row) };
+  }
+  useEffect(() => {
+    const target = pending.current;
+    if (loading || !target) return;
+    pending.current = undefined;
+    // List refreshes can move the edited row or remove the action that just completed.
+    if (target.trigger.isConnected) {
+      if (document.activeElement === target.trigger) target.trigger.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    if (document.activeElement !== document.body) return;
+    const rows = list.current?.children;
+    const row = target.row.isConnected ? target.row : rows?.[Math.min(target.index, rows.length - 1)];
+    const next = row?.querySelector<HTMLButtonElement>('button:not(:disabled)') ?? list.current;
+    next?.focus();
+  }, [loading]);
+  return { list, restoreAfterSave };
 }
 
 function Pager({ page, limit, total, change }: { page: number; limit: number; total: number; change: (page: number) => void }) {
@@ -304,16 +343,25 @@ function StaffModels() {
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('');
   const [page, setPage] = useState(1);
-  const [editing, setEditing] = useState<{ mode: 'edit' | 'merge' | 'status' | 'approve'; model?: AdminModel }>();
+  const [editing, setEditing] = useState<
+    { mode: 'edit'; trigger: HTMLButtonElement; model?: AdminModel } |
+    { mode: 'merge' | 'status' | 'approve'; trigger: HTMLButtonElement; model: AdminModel }
+  >();
   const [revision, setRevision] = useState(0);
   const [message, setMessage] = useState('');
   const query = new URLSearchParams({ q: useDebounce(search.trim(), 250), status, page: String(page), limit: '20' });
-  const models = useModelData<ModelPage<AdminModel>>(`/admin/models?${query}`, revision);
-  const options = useModelData<ModelOptions>('/admin/models/options', revision);
-  const selected = editing?.model;
-  const active = useModelData<{ families: ModelFamily[] }>(editing?.mode === 'merge' && selected ? modelPath(selected.categorySlug) : null);
+  const models = useModelData<ModelPage<AdminModel>>(`/admin/models?${query}`, revision, true);
+  const options = useModelData<ModelOptions>('/admin/models/options');
+  const active = useModelData<{ families: ModelFamily[] }>(editing?.mode === 'merge' ? modelPath(editing.model.categorySlug) : null, revision);
+  const mergeTargets = modelMergeTargets(active.data, editing?.model?.categorySlug);
+  const { list, restoreAfterSave } = useModelListFocus(models.loading);
+  const action = editing?.mode === 'merge' ? 'Объединить модели' : editing?.mode === 'approve' ? 'Одобрить модель'
+    : editing?.model?.status === 'DISABLED' ? 'Включить модель' : 'Выключить модель';
   function done(msg?: string) {
-    setMessage(msg ?? 'Изменения сохранены.'); setEditing(undefined); setRevision(current => current + 1);
+    if (editing) restoreAfterSave(editing.trigger);
+    setMessage(msg ?? 'Изменения сохранены.');
+    setEditing(undefined);
+    setRevision(current => current + 1);
   }
   return <div className="model-panel">
     <div className="form-grid model-form">
@@ -322,31 +370,41 @@ function StaffModels() {
         <option value="">{t('Все статусы')}</option>{Object.entries(modelStatus).map(([key, label]) => <option value={key} key={key}>{t(label)}</option>)}
       </select></Field>
     </div>
-    <div><Button onClick={() => setEditing({ mode: 'edit' })}>{t('Добавить модель')}</Button></div>
+    <div><Button aria-haspopup="dialog" disabled={!options.data} onClick={event => setEditing({ mode: 'edit', trigger: event.currentTarget })}>{t('Добавить модель')}</Button></div>
     {message && <Notice tone="success">{t(message)}</Notice>}
     {(models.error || options.error) && <Notice tone="error">{t(models.error ?? options.error ?? '')}</Notice>}
-    {editing?.mode === 'edit' && options.data && <AdminModelEditor key={selected?.id ?? 'new'} model={selected} options={options.data} done={done} cancel={() => setEditing(undefined)} />}
-    {editing && selected && editing.mode !== 'edit' && <StaffForm key={editing.mode + selected.id} title={modelName(selected, locale)} done={done} cancel={() => setEditing(undefined)} save={async fields => {
-      const mode = editing.mode;
-      const body = mode === 'status' ? { status: selected.status === 'DISABLED' ? 'ACTIVE' : 'DISABLED', reason: fields.get('reason') }
-        : mode === 'merge' ? { intoModelId: fields.get('intoModelId'), reason: fields.get('reason') } : { reason: fields.get('reason') };
-      await api(`/admin/models/${selected.id}/${mode}`, { method: mode === 'status' ? 'PATCH' : 'POST', body });
-    }}>
-      {editing.mode === 'merge' && <MergeTarget families={active.data?.families ?? []} />}
+    {editing?.mode === 'edit' && options.data && <AdminModelEditor key={editing.model?.id ?? 'new'} model={editing.model} options={options.data}
+      done={done} cancel={() => setEditing(undefined)} returnFocus={editing.trigger} />}
+    {editing && editing.mode !== 'edit' && <StaffForm key={editing.mode + editing.model.id} title={t(action)} submit={action}
+      done={done} cancel={() => setEditing(undefined)} returnFocus={editing.trigger}
+      submitDisabled={editing.mode === 'merge' && !mergeTargets.length} save={async fields => {
+        const { mode, model } = editing;
+        const body = mode === 'status' ? { status: model.status === 'DISABLED' ? 'ACTIVE' : 'DISABLED', reason: fields.get('reason') }
+          : mode === 'merge' ? { intoModelId: fields.get('intoModelId'), reason: fields.get('reason') } : { reason: fields.get('reason') };
+        await api(`/admin/models/${model.id}/${mode}`, { method: mode === 'status' ? 'PATCH' : 'POST', body });
+      }}>
+      <p className="model-editor-target">{modelName(editing.model, locale)}</p>
+      {editing.mode === 'merge' && <MergeTarget models={mergeTargets} loading={active.loading} error={active.error} />}
       <Field label={t('Причина')}><textarea name="reason" minLength={3} maxLength={500} required={editing.mode !== 'approve'} /></Field>
     </StaffForm>}
-    {models.loading && <Spinner />}
-    <ul className="model-records">
+    {(options.loading || (models.loading && !models.data)) && <Spinner />}
+    <ul ref={list} tabIndex={-1} aria-label={t('Модели оборудования')} aria-busy={models.loading} className="model-records">
       {models.data?.items.map(model => <li key={model.id}>
         <div><strong>{modelName(model, locale)}</strong><div className="muted">{model.id} · {model.categorySlug} · {model.familyLabel ?? '—'} · {t(modelStatus[model.status])}</div>
-          <div className="muted">{t('Объявления: {count}', { count: model.listingCount })}</div>{model.source.length > 0 && <div className="muted">{model.source.join(', ')}</div>}</div>
+          <div className="muted">{t('Объявления: {count}', { count: model.listingCount })}</div>
+          {model.source.length > 0 && <details className="model-record-sources">
+            <summary>{t('Источники')}</summary><ul className="model-source-urls muted">{[...new Set(model.source)].map(source => <li key={source}>{source}</li>)}</ul>
+          </details>}
+        </div>
         <div className="admin-actions">
-          <Button variant="secondary" onClick={() => setEditing({ mode: 'edit', model })}>{t('Редактировать')}</Button>
+          <Button variant="secondary" aria-haspopup="dialog" disabled={!options.data}
+            onClick={event => setEditing({ mode: 'edit', model, trigger: event.currentTarget })}>{t('Редактировать')}</Button>
           {model.status === 'PENDING' && model.proposedBy && <>
-            <Button variant="secondary" onClick={() => setEditing({ mode: 'approve', model })}>{t('Одобрить')}</Button>
-            <Button variant="ghost" onClick={() => setEditing({ mode: 'merge', model })}>{t('Объединить')}</Button>
+            <Button variant="secondary" aria-haspopup="dialog" onClick={event => setEditing({ mode: 'approve', model, trigger: event.currentTarget })}>{t('Одобрить')}</Button>
+            <Button variant="ghost" aria-haspopup="dialog" onClick={event => setEditing({ mode: 'merge', model, trigger: event.currentTarget })}>{t('Объединить')}</Button>
           </>}
-          {(model.status !== 'PENDING' || model.proposedBy) && <Button variant="ghost" onClick={() => setEditing({ mode: 'status', model })}>{t(model.status === 'DISABLED' ? 'Включить' : 'Выключить')}</Button>}
+          {(model.status !== 'PENDING' || model.proposedBy) && <Button variant="ghost" aria-haspopup="dialog"
+            onClick={event => setEditing({ mode: 'status', model, trigger: event.currentTarget })}>{t(model.status === 'DISABLED' ? 'Включить' : 'Выключить')}</Button>}
           {model.status === 'PENDING' && !model.proposedBy && <span className="muted">{t('Рассмотрите модель в обновлениях каталога.')}</span>}
         </div>
       </li>)}
@@ -356,11 +414,17 @@ function StaffModels() {
   </div>;
 }
 
-function MergeTarget({ families }: { families: ModelFamily[] }) {
-  const { t } = useI18n();
+function modelMergeTargets(data?: { families: ModelFamily[] }, category?: string) {
+  return data?.families.flatMap(group => group.models).filter(model => model.status === 'ACTIVE' && model.categorySlug === category) ?? [];
+}
+
+function MergeTarget({ models, loading, error }: { models: HardwareModel[]; loading: boolean; error?: string }) {
+  const { t, locale } = useI18n();
+  if (loading) return <Spinner />;
+  if (error) return <Notice tone="error">{t(error)}</Notice>;
+  if (!models.length) return <Notice>{t('В этой категории нет действующих моделей для объединения.')}</Notice>;
   return <Field label={t('Объединить с моделью')}><select name="intoModelId" required>
-    <option value="">{t('Выберите модель')}</option>{families.flatMap(group => group.models).filter(model => model.status === 'ACTIVE')
-      .map(model => <option value={model.id} key={model.id}>{model.nameRu}</option>)}
+    <option value="">{t('Выберите модель')}</option>{models.map(model => <option value={model.id} key={model.id}>{modelName(model, locale)}</option>)}
   </select></Field>;
 }
 
@@ -372,13 +436,21 @@ function SyncQueue() {
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState('PENDING');
   const [kind, setKind] = useState('');
-  const [selected, setSelected] = useState<SyncItem>();
+  const [selected, setSelected] = useState<{ item: SyncItem; trigger: HTMLButtonElement }>();
   const [decision, setDecision] = useState('');
   const [revision, setRevision] = useState(0);
-  const queue = useModelData<ModelPage<SyncItem> & { pending: number }>(`/admin/catalog-sync/items?${new URLSearchParams({ status, kind, page: String(page), limit: '20' })}`, revision);
-  const active = useModelData<{ families: ModelFamily[] }>(decision === 'MERGE' && selected ? modelPath(selected.modelCategory ?? 'gpu') : null);
+  const [message, setMessage] = useState('');
+  const queue = useModelData<ModelPage<SyncItem> & { pending: number }>(`/admin/catalog-sync/items?${new URLSearchParams({ status, kind, page: String(page), limit: '20' })}`, revision, true);
+  const category = selected?.item.modelCategory ?? 'gpu';
+  const active = useModelData<{ families: ModelFamily[] }>(decision === 'MERGE' && selected ? modelPath(category) : null, revision);
+  const mergeTargets = modelMergeTargets(active.data, category);
+  const { list, restoreAfterSave } = useModelListFocus(queue.loading);
   const date = (value: string) => new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value));
-  const choices = selected?.kind === 'NEW_MODEL' ? ['ACCEPT', 'MERGE', 'REJECT'] : selected?.kind === 'LINK_PCI' ? ['LINK', 'REJECT'] : ['ACK', 'REJECT'];
+  const choices = selected?.item.kind === 'NEW_MODEL' ? ['ACCEPT', 'MERGE', 'REJECT'] : selected?.item.kind === 'LINK_PCI' ? ['LINK', 'REJECT'] : ['ACK', 'REJECT'];
+  function close() {
+    setSelected(undefined);
+    setDecision('');
+  }
   return <div className="model-panel">
     <h3>{t('Ожидают проверки: {count}', { count: queue.data?.pending ?? 0 })}</h3>
     <div className="form-grid model-form">
@@ -389,27 +461,34 @@ function SyncQueue() {
         <option value="">{t('Любой')}</option>{Object.entries(modelKinds).map(([key, label]) => <option value={key} key={key}>{t(label)}</option>)}
       </select></Field>
     </div>
-    {selected && <StaffForm title={selected.rawName} cancel={() => { setSelected(undefined); setDecision(''); }} done={() => {
-      setSelected(undefined); setDecision(''); setRevision(current => current + 1);
-    }} save={async fields => {
+    {message && <Notice tone="success">{t(message)}</Notice>}
+    {selected && <StaffForm title={t('Рассмотрение обновления')} cancel={close} returnFocus={selected.trigger}
+      submitDisabled={decision === 'MERGE' && !mergeTargets.length} done={() => {
+        restoreAfterSave(selected.trigger);
+        close();
+        setMessage('Решение сохранено.');
+        setRevision(current => current + 1);
+      }} save={async fields => {
       const modelPatch = decision === 'ACCEPT' ? { nameRu: fields.get('nameRu'), nameEn: fields.get('nameEn') } : undefined;
-      await api(`/admin/catalog-sync/items/${selected.id}/decide`, { method: 'POST', body: { decision, intoModelId: fields.get('intoModelId'), modelPatch, note: fields.get('note') } });
+      await api(`/admin/catalog-sync/items/${selected.item.id}/decide`, { method: 'POST', body: { decision, intoModelId: fields.get('intoModelId'), modelPatch, note: fields.get('note') } });
     }}>
+      <p className="model-editor-target">{selected.item.rawName}</p>
       <Field label={t('Решение')}><select required value={decision} onChange={event => setDecision(event.target.value)}>
         <option value="">{t('Выберите решение')}</option>{choices.map(key => <option key={key} value={key}>{t(decisions[key])}</option>)}
       </select></Field>
-      {decision === 'MERGE' && <MergeTarget families={active.data?.families ?? []} />}
+      {decision === 'MERGE' && <MergeTarget models={mergeTargets} loading={active.loading} error={active.error} />}
       {decision === 'ACCEPT' && <div className="form-grid">
-        <Field label={t('Название на русском')}><input required minLength={2} maxLength={120} name="nameRu" defaultValue={selected.modelName ?? selected.rawName} /></Field>
-        <Field label={t('Название на английском')}><input required minLength={2} maxLength={120} name="nameEn" defaultValue={selected.modelName ?? selected.rawName} /></Field>
+        <Field label={t('Название на русском')}><input required minLength={2} maxLength={120} name="nameRu" defaultValue={selected.item.modelName ?? selected.item.rawName} /></Field>
+        <Field label={t('Название на английском')}><input required minLength={2} maxLength={120} name="nameEn" defaultValue={selected.item.modelName ?? selected.item.rawName} /></Field>
       </div>}
       <Field label={t('Примечание')}><textarea name="note" maxLength={1000} /></Field>
     </StaffForm>}
-    {queue.loading && <Spinner />}{queue.error && <Notice tone="error">{t(queue.error)}</Notice>}
-    <ul className="model-records">{queue.data?.items.map(item => <li key={item.id}>
+    {queue.loading && !queue.data && <Spinner />}{queue.error && <Notice tone="error">{t(queue.error)}</Notice>}
+    <ul ref={list} tabIndex={-1} aria-label={t('Обновления каталога')} aria-busy={queue.loading} className="model-records">{queue.data?.items.map(item => <li key={item.id}>
       <div><strong>{item.rawName}</strong><div className="muted">{t(modelKinds[item.kind])} · {item.externalId}{item.codename ? ` · ${item.codename}` : ''}</div>
         <div className="muted">{t(queueStatuses[item.status])} · {item.modelName ?? '—'}</div><div className="muted">{date(item.firstSeenAt)} · {date(item.lastSeenAt)}</div></div>
-      {item.status === 'PENDING' && <div><Button variant="secondary" onClick={() => { setSelected(item); setDecision(''); }}>{t('Рассмотреть')}</Button></div>}
+      {item.status === 'PENDING' && <div><Button variant="secondary" aria-haspopup="dialog"
+        onClick={event => setSelected({ item, trigger: event.currentTarget })}>{t('Рассмотреть')}</Button></div>}
     </li>)}</ul>
     {queue.data?.items.length === 0 && <Notice>{t('Обновления не найдены.')}</Notice>}
     <Pager page={page} limit={20} total={queue.data?.total ?? 0} change={setPage} />
@@ -422,12 +501,12 @@ type SyncSource = SourceHealth & { code: string; urls: string[]; urlChecks: (Sou
 
 function SyncSources({ canEdit }: { canEdit: boolean }) {
   const { t, locale } = useI18n();
-  const [selected, setSelected] = useState<SyncSource>();
+  const [selected, setSelected] = useState<{ source: SyncSource; trigger: HTMLButtonElement }>();
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const sources = useModelData<SyncSource[]>('/admin/catalog-sync/sources', revision);
+  const sources = useModelData<SyncSource[]>('/admin/catalog-sync/sources', revision, true);
   async function run(code: string) {
     setBusy(true); setMessage(''); setError('');
     try {
@@ -438,14 +517,20 @@ function SyncSources({ canEdit }: { canEdit: boolean }) {
     finally { setBusy(false); }
   }
   return <div className="model-panel">
-    {sources.loading && <Spinner />}{(sources.error || error) && <Notice tone="error">{t(sources.error ?? error)}</Notice>}
+    {sources.loading && !sources.data && <Spinner />}{(sources.error || error) && <Notice tone="error">{t(sources.error ?? error)}</Notice>}
     {message && <Notice>{t(message)}</Notice>}
-    {selected && <StaffForm key={selected.code} title={t(codes[selected.code] ?? selected.code)} cancel={() => setSelected(undefined)} done={() => {
-      setSelected(undefined); setRevision(current => current + 1);
-    }} save={async fields => { await api(`/admin/catalog-sync/sources/${selected.code}`, { method: 'PUT', body: { urls: lines(fields.get('urls')) } }); }}>
-      <Field label={t('HTTPS-адреса, по одному в строке')}><textarea name="urls" rows={6} required defaultValue={selected.urls.join('\n')} /></Field>
+    {selected && <StaffForm key={selected.source.code} title={t('Адреса источника')} returnFocus={selected.trigger}
+      cancel={() => setSelected(undefined)} done={() => {
+        setSelected(undefined);
+        setMessage('Адреса источника сохранены.');
+        setRevision(current => current + 1);
+      }} save={async fields => {
+        await api(`/admin/catalog-sync/sources/${selected.source.code}`, { method: 'PUT', body: { urls: lines(fields.get('urls')) } });
+      }}>
+      <p className="model-editor-target">{t(codes[selected.source.code] ?? selected.source.code)}</p>
+      <Field label={t('HTTPS-адреса, по одному в строке')}><textarea name="urls" rows={6} required defaultValue={selected.source.urls.join('\n')} /></Field>
     </StaffForm>}
-    <ul className="model-records">{sources.data?.map(source => <li key={source.code}>
+    <ul aria-busy={sources.loading} className="model-records">{sources.data?.map(source => <li key={source.code}>
       <div><strong>{t(codes[source.code] ?? source.code)}</strong>
         <div className="muted">{source.lastStatus ? t(checkStatuses[source.lastStatus]) : t('Ещё не проверен')}
           {source.lastCheckedAt && ` · ${new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(source.lastCheckedAt))}`}
@@ -458,7 +543,8 @@ function SyncSources({ canEdit }: { canEdit: boolean }) {
             {check.lastError && ` · ${t(check.lastError)}`}</span>
         </li>)}</ul></div>
       {canEdit && <div className="admin-actions"><Button variant="secondary" disabled={busy} onClick={() => void run(source.code)}>{t('Проверить сейчас')}</Button>
-        <Button variant="ghost" disabled={busy} onClick={() => setSelected(source)}>{t('Изменить адреса')}</Button></div>}
+        <Button variant="ghost" aria-haspopup="dialog" disabled={busy}
+          onClick={event => setSelected({ source, trigger: event.currentTarget })}>{t('Изменить адреса')}</Button></div>}
     </li>)}</ul>
   </div>;
 }

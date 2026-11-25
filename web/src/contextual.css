@@ -2,23 +2,38 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: .45rem .65rem;
+  gap: .45rem .7rem;
   margin-block-start: .85rem;
 }
 
-.contextual-actions .button {
+.contextual-actions .context-moderation > .button {
   min-height: 2.75rem;
   max-width: 100%;
-  padding-inline: .65rem;
+  padding-inline: .7rem;
   font-size: .85rem;
+  color: var(--blue-strong);
+  background: var(--blue-soft);
+  border-color: transparent;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.contextual-actions .context-moderation > .button:hover {
+  border-color: var(--accent);
 }
 
 .contextual-status {
   color: var(--muted);
   font-size: .85rem;
   overflow-wrap: anywhere;
+}
+
+.contextual-actions > .contextual-status {
+  padding-inline: .6rem;
+  padding-block: .2rem;
+  border-radius: .35rem;
+  background: var(--surface-raised);
+  font-weight: 700;
 }
 
 .site-footer .footer-inner nav {

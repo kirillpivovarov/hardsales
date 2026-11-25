@@ -24,7 +24,7 @@ export type ListingTrust = {
 }
 type DataState<T> = { path: string; version: number; data?: T; error?: string }
 
-export function useTrustData<T>(path: string | null, version = 0) {
+export function useTrustData<T>(path: string | null, version = 0, keepPreviousData = false) {
   const [state, setState] = useState<DataState<T>>()
   useEffect(() => {
     if (!path) return
@@ -36,7 +36,8 @@ export function useTrustData<T>(path: string | null, version = 0) {
     return () => controller.abort()
   }, [path, version])
   if (!path) return { loading: false }
-  if (state?.path !== path || state.version !== version) return { loading: true }
+  if (state?.path !== path) return { loading: true }
+  if (state.version !== version) return { loading: true, data: keepPreviousData ? state.data : undefined }
   return { data: state.data, error: state.error, loading: false }
 }
 

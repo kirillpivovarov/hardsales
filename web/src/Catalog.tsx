@@ -13,6 +13,7 @@ import { CountrySelect } from './CountrySelect';
 import { categoryIcon, categoryName, countryName, formatMoney, terms } from './market';
 import type { Category, Listing } from './market';
 import { Button, Field, Icon, Notice, Spinner } from './ui';
+import './market-design.css';
 
 interface Results {
   items: Listing[];
@@ -107,33 +108,34 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   const resultPages = Math.ceil(results.total / results.limit);
   const returnTarget = `?next=${encodeURIComponent('/catalog' + (requestedQuery ? '?' + requestedQuery : ''))}`;
   const catalogReturn = `${home ? '/' : '/catalog'}${requestedQuery ? '?' + requestedQuery : ''}#catalog`;
+  const searchBar = <form className={home ? 'hero-search' : 'catalog-search'} onSubmit={submitSearch} role="search">
+    <Icon name="search" size={20} />
+    <input aria-label={t('Поиск оборудования')} placeholder={t(home ? 'Например, NVIDIA H100 или Dell R760' : 'Название, модель или спецификация')}
+      value={search} onChange={event => setSearch(event.target.value)} name="q" maxLength={150} spellCheck={false} />
+    <Button type="submit">{t('Найти')}</Button>
+  </form>;
+  const categoryShortcuts = categoryTiles.length > 0 && <section className="categories-section" aria-labelledby="category-title">
+    <div className="section-heading"><h2 id="category-title">{t('Категории')}</h2><a className="text-link" href="#catalog" onClick={() => change({category:''})}>{t('Все категории')} <Icon name="chevron-down" size={16} /></a></div>
+    <div className="category-grid">
+      {categoryTiles.map(category => (
+        <button type="button" key={category.id} className={'category-tile' + (category.slug === selectedCategory ? ' selected' : '')} aria-pressed={category.slug === selectedCategory}
+          onClick={() => { change({ category: category.slug === selectedCategory ? '' : category.slug }); document.getElementById('catalog')?.scrollIntoView(); }}>
+          <span className="category-icon"><Icon name={categoryIcon(category)} size={20} /></span>
+          <span>{categoryName(category, locale, true)}</span>
+        </button>
+      ))}
+    </div>
+  </section>;
 
   return <div className="container market-page">
     {home && <section className="market-hero" aria-labelledby="hero-title">
-      <div className="hero-art" aria-hidden="true"><img src="/images/rack.webp" alt="" fetchPriority="high" /></div>
       <div className="hero-copy">
-        <p className="eyebrow"><span className="signal" /> {t('ПЛОЩАДКА ДЛЯ AI-ИНФРАСТРУКТУРЫ')}</p>
-        <h1 id="hero-title">{t('Серверное железо')}<br /><em>{t('для ИИ')}</em></h1>
-        <p className="hero-description">{t('Покупайте и продавайте GPU, серверы и комплектующие для обучения и запуска моделей.')}</p>
-        <form className="hero-search" onSubmit={submitSearch} role="search">
-          <Icon name="search" size={20} />
-          <input aria-label={t('Поиск оборудования')} placeholder={t('Например, NVIDIA H100 или Dell R760')} value={search} onChange={event => setSearch(event.target.value)} name="q" maxLength={150} spellCheck={false} />
-          <Button type="submit">{t('Найти')}</Button>
-        </form>
+        <h1 id="hero-title">{t('Железо для ИИ')}</h1>
+        <p className="hero-description">{t('GPU, серверы и комплектующие')}</p>
       </div>
+      {searchBar}
     </section>}
-    {categoryTiles.length > 0 && <section className="categories-section" aria-labelledby="category-title">
-      <div className="section-heading"><h2 id="category-title">{t('Категории')}</h2><a className="text-link" href="#catalog" onClick={() => change({category:''})}>{t('Все категории')} <Icon name="chevron-down" size={16} /></a></div>
-      <div className="category-grid">
-        {categoryTiles.map(category => (
-          <button type="button" key={category.id} className={'category-tile' + (category.slug === selectedCategory ? ' selected' : '')} aria-pressed={category.slug === selectedCategory}
-            onClick={() => { change({ category: category.slug === selectedCategory ? '' : category.slug }); document.getElementById('catalog')?.scrollIntoView(); }}>
-            <span className="category-icon"><Icon name={categoryIcon(category)} size={24} /></span>
-            <span>{categoryName(category, locale, true)}</span>
-          </button>
-        ))}
-      </div>
-    </section>}
+    {home && categoryShortcuts}
     <section className="catalog" id="catalog" aria-labelledby="catalog-title">
       <div className="section-heading catalog-heading">
         {home ? <h2 id="catalog-title">{t('Каталог оборудования')}</h2> : <h1 id="catalog-title">{t('Каталог оборудования')}</h1>}
@@ -142,6 +144,7 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
           {staff && <Link className="text-link" to="/admin?section=categories">{t('Управление категориями')}</Link>}
         </div>
       </div>
+      {!home && <>{searchBar}{categoryShortcuts}</>}
       <div className="catalog-layout">
         <button type="button" className="button button-secondary mobile-filters" onClick={() => setFiltersOpen(!filtersOpen)} aria-expanded={filtersOpen} aria-controls="catalog-filters">
           <Icon name="list-filter" /> {t('Фильтры')}{filterCount ? ` · ${filterCount}` : ''}<Icon name={filtersOpen ? 'chevron-up' : 'chevron-down'} size={16} />
@@ -252,9 +255,6 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
             {t('Показывать объявления с низким рейтингом')}
             {Boolean(results.hiddenLowRating) && ` · ${results.hiddenLowRating}`}
           </label>}
-          {!home && <form className="catalog-search" onSubmit={submitSearch} role="search">
-            <Icon name="search" size={19} /><input aria-label={t('Поиск оборудования')} placeholder={t('Название, модель или спецификация')} value={search} maxLength={150} spellCheck={false} onChange={event => setSearch(event.target.value)} /><Button type="submit">{t('Найти')}</Button>
-          </form>}
           {error ? <Notice tone="error">{t(error)} <button className="text-link" onClick={() => setRetry(old => old + 1)}>{t('Повторить')}</button></Notice> :
           busy && authenticated ? <Spinner /> :
           locked ? <div className="locked-panel panel">
@@ -286,12 +286,16 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
 
 export function ListingVisual({ listing, category }: { listing: Listing; category?: Category }) {
   const cover = listing.images?.[0];
-  const imageKey = listing.imageKey && ['h100','h200','l40s','server'].includes(listing.imageKey) ? listing.imageKey : null;
+  const imageKey = listingIllustration(listing);
   return <div className="listing-visual">
     {cover ? <ListingPhoto src={cover.url} alt="" loading="lazy" /> :
       imageKey ? <img src={`/images/${imageKey}.webp`} alt="" loading="lazy" /> :
-      <Icon name={category ? categoryIcon(category) : listing.kind === 'BUY' ? 'clipboard-list' : 'server'} size={55} />}
+      <Icon name={category ? categoryIcon(category) : listing.kind === 'BUY' ? 'clipboard-list' : 'server'} size={38} />}
   </div>;
+}
+
+export function listingIllustration(listing: Listing) {
+  return listing.imageKey && ['h100', 'h200', 'l40s', 'server'].includes(listing.imageKey) ? listing.imageKey : null;
 }
 
 function ListingCard({ listing, category, returnTo }: { listing: Listing; category?: Category; returnTo: string }) {
@@ -304,9 +308,11 @@ function ListingCard({ listing, category, returnTo }: { listing: Listing; catego
     <div className="listing-card-body">
       <span className="listing-kicker">{listing.kind === 'BUY' ? t('Заявка на закупку') : listing.availability ? t(terms[listing.availability] ?? listing.availability) : t('Предложение')}</span>
       <h3>{listing.title}</h3>
-      <ListingExchangeBadges listing={listing} /><ActualityBadges listing={listing} />
       <strong className="listing-price">{price}</strong>
       <span className="listing-place"><Icon name="map-pin" size={15} />{place || t('Любая страна')}</span>
+      <div className="listing-card-labels">
+        <ListingExchangeBadges listing={listing} /><ActualityBadges listing={listing} />
+      </div>
     </div>
   </Link>;
 }

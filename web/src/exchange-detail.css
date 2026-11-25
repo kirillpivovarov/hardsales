@@ -1,13 +1,21 @@
 .exchange-page, .exchange-record, .exchange-representation {
   display: grid;
-  gap: .85rem;
+  gap: .9rem;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
 .exchange-record {
   align-content: start;
-  padding: 1rem;
+  padding: clamp(.85rem, 2vw, 1.2rem);
+}
+
+.exchange-representation .exchange-record {
+  background: var(--surface-raised);
+}
+
+.exchange-representation > h3 {
+  font-size: 1.03rem;
 }
 
 .exchange-records, .exchange-events {
@@ -27,6 +35,13 @@
 
 .exchange-filter { align-items: end; }
 .exchange-filter > .field { flex: 1 1 9rem; min-width: 0; }
-.exchange-representation fieldset { min-width: 0; padding: .7rem; border: 1px solid var(--line); border-radius: .5rem; }
+.exchange-representation fieldset { min-width: 0; padding: .85rem; border: 1px solid var(--line); border-radius: 10px; }
 .exchange-representation .field { min-width: 0; }
 .exchange-events li + li { border-top: 1px solid var(--line); padding-top: .5rem; }
+
+.exchange-actions .button,
+.exchange-filter .button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

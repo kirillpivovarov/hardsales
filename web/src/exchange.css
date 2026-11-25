@@ -1,16 +1,155 @@
-.exchange-page { max-width: 960px; }
-.exchange-page h1 { margin-bottom: 1.5rem; }
-.exchange-count { margin-inline-start: .5em; font-variant-numeric: tabular-nums; }
-.exchange-setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .75rem; }
-.exchange-setting input[type=checkbox] { width: 1.25rem; min-height: 1.25rem; }
-.exchange-runs { list-style: none; padding: 0; display: grid; gap: .5rem; }
-.exchange-runs li { display: flex; flex-wrap: wrap; gap: .75rem; overflow-wrap: anywhere; }
-.exchange-admin-nav { display: flex; gap: .35rem; flex-wrap: wrap; margin-bottom: 1rem; }
-@media (max-width: 480px) {
-  .exchange-setting { grid-template-columns: minmax(0, 1fr); }
-  .exchange-setting > button { justify-self: start; }
+.exchange-page {
+  max-width: 960px;
 }
-.exchange-listing-labels { display: flex; gap: .35rem; flex-wrap: wrap; margin-block: .4rem; }
-.exchange-listing-labels .contextual-status { max-width: 100%; overflow-wrap: anywhere; }
-.exchange-notification-link { position: relative; padding-inline: .7rem; }
-.exchange-notification-link .exchange-count { position: absolute; top: -5px; right: -4px; margin: 0; }
+
+.exchange-page h1 {
+  margin-block-end: 1.35rem;
+}
+
+.exchange-count {
+  margin-inline-start: .45em;
+  font-variant-numeric: tabular-nums;
+}
+
+.exchange-setting {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: .75rem;
+  min-width: 0;
+}
+
+.admin-panel .exchange-setting {
+  padding: .75rem;
+  border: 1px solid var(--line);
+  border-radius: .7rem;
+  background: var(--surface-raised);
+}
+
+.exchange-setting > .field:has(> input[type=checkbox]) {
+  display: flex;
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+  align-items: center;
+  gap: .6rem;
+  min-height: 2.75rem;
+}
+
+.exchange-setting input[type=checkbox] {
+  flex: none;
+  width: 1.125rem;
+  min-height: 1.125rem;
+}
+
+.exchange-setting .button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.exchange-runs {
+  display: grid;
+  gap: .5rem;
+  margin-block: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.exchange-runs li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .35rem .85rem;
+  padding: .7rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: .6rem;
+  overflow-wrap: anywhere;
+}
+
+.exchange-runs li > :not(strong) {
+  color: var(--muted);
+  font-size: .83rem;
+}
+
+.exchange-runs time {
+  margin-inline-start: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.exchange-admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .375rem;
+  min-width: 0;
+  margin-block-end: .25rem;
+  padding: .4rem;
+  border: 1px solid var(--line);
+  border-radius: .75rem;
+  background: var(--surface-raised);
+}
+
+.exchange-admin-nav .button {
+  min-width: 0;
+  max-width: 100%;
+  padding-inline: .65rem;
+  font-size: .83rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.exchange-admin-nav [aria-current="page"],
+.exchange-admin-nav [aria-current="page"]:hover {
+  color: var(--blue-strong);
+  background: var(--blue-soft);
+  border-color: transparent;
+}
+
+.exchange-listing-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .35rem .55rem;
+  margin-block: .4rem;
+}
+
+.exchange-listing-labels .contextual-status {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.exchange-notification-link {
+  position: relative;
+  padding-inline: .7rem;
+}
+
+.exchange-notification-link .exchange-count {
+  position: absolute;
+  inset-block-start: -.38rem;
+  inset-inline-end: -.35rem;
+  display: grid;
+  place-items: center;
+  min-width: 1.15rem;
+  min-height: 1.15rem;
+  margin: 0;
+  padding-inline: .2rem;
+  border: 2px solid var(--surface);
+  border-radius: 1rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: .625rem;
+  font-weight: 750;
+  line-height: 1;
+}
+
+@media (max-width: 480px) {
+  .exchange-setting {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .exchange-setting > .button {
+    justify-self: start;
+  }
+
+  .exchange-runs time {
+    margin-inline-start: 0;
+  }
+}
