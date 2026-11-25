@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, type User } from './api';
 import { useI18n } from './i18n';
 import { ListingImagesEditor, listingImagePayload } from './ListingImages';
 import type { ListingImageDraft } from './ListingImages';
-import { categoryName, countries, countryName, type Category, type Listing } from './market';
+import { CountrySelect } from './CountrySelect';
+import { categoryName, type Category, type Listing } from './market';
 import { Button, Field, Notice, Spinner } from './ui';
 import './workflows.css';
 
@@ -121,11 +122,6 @@ function ListingFields({
     ...(listing?.categoryId === categoryId ? Object.keys(listing?.specs ?? {}) : []),
   ])];
 
-  const countryOptions = useMemo(() => countries.map(code => ({
-    code, label: countryName(code, locale),
-  })).sort((a, b) => a.label.localeCompare(b.label, locale)), [locale]);
-  const countryChoices = countryOptions.map(({ code, label }) => <option key={code} value={code}>{label}</option>);
-
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
@@ -239,9 +235,7 @@ function ListingFields({
                   <option value="COUNTRY">{t('Из конкретной страны')}</option>
                 </select>
               </Field>
-              <Field label={t('Страна доставки')}>
-                <select name="destinationCountry" defaultValue={listing?.destinationCountry ?? homeCountry} required>{countryChoices}</select>
-              </Field>
+              <CountrySelect label={t('Страна доставки')} name="destinationCountry" defaultValue={listing?.destinationCountry ?? homeCountry} required />
             </>
           ) : (
             <Field label={t('Наличие')}>
@@ -253,13 +247,11 @@ function ListingFields({
             </Field>
           )}
           {(!isBuyer || originScope === 'COUNTRY') && (
-            <Field label={t(isBuyer ? 'Страна происхождения поставки' : 'Страна отгрузки')}>
-              <select name="originCountry" defaultValue={defaultOriginCountry} required>
-                <option value="">{t('Выберите страну')}</option>
-                {!isBuyer && <option value="ANY">{t('Из любой страны')}</option>}
-                {countryChoices}
-              </select>
-            </Field>
+            <CountrySelect
+              label={t(isBuyer ? 'Страна происхождения поставки' : 'Страна отгрузки')}
+              name="originCountry" defaultValue={defaultOriginCountry} required
+              leading={isBuyer ? undefined : [{ value: 'ANY', label: t('Из любой страны') }]}
+            />
           )}
           {!isBuyer && availability === 'STOCK' && (
             <Field label={t('Город склада')} hint={t('Если складов несколько, укажите основной город.')}>
@@ -267,12 +259,11 @@ function ListingFields({
             </Field>
           )}
           {!isBuyer && (
-            <Field label={t('Страна доставки')} hint={t('Можно оставить пустым, чтобы обсудить географию поставок в чате.')}>
-              <select name="destinationCountry" defaultValue={listing?.destinationCountry ?? ''}>
-                <option value="">{t('По договорённости')}</option>
-                {countryChoices}
-              </select>
-            </Field>
+            <CountrySelect
+              label={t('Страна доставки')} name="destinationCountry" defaultValue={listing?.destinationCountry ?? ''}
+              leading={[{ value: '', label: t('По договорённости') }]}
+              hint={t('Можно оставить пустым, чтобы обсудить географию поставок в чате.')}
+            />
           )}
           <Field label={t(isBuyer ? 'Требуется доставка до' : 'Ориентировочная дата готовности')}
             hint={isBuyer ? undefined : t('После этой даты объявление перестанет показываться в каталоге.')}>

@@ -22,12 +22,14 @@ function watermark(width: number, height: number) {
   const badgeWidth = Math.max(1, Math.min(146, width - 2 * margin, 4 * (height - 2 * margin)))
   const badgeHeight = Math.max(1, Math.floor(badgeWidth / 4))
   const input = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${badgeWidth}" height="${badgeHeight}" viewBox="0 0 108 27">
-    <rect width="108" height="27" rx="5" fill="#151713" fill-opacity=".72"/>
-    <path d="M9 6v15m0-8q2-3 6-3 4 0 4 4v7 M23 10l2 11 4-8 4 8 2-11
-      M40 21V10q0-5 6-4m-9 5h8 M53 10a5 5.5 0 1 0 0 11 5 5.5 0 1 0 0-11
-      M63 21V10m0 4q2-5 7-4 M84 10v11m0-6q0-5-5-5-5 0-5 5.5t5 5.5q5 0 5-5
-      M91 11v10m0-14v.1" fill="none" stroke="#e9ff99" stroke-width="2.4"
-      stroke-linecap="round" stroke-linejoin="round"/>
+    <g opacity=".65">
+      <rect width="108" height="27" rx="5" fill="#151713"/>
+      <path d="M9 6v15m0-8q2-3 6-3 4 0 4 4v7 M23 10l2 11 4-8 4 8 2-11
+        M40 21V10q0-5 6-4m-9 5h8 M53 10a5 5.5 0 1 0 0 11 5 5.5 0 1 0 0-11
+        M63 21V10m0 4q2-5 7-4 M84 10v11m0-6q0-5-5-5-5 0-5 5.5t5 5.5q5 0 5-5
+        M91 11v10m0-14v.1" fill="none" stroke="#e9ff99" stroke-width="2.4"
+        stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
   </svg>`)
   return {
     input, left: width - badgeWidth - margin, top: height - badgeHeight - margin,

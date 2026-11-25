@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from './api';
 import type { User } from './api';
 import { useI18n } from './i18n';
 import { ListingPhoto } from './ListingImages';
-import { categoryIcon, categoryName, countries, countryName, formatMoney, terms } from './market';
+import { CountrySelect } from './CountrySelect';
+import { categoryIcon, categoryName, countryName, formatMoney, terms } from './market';
 import type { Category, Listing } from './market';
 import { Button, Field, Icon, Notice, Spinner } from './ui';
 
@@ -24,6 +25,7 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   const [query, setQuery] = useSearchParams();
   const committedSearch = query.get('q') ?? '';
   const [search, setSearch] = useState(committedSearch);
+  const sort = query.get('sort') ?? (committedSearch.trim() ? 'relevance' : 'newest');
   const [categories, setCategories] = useState<Category[]>([]);
   const [results, setResults] = useState<Results>(emptyResults);
   const [busy, setBusy] = useState(true);
@@ -38,8 +40,6 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   const authenticated = Boolean(user?.emailVerified);
   const locked = !authenticated || results.locked;
   const requestedQuery = query.toString();
-  const sortedCountries = useMemo(() => countries.map(code => ({code, name: countryName(code,locale)}))
-    .sort((a,b) => a.name.localeCompare(b.name, locale)), [locale]);
 
   useEffect(() => { setSearch(committedSearch); }, [committedSearch]);
   useEffect(() => {
@@ -84,7 +84,6 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
 
   const categoryTiles = categories.filter(category => !category.parentId).slice(0, 6);
   const options = (values: string[]) => values.map(value => <option value={value} key={value}>{t(terms[value] ?? value)}</option>);
-  const countryOptions = sortedCountries.map(({code,name}) => <option key={code} value={code}>{name}</option>);
   const allFilters = ['category','country','destinationCountry','ownerType','availability','condition','originScope','priceMode','counterparty','paymentMethod','priceMin','priceMax','currency','vat','deliveryIncluded','customsIncluded'];
   const filterCount = allFilters.filter(key => query.has(key)).length;
   const resultPages = Math.ceil(results.total / results.limit);
@@ -100,7 +99,7 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
         <p className="hero-description">{t('Покупайте и продавайте GPU, серверы и комплектующие для обучения и запуска моделей.')}</p>
         <form className="hero-search" onSubmit={submitSearch} role="search">
           <Icon name="search" size={20} />
-          <input aria-label={t('Поиск оборудования')} placeholder={t('Например, NVIDIA H100 или Dell R760')} value={search} onChange={event => setSearch(event.target.value)} name="q" maxLength={150} />
+          <input aria-label={t('Поиск оборудования')} placeholder={t('Например, NVIDIA H100 или Dell R760')} value={search} onChange={event => setSearch(event.target.value)} name="q" maxLength={150} spellCheck={false} />
           <Button type="submit">{t('Найти')}</Button>
         </form>
       </div>
@@ -135,16 +134,12 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
           <Field label={t(kind === 'BUY' ? 'Тип покупателя' : 'Тип продавца')}><select value={query.get('ownerType') ?? ''} onChange={event => change({ownerType:event.target.value})}>
             <option value="">{t('Все участники')}</option>{options(['COMPANY','INDIVIDUAL'])}
           </select></Field>
-          <div className="field">
-            <Field label={t(kind === 'BUY' ? 'Страна закупки' : 'Страна отгрузки')}>
-              <select value={selectedOrigin} aria-describedby={showFlexibleOriginHint ? 'origin-filter-hint' : undefined}
-                onChange={event => change({country:event.target.value})}>
-                <option value="">{t('Без ограничения')}</option>
-                <option value="ANY">{t('Указана любая страна')}</option>{countryOptions}
-              </select>
-            </Field>
-            {showFlexibleOriginHint && <small id="origin-filter-hint">{t('Поиск также включает предложения с отгрузкой из любой страны.')}</small>}
-          </div>
+          <CountrySelect
+            label={t(kind === 'BUY' ? 'Страна закупки' : 'Страна отгрузки')} name="originCountry"
+            value={selectedOrigin} onChange={country => change({country})}
+            leading={[{ value: '', label: t('Без ограничения') }, { value: 'ANY', label: t('Указана любая страна') }]}
+            hint={showFlexibleOriginHint ? t('Поиск также включает предложения с отгрузкой из любой страны.') : undefined}
+          />
           {kind === 'SELL' && <Field label={t('Наличие')}><select value={query.get('availability') ?? ''} onChange={event => change({availability:event.target.value})}>
             <option value="">{t('Любое')}</option>{options(['STOCK','TRANSIT','ORDER'])}
           </select></Field>}
@@ -156,9 +151,11 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
             <Field label={t('Тип цены')}><select value={query.get('priceMode') ?? ''} onChange={event => change({priceMode:event.target.value})}>
               <option value="">{t('Любой')}</option><option value="FIXED">{t('Указана сумма')}</option><option value="NEGOTIABLE">{t('По договорённости')}</option>
             </select></Field>
-            <Field label={t('Страна поставки')}><select value={query.get('destinationCountry') ?? ''} onChange={event => change({destinationCountry:event.target.value})}>
-              <option value="">{t('Любая страна')}</option>{countryOptions}
-            </select></Field>
+            <CountrySelect
+              label={t('Страна поставки')} name="destinationCountry"
+              value={query.get('destinationCountry') ?? ''} onChange={destinationCountry => change({destinationCountry})}
+              leading={[{ value: '', label: t('Любая страна') }]}
+            />
             <Field label={t('Состояние')}><select value={query.get('condition') ?? ''} onChange={event => change({condition:event.target.value})}>
               <option value="">{t('Любое')}</option>{options(['NEW','USED','REFURBISHED'])}
             </select></Field>
@@ -193,14 +190,15 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
               {oppositeKind === 'SELL' ? <Link to="/my-listings"><Icon name="clipboard-list" size={17} />{t('Мои заявки')}</Link> :
                 <button type="button" aria-pressed={kind === 'BUY'} onClick={() => change({kind:'BUY',availability:''})}><Icon name="clipboard-list" size={17} />{t('Заявки')}</button>}
             </div>
-            <label className="catalog-sort"><span className="sr-only">{t('Сортировка')}</span><select value={query.get('sort') ?? 'newest'} onChange={event => change({sort:event.target.value})}>
+            <label className="catalog-sort"><span className="sr-only">{t('Сортировка')}</span><select value={sort} onChange={event => change({sort:event.target.value})}>
+              {(committedSearch.trim() || sort === 'relevance') && <option value="relevance">{t('По релевантности')}</option>}
               <option value="newest">{t('Сначала новые')}</option>
               <option value="price-asc">{t('Сначала дешевле')}</option>
               <option value="price-desc">{t('Сначала дороже')}</option>
             </select></label>
           </div>
           {!home && <form className="catalog-search" onSubmit={submitSearch} role="search">
-            <Icon name="search" size={19} /><input aria-label={t('Поиск оборудования')} placeholder={t('Название, модель или спецификация')} value={search} maxLength={150} onChange={event => setSearch(event.target.value)} /><Button type="submit">{t('Найти')}</Button>
+            <Icon name="search" size={19} /><input aria-label={t('Поиск оборудования')} placeholder={t('Название, модель или спецификация')} value={search} maxLength={150} spellCheck={false} onChange={event => setSearch(event.target.value)} /><Button type="submit">{t('Найти')}</Button>
           </form>}
           {error ? <Notice tone="error">{t(error)} <button className="text-link" onClick={() => setRetry(old => old + 1)}>{t('Повторить')}</button></Notice> :
           busy && authenticated ? <Spinner /> :

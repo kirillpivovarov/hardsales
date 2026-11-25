@@ -15,6 +15,8 @@ from urllib.request import urlopen
 
 from playwright.sync_api import Page, expect, sync_playwright
 
+from country_controls import choose_country
+
 BASE = os.getenv("HWFORAI_QA_BASE", "http://127.0.0.1:3000").rstrip("/")
 MAILPIT = os.getenv("HWFORAI_QA_MAILPIT_URL", "http://127.0.0.1:8025").rstrip("/")
 MARKER = str(time.time_ns())[-10:]
@@ -165,8 +167,8 @@ def listing_test(page: Page, kind: str):
     if kind == "BUY":
         assert field(page, "availability").count() == 0
         field(page, "originScope").select_option("COUNTRY")
-        field(page, "originCountry").select_option("CN")
-        field(page, "destinationCountry").select_option("RU")
+        choose_country(page, "originCountry", "CN")
+        choose_country(page, "destinationCountry", "RU")
         field(page, "counterparty").select_option("COMPANY")
         field(page, "deliveryBy").fill((date.today() + timedelta(days=30)).isoformat())
     else:
@@ -221,11 +223,11 @@ def listing_test(page: Page, kind: str):
     if kind == "SELL":
         field(page, "availability").select_option("ORDER")
         expect(field(page, "stockCity")).to_have_count(0)
-        field(page, "originCountry").select_option("KZ")
+        choose_country(page, "originCountry", "KZ")
     else:
         field(page, "originScope").select_option("DOMESTIC")
         expect(field(page, "originCountry")).to_have_count(0)
-        field(page, "destinationCountry").select_option("KZ")
+        choose_country(page, "destinationCountry", "KZ")
     button(page, "Сохранить изменения").click()
     page.wait_for_url(BASE + listing_path)
     updated = page.request.get(BASE + "/api/v1" + listing_path).json()

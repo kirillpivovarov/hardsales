@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, type User } from './api';
 import { useI18n } from './i18n';
-import { countries, countryName } from './market';
+import { CountrySelect } from './CountrySelect';
 import { Button, Field, Notice } from './ui';
 import './workflows.css';
 
@@ -55,7 +55,7 @@ function AuthForm({
   mode: 'login' | 'register';
   onUser: (user: User) => void;
 }) {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const [search] = useSearchParams();
   const next = returnPath(search);
@@ -67,9 +67,6 @@ function AuthForm({
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const isRegistering = mode === 'register';
-  const countryOptions = useMemo(() => countries.map(code => ({
-    code, label: countryName(code, locale),
-  })).sort((a, b) => a.label.localeCompare(b.label, locale)), [locale]);
 
   useEffect(() => {
     if (!challenge) return;
@@ -203,11 +200,7 @@ function AuthForm({
               <Field label={t('Электронная почта')}>
                 <input name="email" type="email" autoComplete="email" maxLength={254} required />
               </Field>
-              <Field label={t('Страна')}>
-                <select name="country" autoComplete="country" defaultValue="RU" required>
-                  {countryOptions.map(({ code, label }) => <option key={code} value={code}>{label}</option>)}
-                </select>
-              </Field>
+              <CountrySelect label={t('Страна')} name="country" autoComplete="country" defaultValue="RU" required />
               <Field label={t('Город')}>
                 <input name="city" autoComplete="address-level2" minLength={2} maxLength={80} required />
               </Field>
@@ -248,14 +241,11 @@ function AuthForm({
 }
 
 export function AccountPage({ user, onUser }: AccountProps) {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const [profileFeedback, setProfileFeedback] = useState({ error: '', notice: '', busy: false });
   const [passwordFeedback, setPasswordFeedback] = useState({ error: '', notice: '', busy: false });
   const isAdmin = user.role === 'ADMIN';
-  const countryOptions = useMemo(() => countries.map(code => ({
-    code, label: countryName(code, locale),
-  })).sort((a, b) => a.label.localeCompare(b.label, locale)), [locale]);
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -326,11 +316,7 @@ export function AccountPage({ user, onUser }: AccountProps) {
               <Field label={t('Электронная почта')}>
                 <input type="email" readOnly value={user.email} />
               </Field>
-              <Field label={t('Страна')}>
-                <select name="country" autoComplete="country" defaultValue={user.country} required>
-                  {countryOptions.map(({ code, label }) => <option key={code} value={code}>{label}</option>)}
-                </select>
-              </Field>
+              <CountrySelect label={t('Страна')} name="country" autoComplete="country" defaultValue={user.country} required />
               <Field label={t('Город')}>
                 <input name="city" autoComplete="address-level2" defaultValue={user.city} minLength={2} maxLength={80} required />
               </Field>

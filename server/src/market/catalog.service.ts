@@ -22,6 +22,8 @@ type ListingRow = Record<string, unknown> & {
   images: ListingImage[]
 }
 
+type ListingSearch = { ctes: string; ownerWords: string }
+
 @Injectable()
 export class CatalogService {
   constructor(private readonly db: DatabaseService, private readonly media: ListingMediaService) {}
@@ -69,15 +71,7 @@ export class CatalogService {
         SELECT id FROM branch
       )`)
     }
-    if (query.q) {
-      const terms = [...new Set(str(query.q, 'Поиск', 0, 200).split(/\s+/u).filter(Boolean))].slice(0, 20)
-      for (const term of terms) {
-        const q = params.add(escapedSearch(term))
-        filters.push(`(l.title ILIKE ${q} OR l.description ILIKE ${q} OR c.name ILIKE ${q} OR
-          c.short_name ILIKE ${q} OR c.translations::text ILIKE ${q} OR l.specs::text ILIKE ${q} OR
-          l.stock_city ILIKE ${q} OR u.city ILIKE ${q})`)
-      }
-    }
+    const search = this.listingSearch(query.q, params, filters)
     const selections = [
       ['ownerType', 'u.participant_type', accountTypes, 'Тип участника'],
       ['availability', 'l.availability', availability, 'Наличие'],
@@ -133,14 +127,16 @@ export class CatalogService {
     if (currency) filters.push(`l.currency = ${params.add(currency)}`)
     if (lower !== null) filters.push(`l.price >= ${params.add(lower)}`)
     if (upper !== null) filters.push(`l.price <= ${params.add(upper)}`)
-    const sort = query.sort ? oneOf(query.sort, ['newest', 'price-asc', 'price-desc'], 'Сортировка') : 'newest'
+    const sort = query.sort ? oneOf(query.sort, ['relevance', 'newest', 'price-asc', 'price-desc'], 'Сортировка')
+      : search ? 'relevance' : 'newest'
     const orders = {
+      relevance: search ? 'ranking.score DESC, l.created_at DESC, l.id' : 'l.created_at DESC, l.id',
       newest: 'l.created_at DESC, l.id',
       'price-asc': 'l.currency, l.price ASC NULLS LAST, l.created_at DESC, l.id',
       'price-desc': 'l.currency, l.price DESC NULLS LAST, l.created_at DESC, l.id',
     }
     return {
-      ...await this.listPage(this.db, filters, params, paging, orders[sort], visibleCategories),
+      ...await this.listPage(this.db, filters, params, paging, orders[sort], visibleCategories, search),
       locked: false,
     }
   }
@@ -148,16 +144,18 @@ export class CatalogService {
   async mine(user: SessionUser, query: Record<string, unknown>) {
     const params = new Parameters()
     const filters = [`l.owner_id = ${params.add(user.id)}`]
-    this.managementFilters(query, params, filters)
-    return this.listPage(this.db, filters, params, pageParams(query), 'l.created_at DESC, l.id')
+    const search = this.managementFilters(query, params, filters)
+    const order = search ? 'ranking.score DESC, l.created_at DESC, l.id' : 'l.created_at DESC, l.id'
+    return this.listPage(this.db, filters, params, pageParams(query), order, '', search)
   }
 
   async administrativeListings(query: Record<string, unknown>) {
     const params = new Parameters()
     const filters: string[] = []
-    this.managementFilters(query, params, filters)
+    const search = this.managementFilters(query, params, filters)
     if (query.kind) filters.push(`l.kind = ${params.add(oneOf(query.kind, kinds, 'Вид объявления'))}`)
-    return this.listPage(this.db, filters, params, pageParams(query), 'l.created_at DESC, l.id')
+    const order = search ? 'ranking.score DESC, l.created_at DESC, l.id' : 'l.created_at DESC, l.id'
+    return this.listPage(this.db, filters, params, pageParams(query), order, '', search)
   }
 
   async detail(user: SessionUser, idInput: string) {
@@ -300,10 +298,47 @@ export class CatalogService {
 
   private managementFilters(query: Record<string, unknown>, params: Parameters, filters: string[]) {
     if (query.status) filters.push(`l.status = ${params.add(oneOf(query.status, listingStatuses, 'Статус'))}`)
-    if (query.q) {
-      const q = params.add(escapedSearch(query.q))
-      filters.push(`(l.title ILIKE ${q} OR l.description ILIKE ${q} OR u.display_name ILIKE ${q})`)
-    }
+    return this.listingSearch(query.q, params, filters, true)
+  }
+
+  private listingSearch(input: unknown, params: Parameters, filters: string[], includeNickname = false): ListingSearch | undefined {
+    if (input === undefined || input === '') return
+    const query = str(input, 'Поиск', 0, 200)
+    if (!query) return
+    const searchParam = params.add(query)
+    filters.push('ranking.score IS NOT NULL')
+    const ctes = `
+      search_query AS (
+        SELECT (market_search_words(${searchParam}))[1:20] AS words
+      ),
+      search_anchor AS (
+        SELECT word AS term, CASE WHEN word ~ '^[a-z]{5,32}$'
+          THEN market_search_spelling_keys(ARRAY[word]) ELSE '{}'::integer[] END AS spelling_keys
+        FROM unnest((SELECT words FROM search_query)) AS word
+        -- Prefer a model code or another longer term for an indexed shortlist.
+        ORDER BY (word ~ '[0-9]') DESC, length(word) DESC, word
+        LIMIT 1
+      ),
+      matching_categories AS (
+        SELECT c.id FROM categories c CROSS JOIN search_anchor a
+        WHERE c.search_words @> ARRAY[a.term]
+          OR (cardinality(a.spelling_keys) > 0 AND market_search_spelling_keys(c.search_words) && a.spelling_keys)
+      ),
+      matching_owners AS (
+        SELECT u.id FROM users u CROSS JOIN search_anchor a
+        WHERE u.search_words @> ARRAY[a.term]
+          OR (cardinality(a.spelling_keys) > 0 AND market_search_spelling_keys(u.search_words) && a.spelling_keys)
+      ),
+      matching_candidates AS (
+        SELECT l.id FROM listings l CROSS JOIN search_anchor a
+        WHERE l.search_words @> ARRAY[a.term] OR market_search_spelling_keys(l.search_words) && a.spelling_keys
+        UNION
+        SELECT l.id FROM listings l JOIN matching_categories c ON c.id = l.category_id
+        UNION
+        SELECT l.id FROM listings l JOIN matching_owners u ON u.id = l.owner_id
+      )
+    `
+    return { ctes, ownerWords: includeNickname ? 'u.search_words' : 'u.search_city_words' }
   }
 
   private async listPage(
@@ -313,17 +348,28 @@ export class CatalogService {
     { page, limit, offset }: ReturnType<typeof pageParams>,
     order: string,
     withClause = '',
+    search?: ListingSearch,
   ) {
+    // Limit the lateral query to one score calculation per matched listing.
+    const preamble = search ? (withClause ? withClause + ',' : 'WITH ') + search.ctes : withClause
+    const joins = listingJoins + (search ? `
+      JOIN matching_candidates candidate ON candidate.id = l.id
+      CROSS JOIN search_query
+      CROSS JOIN LATERAL (
+        SELECT market_search_rank(search_query.words, l.search_title_words, l.search_words, c.search_words || ${search.ownerWords}) AS score
+        LIMIT 1
+      ) ranking
+    ` : '')
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
     const countValues = [...params.values]
     const limitParam = params.add(limit)
     const offsetParam = params.add(offset)
     const [items, count] = await Promise.all([
       db.query<ListingRow>(`
-        ${withClause} SELECT ${listingColumns} ${listingJoins} ${where}
+        ${preamble} SELECT ${listingColumns} ${joins} ${where}
         ORDER BY ${order} LIMIT ${limitParam} OFFSET ${offsetParam}
       `, params.values),
-      db.query<{ total: number }>(`${withClause} SELECT count(*)::int AS total ${listingJoins} ${where}`, countValues),
+      db.query<{ total: number }>(`${preamble} SELECT count(*)::int AS total ${joins} ${where}`, countValues),
     ])
     return { items: items.rows, total: count.rows[0]?.total ?? 0, page, limit }
   }

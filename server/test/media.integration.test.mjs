@@ -125,6 +125,25 @@ test('listing images are compressed, watermarked, bounded, atomic and access-con
     assert.ok(untouched > 240 && badge < 165, 'Font-free watermark is visible near the lower-right corner');
     const found = await request('/listings?' + new URLSearchParams({ q: suffix }), { cookie: buyer }).then(response => response.json());
     assert.deepEqual(found.items[0].images, originalImages);
+
+    const transparent = await sharp({
+      create: { width: 500, height: 900, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+    }).png().toBuffer();
+    const overlay = await create({ title: 'Прозрачность водяного знака ' + suffix, imageOrder: orders(1) }, [transparent]);
+    const asset = await request(overlay.images[0].url, { cookie: buyer });
+    const { data: pixels, info: rgba } = await sharp(Buffer.from(await asset.arrayBuffer()))
+      .raw().toBuffer({ resolveWithObject: true });
+    assert.equal(rgba.channels, 4);
+    assert.equal(pixels[3], 0, 'Photo stays transparent outside the mark');
+    let maxAlpha = 0;
+    let strokePixels = 0;
+    for (let index = 0; index < pixels.length; index += rgba.channels) {
+      const alpha = pixels[index + 3];
+      maxAlpha = Math.max(maxAlpha, alpha);
+      if (pixels[index] > 160 && pixels[index + 1] > 160 && alpha > 140) strokePixels++;
+    }
+    assert.ok(strokePixels > 100, 'The wordmark strokes are rendered');
+    assert.ok(maxAlpha >= 150 && maxAlpha <= 180, 'Both the plate and the strokes transmit the underlying image');
   });
 
   await t.test('enforces exact limits and rolls back the listing with a bad upload', async () => {

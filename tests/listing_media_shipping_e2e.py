@@ -17,6 +17,8 @@ from uuid import uuid4
 
 from playwright.sync_api import expect, sync_playwright
 
+from country_controls import choose_country
+
 BASE = os.getenv("HWFORAI_MEDIA_QA_URL", "http://127.0.0.1:3000").rstrip("/")
 CHROMIUM = os.getenv("CHROMIUM_PATH")
 SCREENSHOTS = os.getenv("HWFORAI_MEDIA_QA_SCREENSHOTS")
@@ -77,12 +79,12 @@ def fill_listing(page, title, source, paths=(), buyer=False):
     if buyer:
         field(page, "originScope").select_option("ANY")
         expect(field(page, "originCountry")).to_have_count(0)
-        field(page, "destinationCountry").select_option("RU")
+        choose_country(page, "destinationCountry", "RU")
         field(page, "deliveryBy").fill((date.today() + timedelta(days=30)).isoformat())
     else:
         field(page, "availability").select_option("STOCK")
         field(page, "stockCity").fill("Новосибирск")
-        field(page, "originCountry").select_option(source)
+        choose_country(page, "originCountry", source)
     if paths:
         expect(field(page, "listingImages")).to_have_count(1)
         expect(field(page, "listingImages")).to_be_hidden()
@@ -170,7 +172,6 @@ def main():
         expect(specific_card).to_be_visible()
         cover = flexible_card.locator("img")
         expect(cover).to_have_attribute("src", photo_url)
-        origin = buyer_page.get_by_role("combobox", name="Страна отгрузки", exact=True)
 
         def filter_country(country):
             def listing_search(response):
@@ -178,7 +179,7 @@ def main():
                 return url.path == "/api/v1/listings" and parse_qs(url.query).get("country") == [country]
 
             with buyer_page.expect_response(listing_search) as pending:
-                origin.select_option(country)
+                choose_country(buyer_page, "originCountry", country)
             assert pending.value.ok, pending.value.text()
 
         filter_country("ANY")

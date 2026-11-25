@@ -3,7 +3,8 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api } from './api'
 import { useI18n } from './i18n'
 import { ListingForm } from './ListingForm'
-import { categoryIcons, countries, countryName } from './market'
+import { CountrySelect } from './CountrySelect'
+import { categoryIcons, countryName } from './market'
 import { Button, Field, Notice, Spinner } from './ui'
 import './admin.css'
 
@@ -453,12 +454,9 @@ function MutationForm({
 }
 
 function UserForm({ row, onClose, onSaved }: { row: UserRow; onClose: () => void; onSaved: () => void }) {
-  const { t, locale } = useI18n()
+  const { t } = useI18n()
   const [participantType, setParticipantType] = useState(row.participantType)
   const company = participantType === 'COMPANY'
-  const countryOptions = [...new Set([...countries, row.country])].filter(Boolean)
-    .map(code => ({ code, name: countryName(code, locale) }))
-    .sort((a, b) => a.name.localeCompare(b.name, locale))
   return <MutationForm onClose={onClose} onSaved={onSaved} save={data => api('/admin/users/' + row.id, {
     method: 'PATCH',
     body: {
@@ -481,12 +479,7 @@ function UserForm({ row, onClose, onSaved }: { row: UserRow; onClose: () => void
       </Field>
       {company && <Field label={t('Название компании')}><input name="companyName" defaultValue={row.companyName ?? ''} required minLength={2} maxLength={160} /></Field>}
       <Field label={t('Город')}><input name="city" defaultValue={row.city} required minLength={2} maxLength={120} /></Field>
-      <Field label={t('Страна')}>
-        <select name="country" defaultValue={row.country} required>
-          <option value="">{t('Выберите страну')}</option>
-          {countryOptions.map(country => <option key={country.code} value={country.code}>{country.name}</option>)}
-        </select>
-      </Field>
+      <CountrySelect label={t('Страна')} name="country" defaultValue={row.country} required />
       <Field label={t('Ник в Telegram')}><input name="telegram" defaultValue={row.telegram} required pattern="@?[A-Za-z][A-Za-z0-9_]{4,31}" maxLength={33} /></Field>
     </div>
   </MutationForm>
