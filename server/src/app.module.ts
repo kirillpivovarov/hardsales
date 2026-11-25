@@ -3,6 +3,10 @@ import { AuthModule } from './auth/auth.module';
 import { DatabaseModule } from './database/database.module';
 import { DatabaseService } from './database/database.service';
 import { MarketModule } from './market/market.module';
+import { PlatformModule } from './exchange/platform.module';
+import { DisclosuresModule } from './exchange/disclosures.module';
+import { RepresentationModule } from './exchange/representation.module';
+import { ModelsModule } from './models/models.module';
 
 @Controller('health')
 class HealthController {
@@ -16,7 +20,7 @@ class HealthController {
 }
 
 @Module({
-  imports: [DatabaseModule, AuthModule, MarketModule],
+  imports: [DatabaseModule, PlatformModule, AuthModule, MarketModule, DisclosuresModule, RepresentationModule, ModelsModule],
   controllers: [HealthController],
 })
 export class AppModule {}

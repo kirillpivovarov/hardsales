@@ -20,6 +20,7 @@ interface PendingChallenge extends Challenge {
 }
 
 interface RegistrationDraft {
+  inviteCode?: string;
   username: string;
   email: string;
   role: string;
@@ -33,6 +34,7 @@ interface RegistrationDraft {
 interface AccountProps {
   user: User;
   onUser: (user: User) => void;
+  onboardingAvailable?: boolean;
 }
 
 const usernameRules = String.raw`[A-Za-z0-9][A-Za-z0-9_.\-]{2,31}`;
@@ -47,25 +49,30 @@ function returnPath(search: URLSearchParams) {
 
 export function authDestination(user: User, search: string | URLSearchParams) {
   if (user.mustChangePassword) return '/account';
+  if (user.onboardingState === 'REQUIRED') return '/onboarding';
   return returnPath(new URLSearchParams(search)) ?? (isStaff(user) ? '/admin' : '/catalog');
 }
 
 export function AuthPage({
   mode,
   onUser,
+  registrationMode = 'OPEN',
 }: {
   mode: 'login' | 'register';
   onUser: (user: User) => void;
+  registrationMode?: 'OPEN' | 'INVITE';
 }) {
-  return <AuthForm key={mode} mode={mode} onUser={onUser} />;
+  return <AuthForm key={mode} mode={mode} onUser={onUser} registrationMode={registrationMode} />;
 }
 
 function AuthForm({
   mode,
   onUser,
+  registrationMode,
 }: {
   mode: 'login' | 'register';
   onUser: (user: User) => void;
+  registrationMode: 'OPEN' | 'INVITE';
 }) {
   const { t } = useI18n();
   const navigate = useNavigate();
@@ -82,6 +89,8 @@ function AuthForm({
   const [captchaToken, setCaptchaToken] = useState<string>();
   const [captchaAttempt, setCaptchaAttempt] = useState(0);
   const isRegistering = mode === 'register';
+  const invitationFromLink = search.get('invite');
+  const requiresInvite = registrationMode === 'INVITE';
 
   useEffect(() => {
     if (!challenge) return;
@@ -117,7 +126,9 @@ function AuthForm({
         return;
       }
       if (isRegistering) {
+        const inviteCode = valueOf(form, 'inviteCode');
         const fields: RegistrationDraft = {
+          ...(inviteCode && { inviteCode }),
           username: valueOf(form, 'username'),
           email: valueOf(form, 'email'),
           role: valueOf(form, 'role'),
@@ -204,6 +215,15 @@ function AuthForm({
             </>
           ) : isRegistering ? (
             <>
+              {(requiresInvite || invitationFromLink) && (
+                <div className="workflow-span">
+                  <Field label={t('Код приглашения')} hint={t('Код выдаёт модератор площадки. Формат: XXXX-XXXX')}>
+                    <input name="inviteCode" autoComplete="off" autoCapitalize="characters" inputMode="text"
+                      spellCheck={false} defaultValue={draft?.inviteCode ?? invitationFromLink ?? ''}
+                      minLength={4} maxLength={20} required={requiresInvite} />
+                  </Field>
+                </div>
+              )}
               <Field label={t('Роль')}>
                 <select name="role" defaultValue={draft?.role ?? 'BUYER'}>
                   <option value="BUYER">{t('Покупатель')}</option>
@@ -281,7 +301,7 @@ function AuthForm({
   );
 }
 
-export function AccountPage({ user, onUser }: AccountProps) {
+export function AccountPage({ user, onUser, onboardingAvailable = false }: AccountProps) {
   const { t } = useI18n();
   const navigate = useNavigate();
   const [profileFeedback, setProfileFeedback] = useState({ error: '', notice: '', busy: false });
@@ -300,6 +320,7 @@ export function AccountPage({ user, onUser }: AccountProps) {
           displayName: valueOf(form, 'displayName'),
           city: valueOf(form, 'city'),
           country: valueOf(form, 'country'),
+          notifyEmail: form.get('notifyEmail') === 'on',
           telegram: valueOf(form, 'telegram'),
           ...(user.participantType === 'COMPANY' && { companyName: valueOf(form, 'companyName') }),
         },
@@ -370,10 +391,22 @@ export function AccountPage({ user, onUser }: AccountProps) {
               <Field label={t('Имя пользователя в Telegram')} hint={t('Контакт открывается в чате по взаимному согласию. После смены имени пользователя нужно обменяться контактами заново.')}>
                 <input name="telegram" defaultValue={user.telegram ?? ''} pattern={telegramRules} minLength={5} maxLength={33} required />
               </Field>
+              <label className="workflow-span workflow-checkbox">
+                <input type="checkbox" name="notifyEmail" defaultChecked={user.notifyEmail ?? true} />
+                {t('Получать уведомления по электронной почте')}
+              </label>
               {profileFeedback.error && <div className="workflow-span"><Notice tone="error">{t(profileFeedback.error)}</Notice></div>}
               {profileFeedback.notice && <div className="workflow-span"><Notice tone="success">{t(profileFeedback.notice)}</Notice></div>}
               <div className="workflow-span"><Button type="submit" disabled={profileFeedback.busy}>{t('Сохранить профиль')}</Button></div>
             </form>
+          </section>
+        )}
+        {!staff && (onboardingAvailable || user.onboardingState === 'REQUIRED') && (
+          <section className="panel workflow-section" aria-labelledby="account-onboarding-title">
+            <h2 id="account-onboarding-title">{t('Анкета входа')}</h2>
+            <Link className="button button-secondary" to="/onboarding">
+              {t(user.onboardingState === 'DONE' ? 'Открыть анкету' : 'Заполнить анкету')}
+            </Link>
           </section>
         )}
         <section className="panel workflow-section" aria-labelledby="password-title">

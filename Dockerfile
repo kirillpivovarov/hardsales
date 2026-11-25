@@ -3,6 +3,7 @@ WORKDIR /build/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
+COPY server/seeds/exchange_data/ /build/server/seeds/exchange_data/
 RUN npm run build
 
 FROM node:22-bookworm-slim AS server-build

@@ -1,8 +1,9 @@
 import { Transform } from 'class-transformer';
 import {
-  IsEmail, IsIn, IsISO31661Alpha2, IsString, IsUUID, Length, Matches, ValidateBy, ValidateIf,
+  IsBoolean, IsEmail, IsIn, IsISO31661Alpha2, IsString, IsUUID, Length, Matches, ValidateBy, ValidateIf,
 } from 'class-validator';
 import { isPublicProfileText, isSingleLine } from '../contact';
+import { INVALID_INVITE } from '../exchange/invites.service';
 
 export const USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$/;
 export const TELEGRAM_PATTERN = /^@?[A-Za-z][A-Za-z\d_]{4,31}$/;
@@ -26,6 +27,11 @@ function SingleLineText(field: 'private' | 'public' = 'private') {
 }
 
 export class RegisterDto {
+  @ValidateIf(defined)
+  @IsString({ message: INVALID_INVITE })
+  @Length(4, 20, { message: INVALID_INVITE })
+  inviteCode?: string;
+
   @IsString({ message: 'Пройдите проверку CAPTCHA.' })
   @Length(1, 2048, { message: 'Повторите проверку CAPTCHA.' })
   captchaToken!: string;
@@ -96,6 +102,10 @@ export class VerifyDto extends ChallengeDto {
 }
 
 export class ProfileDto {
+  @ValidateIf(defined)
+  @IsBoolean({ message: 'Выберите, хотите ли получать уведомления по почте.' })
+  notifyEmail?: boolean;
+
   @Transform(trimText)
   @ValidateIf(defined)
   @IsString({ message: 'Введите отображаемое имя.' })

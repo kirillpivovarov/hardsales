@@ -1,0 +1,69 @@
+.actuality-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  min-width: 0;
+}
+
+.actuality-badge {
+  display: inline-block;
+  max-width: 100%;
+  padding: .3rem .5rem;
+  border-radius: .4rem;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  color: var(--muted);
+  font-size: .85rem;
+  line-height: 1.3;
+}
+
+.actuality-fresh {
+  color: #80d9b7;
+}
+
+.actuality-price {
+  color: #efd08a;
+}
+
+.actuality-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem 1rem;
+  flex-wrap: wrap;
+  padding: .95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: .65rem;
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+}
+
+.actuality-banner p {
+  margin: .35rem 0 0;
+  color: var(--muted);
+}
+
+.actuality-suspension {
+  border-color: #a45151;
+}
+
+.actuality-dialog {
+  width: min(100% - 2rem, 32rem);
+  max-height: min(85dvh, 44rem);
+  padding: clamp(1rem, 4vw, 1.75rem);
+  color: var(--text);
+  overflow: auto;
+}
+
+.actuality-dialog::backdrop {
+  background: rgb(2 8 15 / 72%);
+}
+
+.actuality-dialog h2 {
+  margin: 0 0 1rem;
+}
+
+.actuality-pause-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: .75rem;
+}

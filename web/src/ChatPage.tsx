@@ -29,12 +29,17 @@ type Chat = {
     accountType: string;
     rating: number | null;
     ratingCount: number;
+    companyName?: string | null;
+    disclosedAt?: string | null;
   };
   lastMessage: ChatSummaryMessage | null;
   unreadCount: number;
   revealState: 'NONE' | 'REQUESTED' | 'ACCEPTED' | 'DECLINED';
   revealRequestedBy: string | null;
   revealRequestId: string | null;
+  disclosureRulesRequired?: boolean;
+  disclosureRulesVersion?: string | null;
+  disclosure?: { id: string; number: string; kind: 'FIRST' | 'REPEAT' } | null;
   telegramChanged: { mine: boolean; partner: boolean } | null;
   telegram: { mine: string; partner: string } | null;
   status: 'ACTIVE' | 'RESTRICTED';
@@ -352,11 +357,12 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
     });
   }
 
-  function reveal(revealAction: RevealAction) {
+  function reveal(revealAction: RevealAction, rulesAccepted?: boolean) {
     const requestId = chat?.revealRequestId;
     if (revealAction !== 'REQUEST' && !requestId) return;
     void action(async () => {
-      const body = revealAction === 'REQUEST' ? { action: revealAction } : { action: revealAction, requestId };
+      const body = { action: revealAction, ...(revealAction === 'REQUEST' ? {} : { requestId }),
+        ...(chat?.disclosureRulesRequired && revealAction !== 'DECLINE' ? { rulesAccepted, rulesVersion: chat.disclosureRulesVersion } : {}) };
       const updated = await api<Chat>(`/chats/${id}/reveal`, { method: 'PATCH', body });
       setChat(updated);
     });
@@ -383,6 +389,11 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
             ? <span className="chat-partner-rating" role="img" aria-label={t('Рейтинг {rating} из 5, оценок: {count}', { rating: partnerRating, count: chat.partner.ratingCount })}><span aria-hidden="true">★ {partnerRating} ({chat.partner.ratingCount})</span></span>
             : <span>{t('Пока без отзывов')}</span>}
         </div>
+        {!loadError && chat.partner.companyName && <div className="chat-partner-details">
+          <span>{chat.partner.accountType === 'INDIVIDUAL' ? t('Частное лицо') : t('Компания: {name}', { name: chat.partner.companyName })}</span>
+          {chat.partner.disclosedAt && <span>{t('раскрыто {date}', { date: messageTime(chat.partner.disclosedAt, locale, true) })}</span>}
+          {chat.disclosure && <Link to={'/disclosures/' + chat.disclosure.id}>{t('Запись {number}', { number: chat.disclosure.number })}</Link>}
+        </div>}
         {chat.listing.status === 'ACTIVE' ? <Link to={`/listings/${chat.listing.id}`}>{chat.listing.title}</Link> : <span className="muted">{chat.listing.title}</span>}
       </div>
       <div className="chat-actions">
@@ -392,6 +403,7 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
     </header>
 
     <div className="chat-notices">
+      {isActive && ['HIDDEN', 'ARCHIVED'].includes(chat.listing.status) && <Notice>{t('Объявление больше не показывается в каталоге. Вы можете продолжить переписку.')}</Notice>}
       {chat.telegramChanged && <TelegramChangeNotice change={chat.telegramChanged} />}
       {!loadError && <TelegramPanel chat={chat} userId={userId} pending={pending} reveal={reveal} />}
       {!isActive && <Notice>{t('Переписка ограничена. Новые сообщения и обмен Telegram недоступны.')}</Notice>}
@@ -452,8 +464,22 @@ function TelegramChangeNotice({ change }: { change: NonNullable<Chat['telegramCh
   return <Notice>{t(message)} {t('Для повторного обмена контактами нужно новое согласие.')}</Notice>;
 }
 
-function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: string; pending: boolean; reveal: (action: RevealAction) => void }) {
+function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: string; pending: boolean; reveal: (action: RevealAction, agreed?: boolean) => void }) {
   const { t } = useI18n();
+  const [agreedContext, setAgreedContext] = useState('');
+  const ruleContext = [chat.revealState, chat.revealRequestId, chat.disclosureRulesVersion].join(':');
+  const agreed = agreedContext === ruleContext;
+  const needsAgreement = Boolean(chat.disclosureRulesRequired && !agreed);
+  const rules = chat.disclosureRulesRequired && <fieldset className="chat-disclosure-rules">
+    <legend>{t('Правила раскрытия')}</legend>
+    <ul>
+      <li>{t('Контакты, полученные через раскрытие, используются только для переговоров по этой позиции и не передаются третьим лицам.')}</li>
+      <li>{t('Сделка с раскрытым собеседником в течение 12 месяцев по той же или аналогичной позиции считается сделкой, которую свела площадка.')}</li>
+      <li>{t('При споре вы передаёте модератору переписку по сделке.')}</li>
+    </ul>
+    <label className="checkbox-label"><input type="checkbox" checked={agreed}
+      onChange={event => setAgreedContext(event.target.checked ? ruleContext : '')} /> {t('Понимаю правила раскрытия')}</label>
+  </fieldset>;
   if (chat.status !== 'ACTIVE') return null;
   if (chat.revealState === 'ACCEPTED' && chat.telegram) {
     const partner = telegramName(chat.telegram.partner);
@@ -474,9 +500,10 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
         <strong>{outgoing ? t('Запрос на обмен Telegram отправлен') : t('Собеседник предлагает обменяться Telegram')}</strong>
         <span>{outgoing ? t('Когда собеседник согласится, вы оба увидите контакты во всех ваших чатах.') : t('При согласии вы оба увидите контакты из профилей во всех ваших чатах.')}</span>
       </div>
+      {!outgoing && rules}
       {!outgoing && <div className="chat-telegram-actions">
         <Button variant="ghost" disabled={pending || !chat.revealRequestId} onClick={() => reveal('DECLINE')}>{t('Отклонить')}</Button>
-        <Button variant="secondary" disabled={pending || !chat.revealRequestId} onClick={() => reveal('ACCEPT')}>{t('Согласиться')}</Button>
+        <Button variant="secondary" disabled={pending || !chat.revealRequestId || needsAgreement} onClick={() => reveal('ACCEPT', agreed)}>{t('Согласиться')}</Button>
       </div>}
     </div>;
   }
@@ -486,7 +513,8 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
       <strong>{chat.revealState === 'DECLINED' ? t('Запрос на обмен Telegram отклонён') : t('Telegram скрыт')}</strong>
       {!chat.telegramChanged && <span>{t('По взаимному согласию контакты откроются во всех ваших чатах с этим собеседником.')}</span>}
     </div>
-    <Button variant="secondary" disabled={pending} onClick={() => reveal('REQUEST')}>{chat.telegramChanged ? t('Предложить обмен заново') : t('Предложить обмен')}</Button>
+    {rules}
+    <Button variant="secondary" disabled={pending || needsAgreement} onClick={() => reveal('REQUEST', agreed)}>{chat.telegramChanged ? t('Предложить обмен заново') : t('Предложить обмен')}</Button>
   </div>;
 }
 

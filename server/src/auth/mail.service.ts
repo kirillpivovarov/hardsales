@@ -40,6 +40,14 @@ export class MailService {
     });
   }
 
+  async sendMessage(email: string, subject: string, text: string): Promise<void> {
+    if (!this.transport) {
+      this.logger.log('Development exchange email queued for local inspection');
+      return;
+    }
+    await this.transport.sendMail({ from: this.from, to: { address: email, name: '' }, subject, text });
+  }
+
   async sendCode(email: string, code: string, expiresMinutes: number, purpose: 'REGISTER' | 'LOGIN'): Promise<void> {
     if (!this.transport) {
       this.logger.log(`Development email to ${email}: ${code}`);

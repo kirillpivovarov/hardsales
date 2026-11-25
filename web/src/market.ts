@@ -83,6 +83,26 @@ export interface Listing {
   imageKey?: string | null;
   images?: ListingImage[];
   createdAt: string;
+  lifetimeDays?: number;
+  minLot?: number;
+  shipDays?: number | null;
+  paymentTerms?: string[];
+  modelId?: string | null;
+  model?: { id: string; nameRu: string; status: string } | null;
+  analogModelIds?: string[];
+  representation?: 'DIRECT' | 'AGENT' | null;
+  principalId?: string | null;
+  agentFeeDisclosed?: boolean | null;
+  agentFeeKind?: 'PERCENT' | 'PER_UNIT' | null;
+  agentFeeValue?: number | null;
+  agentFeePayer?: 'BUYER' | 'SELLER' | 'BOTH' | null;
+  labels?: { id: string; text: string; tone?: string }[];
+  confirmedAt?: string | null;
+  expiresAt?: string | null;
+  freshness?: { label: string; today: boolean; hoursAgo: number } | null;
+  priceChanges14?: number;
+  trust?: import('./Trust').ListingTrust | null;
+  hiddenByRatingBelow?: number | null;
 }
 
 export const categoryIcons: Record<string, string> = {

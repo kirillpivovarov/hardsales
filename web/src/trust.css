@@ -1,0 +1,68 @@
+.trust-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  padding: 0;
+  margin: .65rem 0;
+  list-style: none;
+}
+.trust-tag {
+  display: inline-block;
+  padding: .22rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: .83rem;
+  overflow-wrap: anywhere;
+}
+.trust-level-0 { color: var(--muted); }
+.trust-level-1 { color: #184970; background: #edf5fc; border-color: #b9d4eb; }
+.trust-level-2 { color: #235131; background: #eff7ee; border-color: #b9d7bc; }
+.trust-warning { color: #872f31; background: #fdf1f1; border-color: #edc3c5; }
+.trust-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .55rem;
+}
+.trust-heading > strong { white-space: nowrap; }
+.trust-item-list {
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: .65rem;
+  overflow-wrap: anywhere;
+}
+.trust-item-list > li,
+.trust-card {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: .8rem;
+  min-width: 0;
+}
+.trust-item-list p, .trust-card p { margin: .3rem 0; }
+.trust-card-grid {
+  display: grid;
+  gap: .8rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+}
+.trust-payment-fields {
+  display: grid;
+  gap: .6rem;
+  min-width: 0;
+}
+.trust-payment-option {
+  display: grid;
+  gap: .35rem;
+  padding: .45rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.trust-payment-option summary { color: var(--muted); font-size: .9rem; }
+.trust-payment-option p { margin: .35rem 0; }
+.trust-upload { min-width: 0; }
+.trust-upload input[type=file] { max-width: 100%; }
+.trust-admin-form { display: grid; gap: .65rem; }
+.trust-admin-form .field { margin: 0; }
+@media (max-width: 600px) {
+  .trust-admin-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
+}

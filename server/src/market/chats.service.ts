@@ -4,6 +4,9 @@ import {
 import type { ParticipantRole, SessionUser } from '../auth/auth.types'
 import { outsideContact, withContact } from '../contact'
 import { DatabaseService, type Queryable } from '../database/database.service'
+import { DisclosuresService } from '../exchange/disclosures.service'
+import { OnboardingService } from '../exchange/onboarding.service'
+import { PlatformSettings } from '../exchange/platform-settings'
 import { integer, object, oneOf, pageParams, str, uuid } from './market.inputs'
 import { listingPublicWhere, publicProfile, visibleCategories } from './market.queries'
 
@@ -26,6 +29,7 @@ type PairConsent = {
   a_version: string | null
   b_version: string | null
   last_accepted_at: Date | null
+  requested_rules_version: string | null
 }
 
 const messages = `m.id::float8 AS id, m.sender_id AS "senderId", m.body, m.contact_warning AS "contactWarning", m.created_at AS "createdAt"`
@@ -43,8 +47,20 @@ const userA = 'least(c.owner_id, c.visitor_id)'
 const userB = 'greatest(c.owner_id, c.visitor_id)'
 const versionA = 'CASE WHEN c.owner_id < c.visitor_id THEN owner.telegram_version ELSE visitor.telegram_version END'
 const versionB = 'CASE WHEN c.owner_id < c.visitor_id THEN visitor.telegram_version ELSE owner.telegram_version END'
-const pairJoin = `LEFT JOIN telegram_consents p ON p.user_a_id = ${userA} AND p.user_b_id = ${userB}`
+const managesDisclosures = "coalesce(disclosure_setting.value = 'true'::jsonb, false)"
+const pairJoin = `LEFT JOIN telegram_consents p ON p.user_a_id = ${userA} AND p.user_b_id = ${userB}
+  LEFT JOIN platform_settings disclosure_setting ON disclosure_setting.key = 'feature_disclosure_journal'
+  LEFT JOIN platform_settings current_rules ON current_rules.key = 'rules_version'
+  LEFT JOIN LATERAL (
+    SELECT id, number, kind, accepted_at FROM disclosures d
+    WHERE d.user_a_id = ${userA} AND d.user_b_id = ${userB}
+      AND p.last_accepted_at IS NOT NULL AND ${managesDisclosures}
+    ORDER BY accepted_at DESC, number DESC LIMIT 1
+  ) disclosed ON true`
 const consentCurrent = `p.a_version = (${versionA}) AND p.b_version = (${versionB})`
+const pendingRulesCurrent = `(p.state <> 'REQUESTED' OR NOT (${managesDisclosures}) OR
+  p.requested_rules_version IS NOT DISTINCT FROM (current_rules.value #>> '{}'))`
+const requiresDisclosureUpgrade = `(${managesDisclosures} AND p.state = 'ACCEPTED' AND disclosed.id IS NULL)`
 const changedA = `coalesce(p.last_accepted_a_version <> (${versionA}), false)`
 const changedB = `coalesce(p.last_accepted_b_version <> (${versionB}), false)`
 const reviewCheck = `EXISTS (SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id AND m.sender_id = $1)
@@ -52,15 +68,24 @@ const reviewCheck = `EXISTS (SELECT 1 FROM chat_messages m WHERE m.chat_id = c.i
 const chatColumns = `
   c.id, c.created_at AS "createdAt",
   jsonb_build_object('id', l.id, 'title', l.title, 'status', l.status, 'kind', l.kind) AS listing,
-  ${publicProfile('partner')} AS partner,
+  ${publicProfile('partner')} || jsonb_build_object(
+    'companyName', CASE WHEN disclosed.id IS NOT NULL THEN
+      CASE WHEN partner.participant_type = 'INDIVIDUAL' THEN 'Частное лицо' ELSE partner.company_name END END,
+    'disclosedAt', disclosed.accepted_at
+  ) AS partner,
+  ${managesDisclosures} AS "disclosureRulesRequired",
+  CASE WHEN ${managesDisclosures} THEN current_rules.value #>> '{}' END AS "disclosureRulesVersion",
+  CASE WHEN disclosed.id IS NOT NULL THEN jsonb_build_object('id', disclosed.id,
+    'number', 'R-' || lpad(disclosed.number::text, greatest(6, length(disclosed.number::text)), '0'),
+    'kind', disclosed.kind) END AS disclosure,
   (SELECT jsonb_build_object('id', m.id, 'body', m.body, 'senderId', m.sender_id, 'createdAt', m.created_at)
     FROM chat_messages m WHERE m.chat_id = c.id ORDER BY m.id DESC LIMIT 1) AS "lastMessage",
   (SELECT count(*)::int FROM chat_messages m WHERE m.chat_id = c.id AND m.sender_id != $1 AND
     m.id > CASE WHEN c.owner_id = $1 THEN c.owner_read_id ELSE c.visitor_read_id END) AS "unreadCount",
-  CASE WHEN ${consentCurrent} THEN p.state ELSE 'NONE' END AS "revealState",
-  CASE WHEN ${consentCurrent} THEN p.requested_by END AS "revealRequestedBy",
-  CASE WHEN p.state = 'REQUESTED' AND ${consentCurrent} THEN p.request_id END AS "revealRequestId",
-  CASE WHEN ${chatActive} AND p.state = 'ACCEPTED' AND ${consentCurrent} THEN jsonb_build_object(
+  CASE WHEN ${consentCurrent} AND ${pendingRulesCurrent} AND NOT ${requiresDisclosureUpgrade} THEN p.state ELSE 'NONE' END AS "revealState",
+  CASE WHEN ${consentCurrent} AND ${pendingRulesCurrent} AND NOT ${requiresDisclosureUpgrade} THEN p.requested_by END AS "revealRequestedBy",
+  CASE WHEN p.state = 'REQUESTED' AND ${consentCurrent} AND ${pendingRulesCurrent} THEN p.request_id END AS "revealRequestId",
+  CASE WHEN ${chatActive} AND p.state = 'ACCEPTED' AND ${consentCurrent} AND NOT ${requiresDisclosureUpgrade} THEN jsonb_build_object(
     'mine', CASE WHEN c.owner_id = $1 THEN owner.telegram ELSE visitor.telegram END,
     'partner', CASE WHEN c.owner_id = $1 THEN visitor.telegram ELSE owner.telegram END
   ) END AS telegram,
@@ -79,7 +104,12 @@ const chatColumns = `
 
 @Injectable()
 export class ChatsService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly settings: PlatformSettings,
+    private readonly disclosures: DisclosuresService,
+    private readonly onboarding: OnboardingService,
+  ) {}
 
   async list(user: SessionUser<ParticipantRole>, query: Record<string, unknown>) {
     const { page, limit, offset } = pageParams(query, 30)
@@ -103,13 +133,16 @@ export class ChatsService {
   async create(user: SessionUser<ParticipantRole>, raw: unknown) {
     const listingId = uuid(object(raw).listingId, 'Объявление')
     return this.db.transaction(async client => {
+      await this.onboarding.assertOnboardingComplete(user.id, client)
+      await client.query(`SELECT id FROM users WHERE id = $2 OR id = (SELECT owner_id FROM listings WHERE id = $1)
+        ORDER BY id FOR SHARE`, [listingId, user.id])
       const { rows } = await client.query<{ id: string; owner_id: string; counterparty: string; actor_type: string }>(`
         ${visibleCategories}
         SELECT l.id, l.owner_id, l.counterparty, actor.participant_type AS actor_type
         FROM listings l JOIN users u ON u.id = l.owner_id
         JOIN users actor ON actor.id = $3 AND actor.status = 'ACTIVE' AND actor.email_verified_at IS NOT NULL
         WHERE l.id = $1 AND l.kind = $2 AND l.owner_id != $3 AND ${listingPublicWhere}
-        FOR SHARE OF l, u, actor
+        FOR SHARE OF l
       `, [listingId, user.role === 'SELLER' ? 'BUY' : 'SELL', user.id])
       const listing = rows[0]
       if (!listing) throw new NotFoundException('Объявление недоступно')
@@ -150,6 +183,7 @@ export class ChatsService {
     return this.db.transaction(async client => {
       const context = await this.context(client, user.id, id, true)
       this.assertActive(context)
+      await this.onboarding.assertOnboardingComplete(user.id, client)
       const consent = await this.pairConsent(client, context)
       const confirmed = consent?.state === 'ACCEPTED' && this.consentMatches(context, consent)
         ? [context.a_handle, context.b_handle] : []
@@ -162,6 +196,14 @@ export class ChatsService {
         INSERT INTO chat_messages AS m (chat_id, sender_id, body, contact_warning)
         VALUES ($1, $2, $3, $4) RETURNING ${messages}
       `, [id, user.id, body, withContact(body, confirmed)])
+      await client.query(`
+        UPDATE listing_matches SET
+          seller_first_action_at = CASE WHEN seller_id = $2 THEN coalesce(seller_first_action_at, now()) ELSE seller_first_action_at END,
+          buyer_first_action_at = CASE WHEN buyer_id = $2 THEN coalesce(buyer_first_action_at, now()) ELSE buyer_first_action_at END
+        WHERE chat_id = $1 AND status = 'CHAT' AND (
+          (seller_id = $2 AND seller_first_action_at IS NULL) OR (buyer_id = $2 AND buyer_first_action_at IS NULL)
+        )
+      `, [id, user.id])
       return rows[0]
     })
   }
@@ -189,6 +231,9 @@ export class ChatsService {
     return this.db.transaction(async client => {
       const context = await this.context(client, user.id, id, true)
       this.assertActive(context)
+      await client.query(`SELECT key FROM platform_settings
+        WHERE key IN ('feature_disclosure_journal', 'rules_version', 'disclosure_min_level') ORDER BY key FOR SHARE`)
+      const journalling = await this.settings.enabled('feature_disclosure_journal', client)
       const pair = [context.user_a_id, context.user_b_id]
       await client.query(`
         INSERT INTO telegram_consents (user_a_id, user_b_id) VALUES ($1, $2)
@@ -198,30 +243,49 @@ export class ChatsService {
       const consent = (await this.pairConsent(client, context, true))!
       const current = this.consentMatches(context, consent)
       if (action === 'REQUEST') {
-        if (current && (consent.state === 'REQUESTED' || consent.state === 'ACCEPTED')) {
+        const rulesVersion = journalling
+          ? await this.disclosures.assertRules(client, user.id, this.partner(context, user.id), body.rulesAccepted)
+          : null
+        if (journalling && body.rulesVersion !== undefined && body.rulesVersion !== rulesVersion) {
+          throw new ConflictException('Правила раскрытия обновились. Ознакомьтесь с новой версией.')
+        }
+        const needsUpgrade = journalling && consent.state === 'ACCEPTED' && !(await client.query(`
+          SELECT 1 FROM disclosures WHERE user_a_id = $1 AND user_b_id = $2 LIMIT 1
+        `, pair)).rowCount
+        if (current && ((consent.state === 'ACCEPTED' && !needsUpgrade) ||
+          (consent.state === 'REQUESTED' && (!journalling || consent.requested_rules_version === rulesVersion)))) {
           throw new ConflictException('Запрос уже сделан')
         }
         if (!context.a_handle || !context.b_handle) throw new ConflictException('Обоим участникам нужен привязанный Telegram')
-        await client.query(`
+        const { rows: [updated] } = await client.query<{ request_id: string }>(`
           UPDATE telegram_consents SET state = 'REQUESTED', requested_by = $3, request_id = gen_random_uuid(),
-            a_version = $4, b_version = $5 WHERE user_a_id = $1 AND user_b_id = $2
-        `, [...pair, user.id, context.current_a_version, context.current_b_version])
+            a_version = $4, b_version = $5, requested_at = now(), requested_rules_version = $6
+          WHERE user_a_id = $1 AND user_b_id = $2 RETURNING request_id
+        `, [...pair, user.id, context.current_a_version, context.current_b_version, rulesVersion])
+        if (journalling) await this.disclosures.requestNotice(client, user.id, this.partner(context, user.id), id, updated.request_id)
       } else {
         if (!current || consent.state !== 'REQUESTED' || consent.request_id !== requestId ||
           !consent.requested_by || consent.requested_by === user.id) {
           throw new ConflictException('Ответить может получатель активного запроса')
         }
         if (action === 'ACCEPT') {
+          const rulesVersion = journalling ? await this.disclosures.assertRules(
+            client, user.id, this.partner(context, user.id), body.rulesAccepted, consent.requested_rules_version,
+          ) : null
+          if (journalling && body.rulesVersion !== undefined && body.rulesVersion !== rulesVersion) {
+            throw new ConflictException('Правила раскрытия обновились. Запросите обмен заново.')
+          }
           if (!context.a_handle || !context.b_handle) throw new ConflictException('Обоим участникам нужен привязанный Telegram')
-          await client.query(`
+          const { rows: [exchange] } = await client.query<{ id: string }>(`
             WITH accepted AS (
               INSERT INTO chat_contact_exchanges (chat_id, requested_by, accepted_by, a_version, b_version)
-              VALUES ($3, $4, $5, $6, $7) RETURNING accepted_at, a_version, b_version
+              VALUES ($3, $4, $5, $6, $7) RETURNING id, accepted_at, a_version, b_version
             )
             UPDATE telegram_consents p SET state = 'ACCEPTED', last_accepted_at = accepted.accepted_at,
               last_accepted_a_version = accepted.a_version, last_accepted_b_version = accepted.b_version
-            FROM accepted WHERE p.user_a_id = $1 AND p.user_b_id = $2
+            FROM accepted WHERE p.user_a_id = $1 AND p.user_b_id = $2 RETURNING accepted.id
           `, [...pair, id, consent.requested_by, user.id, consent.a_version, consent.b_version])
+          if (rulesVersion !== null) await this.disclosures.create(client, exchange.id, rulesVersion)
         } else {
           await client.query(`
             UPDATE telegram_consents SET state = 'DECLINED' WHERE user_a_id = $1 AND user_b_id = $2
@@ -287,6 +351,10 @@ export class ChatsService {
   }
 
   private async context(db: Queryable, userId: string, id: string, lock = false): Promise<ChatContext> {
+    if (lock) await db.query(`
+      SELECT u.id FROM users u JOIN chats c ON u.id IN (c.owner_id, c.visitor_id)
+      WHERE ${memberWhere} AND c.id = $2 ORDER BY u.id FOR SHARE OF u
+    `, [userId, id])
     const { rows } = await db.query<ChatContext>(`
       SELECT c.owner_id, c.visitor_id, ${userA} AS user_a_id, ${userB} AS user_b_id,
         ${versionA} AS current_a_version, ${versionB} AS current_b_version,
@@ -294,7 +362,7 @@ export class ChatsService {
         CASE WHEN c.owner_id < c.visitor_id THEN visitor.telegram ELSE owner.telegram END AS b_handle,
         (${chatActive}) AS active
       ${chatJoins} WHERE ${memberWhere} AND c.id = $2
-      ${lock ? 'FOR UPDATE OF c FOR SHARE OF owner, visitor, l' : ''}
+      ${lock ? 'FOR UPDATE OF c FOR SHARE OF l' : ''}
     `, [userId, id])
     if (!rows[0]) throw new NotFoundException('Чат не найден')
     return rows[0]
@@ -306,7 +374,7 @@ export class ChatsService {
 
   private async pairConsent(db: Queryable, chat: ChatContext, lock = false): Promise<PairConsent | undefined> {
     const { rows } = await db.query<PairConsent>(`
-      SELECT state, requested_by, request_id, a_version, b_version, last_accepted_at
+      SELECT state, requested_by, request_id, a_version, b_version, last_accepted_at, requested_rules_version
       FROM telegram_consents WHERE user_a_id = $1 AND user_b_id = $2
       ${lock ? 'FOR UPDATE' : ''}
     `, [chat.user_a_id, chat.user_b_id])

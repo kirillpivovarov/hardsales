@@ -4,7 +4,7 @@ import { outsideContact } from '../contact'
 
 export const kinds = ['SELL', 'BUY'] as const
 export const accountTypes = ['INDIVIDUAL', 'COMPANY'] as const
-export const listingStatuses = ['ACTIVE', 'FROZEN', 'BANNED', 'ARCHIVED'] as const
+export const listingStatuses = ['ACTIVE', 'FROZEN', 'BANNED', 'ARCHIVED', 'HIDDEN'] as const
 export const accountStatuses = ['ACTIVE', 'FROZEN', 'BANNED'] as const
 export const reviewStatuses = ['ACTIVE', 'HIDDEN', 'BANNED'] as const
 export const reportStatuses = ['OPEN', 'RESOLVED', 'REJECTED'] as const

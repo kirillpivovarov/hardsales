@@ -3,6 +3,14 @@ import type { ReactNode } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { api, isStaff } from './api';
 import type { User } from './api';
+import { AccountActuality, ActualityActionForm } from './ActualityWidgets';
+import { ActionPage, ExchangeProvider, NotificationLink, NotificationsPage, useExchange } from './Exchange';
+import { OnboardingPage, RulesAcceptance, RulesBanner } from './Onboarding';
+import { MatchesPage } from './Matches';
+import { DisclosureDetailPage, DisclosuresPage } from './Disclosures';
+import { PrincipalAnswerPage, RepresentationAccount, RepresentationAction } from './Representation';
+import { PaymentsPage, TrustAccount } from './Trust';
+import { DealsPage } from './Deals';
 import { AdminPage, ContextModeration } from './AdminPage';
 import { AccountPage, AuthPage, authDestination } from './Auth';
 import { CatalogPage } from './Catalog';
@@ -13,6 +21,7 @@ import { ListingEditorPage } from './ListingForm';
 import { MyListingsPage } from './MyListings';
 import { Button, Icon, Notice, Spinner } from './ui';
 import './contextual.css';
+import './exchange.css';
 
 interface Content {
   key: string;
@@ -25,11 +34,30 @@ function Brand() {
     <span>hwfor<span>ai</span></span></Link>;
 }
 
-function Header({ user, onLogout }: { user: User | null; onLogout: () => Promise<void> }) {
+function MatchesLink() {
+  const { t } = useI18n();
+  const location = useLocation();
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    void api<{ total: number }>('/matches/counts', { signal: controller.signal }).then(data => {
+      if (!controller.signal.aborted) setCount(data.total);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [location.key]);
+  return <Link to="/matches">{t('Совпадения')}{count > 0 && <span className="exchange-count">{count}</span>}</Link>;
+}
+
+function Header({ user, onLogout, notificationRevision }: {
+  user: User | null;
+  onLogout: () => Promise<void>;
+  notificationRevision: number;
+}) {
   const { t, locales, locale, setLocale } = useI18n();
   const [open, setOpen] = useState(false);
   const [sessionError, setSessionError] = useState('');
   const location = useLocation();
+  const { features } = useExchange();
   const staff = isStaff(user);
   const member = user && !staff;
   useEffect(() => { setOpen(false); }, [location.pathname]);
@@ -51,10 +79,15 @@ function Header({ user, onLogout }: { user: User | null; onLogout: () => Promise
       <div className="header-actions">
         {user ? <>
           {member && <Link className="button button-primary publish-link" aria-label={t('Разместить объявление')} to="/listings/new"><Icon name="plus" size={17} /> <span>{t('Разместить')}</span></Link>}
+          {!user.mustChangePassword && Object.entries(features).some(([key, value]) => key.startsWith('feature_') && value === true) &&
+            <NotificationLink key={user.id} revision={notificationRevision} />}
           <details className="account-menu" key={location.key}>
             <summary className="button button-secondary" aria-label={t('{name}, меню профиля', { name: user.displayName || user.username })}><Icon name="user-round" size={17} /><span>{user.displayName || user.username}</span><Icon name="chevron-down" size={14} /></summary>
             <div className="menu-popover">
               <Link to="/account">{t('Профиль')}</Link>
+              {member && features.feature_matching === true && <MatchesLink />}
+              {member && features.feature_disclosure_journal === true && <Link to="/disclosures">{t('Раскрытия')}</Link>}
+              {member && features.feature_trust_rating === true && <Link to="/deals">{t('Сделки')}</Link>}
               {member && <Link to="/my-listings">{t('Мои объявления')}</Link>}
               <button type="button" onClick={() => { void onLogout().catch((error: Error) => setSessionError(error.message)); }}>{t('Выйти')}</button>
               {sessionError && <span role="alert">{t(sessionError)}</span>}
@@ -90,7 +123,7 @@ const fallbackContent: Record<string, { title: string; body: string }> = {
   privacy: { title: 'Конфиденциальность', body: 'Почта нужна для подтверждения аккаунта и входа. Она не отображается в каталоге.\n\nУчастники видят ник, город, страну и репутацию автора объявления. После взаимного согласия имена Telegram доступны в диалогах между этими собеседниками. После смены имени требуется новое согласие. Площадка хранит историю изменений привязанного Telegram. Собеседникам доступны только имена, которыми обе стороны согласились обменяться в текущей версии.' },
 };
 
-function InfoPage({ user }: { user: User | null }) {
+function InfoPage({ user, onUser }: { user: User | null; onUser: (user: User) => void }) {
   const { key = 'about' } = useParams();
   const { t, locale } = useI18n();
   const [revision, setRevision] = useState(0);
@@ -119,19 +152,29 @@ function InfoPage({ user }: { user: User | null }) {
     </div>}
     {!content ? <Notice>{t('Страница не найдена.')}</Notice> : <article className="panel detail-panel"><h1>{t(content.title)}</h1>
       {content.body.split(/\n\s*\n/).map((paragraph,i) => <p key={i} className="preserve-text">{t(paragraph)}</p>)}</article>}
+    {key === 'rules' && content && <RulesAcceptance user={user} onUser={onUser} />}
     <Link to="/catalog" className="back-link"><Icon name="chevron-left" size={16} />{t('К каталогу')}</Link>
   </div>;
 }
 
 export function App() {
+  return <ExchangeProvider><AppRoutes /></ExchangeProvider>;
+}
+
+function AppRoutes() {
+  const { features } = useExchange();
   const { t } = useI18n();
   const location = useLocation();
   const [user, setUser] = useState<User | null>(null);
   const [checking, setChecking] = useState(true);
+  const [notificationRevision, setNotificationRevision] = useState(0);
+  const [registrationMode, setRegistrationMode] = useState<'INVITE' | 'OPEN'>('OPEN');
 
   useEffect(() => {
     const controller = new AbortController();
-    void api<{ user: User }>('/auth/me', { signal: controller.signal }).then(data => setUser(data.user)).catch((err: Error) => {
+    void api<{ user: User; registrationMode?: 'INVITE' | 'OPEN' }>('/auth/me', { signal: controller.signal }).then(data => {
+      if (!controller.signal.aborted) { setUser(data.user); setRegistrationMode(data.registrationMode ?? 'OPEN'); }
+    }).catch((err: Error) => {
       if (err.name !== 'AbortError') setUser(null);
     }).finally(() => { if (!controller.signal.aborted) setChecking(false); });
     return () => controller.abort();
@@ -142,10 +185,11 @@ export function App() {
     else window.scrollTo(0, 0);
   }, [location.pathname, location.hash]);
 
-  function secure(child: ReactNode, role?: 'MEMBER' | 'STAFF') {
+  function secure(child: ReactNode, role?: 'MEMBER' | 'STAFF', requiresOnboarding = false) {
     if (checking) return <div className="container workflow-page"><Spinner /></div>;
     if (!user?.emailVerified) return <Navigate to={`/login?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;
     if (user.mustChangePassword && location.pathname !== '/account') return <Navigate to="/account" replace />;
+    if (requiresOnboarding && user.onboardingState === 'REQUIRED') return <Navigate to="/onboarding" replace />;
     if ((role === 'MEMBER' && isStaff(user)) || (role === 'STAFF' && !isStaff(user))) return <Navigate to="/catalog" replace />;
     return child;
   }
@@ -153,22 +197,55 @@ export function App() {
   const logout = async () => { await api('/auth/logout', { method: 'POST' }); setUser(null); };
   return <>
     <a href="#main" className="skip-link">{t('Перейти к содержимому')}</a>
-    <Header user={user} onLogout={logout} />
+    <Header user={user} onLogout={logout} notificationRevision={notificationRevision} />
     <main id="main" tabIndex={-1}>
+      {location.pathname !== '/info/rules' && <div className="container"><RulesBanner user={user} /></div>}
       <Routes>
         <Route path="/" element={<CatalogPage user={user} home />} />
         <Route path="/catalog" element={<CatalogPage user={user} />} />
         <Route path="/login" element={checking ? <Spinner /> : user ? <Navigate to={authDestination(user, location.search)} replace /> : <AuthPage mode="login" onUser={setUser} />} />
-        <Route path="/register" element={checking ? <Spinner /> : user ? <Navigate to={authDestination(user, location.search)} replace /> : <AuthPage mode="register" onUser={setUser} />} />
-        <Route path="/account" element={secure(user && <AccountPage user={user} onUser={setUser} />)} />
+        <Route path="/register" element={checking ? <Spinner /> : user ? <Navigate to={authDestination(user, location.search)} replace /> : <AuthPage mode="register" onUser={setUser}
+          registrationMode={Object.hasOwn(features, 'feature_invites')
+            ? features.feature_invites && features.registration_mode === 'INVITE' ? 'INVITE' : 'OPEN' : registrationMode} />} />
+        <Route path="/account" element={secure(user && <>
+          <AccountPage user={user} onUser={setUser} onboardingAvailable={features.feature_invites === true} />
+          {!isStaff(user) && features.feature_actuality === true && <div className="container workflow-page"><AccountActuality /></div>}
+          {!isStaff(user) && features.feature_representation === true && <div className="container workflow-page"><RepresentationAccount user={user} /></div>}
+          {!isStaff(user) && features.feature_trust_rating === true && <div className="container workflow-page"><TrustAccount /></div>}
+        </>)} />
+        <Route path="/onboarding" element={secure(user && <OnboardingPage user={user} onUser={setUser} />, 'MEMBER')} />
+        <Route path="/notifications" element={secure(<NotificationsPage onRead={() => setNotificationRevision(value => value + 1)} />)} />
+        <Route path="/matches" element={secure(<MatchesPage />, 'MEMBER')} />
+        <Route path="/matches/:id" element={secure(<MatchesPage />, 'MEMBER')} />
+        <Route path="/disclosures" element={secure(<DisclosuresPage />, 'MEMBER')} />
+        <Route path="/disclosures/:id" element={secure(<DisclosureDetailPage />, 'MEMBER')} />
+        <Route path="/deals" element={secure(<DealsPage />, 'MEMBER')} />
+        <Route path="/deals/:id" element={secure(<DealsPage />, 'MEMBER')} />
+        <Route path="/principal-answers" element={secure(<PrincipalAnswerPage />, 'MEMBER')} />
+        <Route path="/payments" element={<PaymentsPage />} />
+        <Route path="/info/payments" element={<PaymentsPage />} />
+        <Route path="/a/:token" element={<ActionPage renderForm={(action, submit, pending) => {
+          switch (action.purpose) {
+            case 'principal.confirm':
+            case 'company_email.confirm':
+              return <RepresentationAction action={action} onSubmit={input => void submit(input)} pending={pending} />;
+            case 'listing.actuality':
+              return <ActualityActionForm fields={action.fields ?? {}} onSubmit={submit} />;
+            case 'listing.actuality-all':
+            case 'listing.extend':
+              return <Button disabled={pending} onClick={() => void submit({ answer: 'ACTUAL' })}>{t('Подтвердить')}</Button>;
+            default:
+              return <Notice tone="error">{t('Действие недоступно.')}</Notice>;
+          }
+        }} />} />
         <Route path="/my-listings" element={secure(<MyListingsPage />, 'MEMBER')} />
-        <Route path="/listings/new" element={secure(user && <ListingEditorPage user={user} />, 'MEMBER')} />
-        <Route path="/listings/:id/edit" element={secure(user && <ListingEditorPage user={user} />, 'MEMBER')} />
+        <Route path="/listings/new" element={secure(user && <ListingEditorPage user={user} />, 'MEMBER', true)} />
+        <Route path="/listings/:id/edit" element={secure(user && <ListingEditorPage user={user} />, 'MEMBER', true)} />
         <Route path="/listings/:id" element={checking ? <Spinner /> : <ListingDetail user={user} />} />
-        <Route path="/chats" element={secure(user && <ChatPage user={user} />, 'MEMBER')} />
-        <Route path="/chats/:id" element={secure(user && <ChatPage user={user} />, 'MEMBER')} />
+        <Route path="/chats" element={secure(user && <ChatPage user={user} />, 'MEMBER', true)} />
+        <Route path="/chats/:id" element={secure(user && <ChatPage user={user} />, 'MEMBER', true)} />
         <Route path="/admin" element={secure(user && <AdminPage user={user} />, 'STAFF')} />
-        <Route path="/info/:key" element={<InfoPage user={user} />} />
+        <Route path="/info/:key" element={<InfoPage user={user} onUser={setUser} />} />
         <Route path="*" element={<div className="container workflow-page"><h1>{t('Страница не найдена')}</h1><Link to="/catalog" className="button button-primary">{t('К каталогу')}</Link></div>} />
       </Routes>
     </main>

@@ -1,15 +1,23 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { PoolClient } from 'pg'
 import { isStaffRole, type ParticipantRole, type SessionUser } from '../auth/auth.types'
 import { DatabaseService, type Queryable } from '../database/database.service'
+import { ActualityService } from '../exchange/actuality.service'
+import { OnboardingService } from '../exchange/onboarding.service'
+import { PlatformSettings } from '../exchange/platform-settings'
+import { paymentForms } from '../exchange/trust-score'
+import { TrustService } from '../exchange/trust.service'
+import { listingRepresentation, representationEnabled, verifiedPrincipal } from '../exchange/representation.rules'
+import { listingModelFilter, lockHardwareModelReferences, validateListingModels } from '../models/model-listings'
+import { MatchingService } from '../matching/matching.service'
 import { ListingMediaService, type ListingImage, type ListingImageData, type ListingImageUpdate, type ListingImageUpload } from './listing-media.service'
 import {
   accountTypes, availability, boolean, conditions, counterparties, country, currencies, escapedSearch,
-  kinds, listingInput, listingStatuses, object, oneOf, originScopes, pageParams, Parameters, paymentMethods,
+  integer, kinds, listingInput, listingStatuses, object, oneOf, originScopes, pageParams, Parameters, paymentMethods,
   priceValue, slug, str, uuid, vatModes,
 } from './market.inputs'
 import {
-  categoryColumns, listingColumns, listingDetailWhere, listingEditableColumns, listingJoins, listingPublicWhere,
+  categoryColumns, listingColumnsFor, listingDetailWhere, listingEditableColumns, listingJoins, listingPublicWhere,
   visibleCategories,
 } from './market.queries'
 
@@ -22,11 +30,19 @@ type ListingRow = Record<string, unknown> & {
   images: ListingImage[]
 }
 
+const exchangeColumns = ['lifetime_days', 'min_lot', 'ship_days', 'payment_terms', 'model_id', 'analog_model_ids',
+  'representation', 'principal_id', 'agent_fee_disclosed', 'agent_fee_kind', 'agent_fee_value', 'agent_fee_payer'];
+const editableColumns = [...listingEditableColumns, ...exchangeColumns];
+const allowedPaymentTerms = paymentForms.payment_terms.map(term => term.code);
+
 type ListingSearch = { ctes: string; ownerWords: string }
 
 @Injectable()
 export class CatalogService {
-  constructor(private readonly db: DatabaseService, private readonly media: ListingMediaService) {}
+  constructor(private readonly db: DatabaseService, private readonly media: ListingMediaService,
+    private readonly actuality: ActualityService, private readonly onboarding: OnboardingService,
+    private readonly trust: TrustService, private readonly settings: PlatformSettings,
+    private readonly matching: MatchingService) {}
 
   async categories(includeInactive = false) {
     const { rows } = await this.db.query(`
@@ -71,6 +87,15 @@ export class CatalogService {
         SELECT id FROM branch
       )`)
     }
+    if (query.model) filters.push(listingModelFilter(query.model, query.withAnalogs, params))
+    if (query.representation) {
+      filters.push(representationEnabled)
+      filters.push(`l.representation = ${params.add(oneOf(query.representation, ['DIRECT','AGENT'], 'Представительство'))}`)
+    }
+    if (query.principalConfirmed === 'true' || query.principalConfirmed === true) filters.push(verifiedPrincipal)
+    const trustEnabled = await this.settings.enabled('feature_trust_rating')
+    const lowRating = trustEnabled && query.showAll !== 'true' && query.showAll !== true
+      ? `l.trust_score < ${params.add(await this.settings.get<number>('low_rating_threshold'))}` : undefined
     const search = this.listingSearch(query.q, params, filters)
     const selections = [
       ['ownerType', 'u.participant_type', accountTypes, 'Тип участника'],
@@ -125,16 +150,17 @@ export class CatalogService {
     if (currency) filters.push(`l.currency = ${params.add(currency)}`)
     if (lower !== null) filters.push(`l.price >= ${params.add(lower)}`)
     if (upper !== null) filters.push(`l.price <= ${params.add(upper)}`)
-    const sort = query.sort ? oneOf(query.sort, ['relevance', 'newest', 'price-asc', 'price-desc'], 'Сортировка')
-      : search ? 'relevance' : 'newest'
+    const sort = query.sort ? oneOf(query.sort, ['relevance', 'newest', 'price-asc', 'price-desc', 'trust'], 'Сортировка')
+      : search ? 'relevance' : trustEnabled ? 'trust' : 'newest'
     const orders = {
       relevance: search ? 'ranking.score DESC, l.created_at DESC, l.id' : 'l.created_at DESC, l.id',
       newest: 'l.created_at DESC, l.id',
+      trust: trustEnabled ? 'l.trust_score DESC NULLS LAST, l.created_at DESC, l.id' : 'l.created_at DESC, l.id',
       'price-asc': 'l.currency, l.price ASC NULLS LAST, l.created_at DESC, l.id',
       'price-desc': 'l.currency, l.price DESC NULLS LAST, l.created_at DESC, l.id',
     }
     return {
-      ...await this.listPage(this.db, filters, params, paging, orders[sort], visibleCategories, search),
+      ...await this.listPage(this.db, filters, params, paging, orders[sort], visibleCategories, search, false, lowRating),
       locked: false,
     }
   }
@@ -142,9 +168,14 @@ export class CatalogService {
   async mine(user: SessionUser<ParticipantRole>, query: Record<string, unknown>) {
     const params = new Parameters()
     const filters = [`l.owner_id = ${params.add(user.id)}`]
+    if (query.publication) {
+      const publication = oneOf(query.publication, ['current', 'archive', 'restricted'], 'Публикация')
+      const statuses = { current: ['ACTIVE','HIDDEN'], archive: ['ARCHIVED'], restricted: ['FROZEN','BANNED'] }
+      filters.push(`l.status = ANY(${params.add(statuses[publication])}::text[])`)
+    }
     const search = this.managementFilters(query, params, filters)
     const order = search ? 'ranking.score DESC, l.created_at DESC, l.id' : 'l.created_at DESC, l.id'
-    return this.listPage(this.db, filters, params, pageParams(query), order, '', search)
+    return this.listPage(this.db, filters, params, pageParams(query), order, '', search, true)
   }
 
   async administrativeListings(query: Record<string, unknown>) {
@@ -153,13 +184,13 @@ export class CatalogService {
     const search = this.managementFilters(query, params, filters)
     if (query.kind) filters.push(`l.kind = ${params.add(oneOf(query.kind, kinds, 'Вид объявления'))}`)
     const order = search ? 'ranking.score DESC, l.created_at DESC, l.id' : 'l.created_at DESC, l.id'
-    return this.listPage(this.db, filters, params, pageParams(query), order, '', search)
+    return this.listPage(this.db, filters, params, pageParams(query), order, '', search, true)
   }
 
   async detail(user: SessionUser, idInput: string) {
     const result = await this.db.query<ListingRow>(`
       ${visibleCategories}
-      SELECT ${listingColumns} ${listingJoins}
+      SELECT ${listingColumnsFor('$2 OR l.owner_id = $3')} ${listingJoins}
       WHERE ${listingDetailWhere}
     `, this.detailParams(user, idInput))
     return this.found(result.rows[0])
@@ -185,7 +216,7 @@ export class CatalogService {
   }
 
   async show(db: Queryable, id: string) {
-    const { rows } = await db.query<ListingRow>(`SELECT ${listingColumns} ${listingJoins} WHERE l.id = $1`, [id])
+    const { rows } = await db.query<ListingRow>(`SELECT ${listingColumnsFor('true')} ${listingJoins} WHERE l.id = $1`, [id])
     return this.found(rows[0])
   }
 
@@ -196,16 +227,25 @@ export class CatalogService {
     const values = listingInput(raw, {}, kind)
     const images = await this.media.prepare(raw.imageOrder, uploads)
     return this.db.transaction(async client => {
-      await this.categoryReady(client, values[0] as string)
-      const markers = listingEditableColumns.map((_, index) => `$${index + 3}`).join(', ')
+      await lockHardwareModelReferences(client)
+      await this.activeUser(client, user.id)
+      await this.trust.assertPublishable(client, user.id, { creating: true })
+      await this.onboarding.assertCanPublish(user.id, client)
+      await this.actuality.assertCanActivate(client, user.id)
+      const categoryId = values[0] as string
+      await this.categoryReady(client, categoryId)
+      const extra = await this.exchangeValues(client, user.id, kind, values[3] as number, categoryId, raw)
+      const markers = editableColumns.map((_, index) => `$${index + 3}`).join(', ')
       const { rows } = await client.query<{ id: string }>(`
-        INSERT INTO listings (owner_id, kind, ${listingEditableColumns.join(', ')})
+        INSERT INTO listings (owner_id, kind, ${editableColumns.join(', ')})
         SELECT $1, $2, ${markers} FROM users WHERE id = $1 AND
           status = 'ACTIVE' AND email_verified_at IS NOT NULL FOR SHARE
         RETURNING id
-      `, [user.id, kind, ...values])
+      `, [user.id, kind, ...values, ...extra])
       if (!rows[0]) throw new ForbiddenException('Профиль недоступен')
       if (images) await this.media.save(client, rows[0].id, [], images)
+      await this.trust.refresh(client, user.id)
+      await this.matching.recomputeListing(client, rows[0].id)
       return this.show(client, rows[0].id)
     })
   }
@@ -215,33 +255,46 @@ export class CatalogService {
     const raw = object(body)
     const images = await this.media.prepare(raw.imageOrder, uploads)
     return this.db.transaction(async client => {
+      await lockHardwareModelReferences(client)
+      await this.activeUser(client, user.id)
+      await this.trust.assertPublishable(client, user.id, { creating: false })
+      await this.onboarding.assertCanPublish(user.id, client)
       const existing = await this.lock(client, id)
       this.assertOwnership(existing, user)
-      await this.activeUser(client, user.id)
-      return this.update(client, existing, raw, images)
+      if (existing.status === 'HIDDEN') throw new ConflictException('Сначала восстановите скрытое объявление')
+      return this.update(client, existing, raw, images, true)
     })
   }
 
-  async update(client: PoolClient, existing: ListingRow, raw: Record<string, unknown>, images?: ListingImageUpdate) {
+  async update(client: PoolClient, existing: ListingRow, raw: Record<string, unknown>, images?: ListingImageUpdate, ownerEdit = false) {
     if (raw.kind && raw.kind !== existing.kind) throw new BadRequestException('Вид объявления нельзя изменить')
     const values = listingInput(raw, existing, existing.kind)
     if (values[0] !== existing.categoryId) await this.categoryReady(client, values[0] as string)
-    const assignments = listingEditableColumns.map((name, index) => `${name} = $${index + 2}`).join(', ')
-    await client.query(`UPDATE listings SET ${assignments}, updated_at = now() WHERE id = $1`, [existing.id, ...values])
+    const extra = await this.exchangeValues(client, existing.ownerId, existing.kind, values[3] as number, values[0] as string, raw, existing)
+    const assignments = editableColumns.map((name, index) => `${name} = $${index + 2}`).join(', ')
+    await client.query(`UPDATE listings SET ${assignments}, updated_at = now() WHERE id = $1`, [existing.id, ...values, ...extra])
     if (images) await this.media.save(client, existing.id, existing.images, images)
+    if (ownerEdit) await this.actuality.recordOwnerEdit(client, existing.id)
+    await this.trust.refresh(client, existing.ownerId)
+    await this.matching.recomputeListing(client, existing.id)
     return this.show(client, existing.id)
   }
 
   async archive(user: SessionUser<ParticipantRole>, idInput: string, restore = false) {
     const id = uuid(idInput)
     return this.db.transaction(async client => {
+      await lockHardwareModelReferences(client)
+      await this.activeUser(client, user.id)
       const existing = await this.lock(client, id)
       this.assertOwnership(existing, user)
-      await this.activeUser(client, user.id)
-      const desired = restore ? 'ACTIVE' : 'ARCHIVED'
+      if (restore && existing.status !== 'ACTIVE') {
+        await this.trust.assertPublishable(client, user.id, { creating: existing.status === 'ARCHIVED' })
+        await this.onboarding.assertCanPublish(user.id, client)
+      }
       if (restore) await this.assertRepublishable(client, existing)
-      if (existing.status === desired) return existing
-      await client.query('UPDATE listings SET status = $2, updated_at = now() WHERE id = $1', [id, desired])
+      await this.actuality.ownerArchive(client, user.id, id, restore)
+      await this.trust.refresh(client, user.id)
+      await this.matching.recomputeListing(client, id)
       return this.show(client, id)
     })
   }
@@ -255,14 +308,42 @@ export class CatalogService {
   }
 
   async lock(client: PoolClient, id: string) {
+    await lockHardwareModelReferences(client)
     const result = await client.query('SELECT id FROM listings WHERE id = $1 FOR UPDATE', [id])
     if (!result.rows[0]) throw new NotFoundException('Объявление не найдено')
     return this.show(client, id)
   }
 
+  async lockListingOwner(client: PoolClient, id: string) {
+    await lockHardwareModelReferences(client)
+    const { rows: [owner] } = await client.query<{ id: string }>(`
+      SELECT u.id FROM listings l JOIN users u ON u.id = l.owner_id WHERE l.id = $1 FOR UPDATE OF u
+    `, [id]);
+    if (!owner) throw new NotFoundException('Объявление не найдено')
+    return owner.id
+  }
+
   private found(row?: ListingRow): ListingRow {
     if (!row) throw new NotFoundException('Объявление не найдено')
-    return row
+    const { privateFields, ...publicFields } = row
+    return { ...publicFields, ...(privateFields && typeof privateFields === 'object' ? privateFields : {}) } as ListingRow
+  }
+
+  private async exchangeValues(client: PoolClient, ownerId: string, kind: ListingRow['kind'], quantity: number,
+    categoryId: string, raw: Record<string, unknown>, existing?: ListingRow) {
+    const value = (key: string) => Object.hasOwn(raw, key) ? raw[key] : existing?.[key]
+    const lifetime = integer(value('lifetimeDays') ?? (kind === 'BUY' ? 21 : 14), 'Срок размещения', 1, 60)
+    const defaultMinimum = Math.min(Number(existing?.minLot ?? 1), quantity)
+    const minimum = integer(raw.minLot ?? defaultMinimum, 'Минимальная партия', 1, quantity)
+    const days = value('shipDays')
+    const shipping = kind === 'SELL' && days !== null && days !== undefined ? integer(days, 'Дни отгрузки', 0, 365) : null
+    const rawTerms = value('paymentTerms') ?? []
+    if (!Array.isArray(rawTerms) || rawTerms.length > allowedPaymentTerms.length) throw new BadRequestException('Неверные условия оплаты')
+    const terms = [...new Set(rawTerms.map(term => oneOf(term, allowedPaymentTerms, 'Условия оплаты')))]
+    const models = await validateListingModels(client, raw, existing ?? {}, categoryId, kind, ownerId)
+    const rep = await listingRepresentation(client, ownerId, raw, existing)
+    return [lifetime, minimum, shipping, terms, ...models, rep.representation, rep.principalId,
+      rep.agentFeeDisclosed, rep.agentFeeKind, rep.agentFeeValue, rep.agentFeePayer]
   }
 
   private oppositeKind(user: SessionUser): typeof kinds[number] {
@@ -289,7 +370,7 @@ export class CatalogService {
 
   private async activeUser(client: PoolClient, id: string) {
     const { rows } = await client.query(`
-      SELECT id FROM users WHERE id = $1 AND status = 'ACTIVE' AND email_verified_at IS NOT NULL FOR SHARE
+      SELECT id FROM users WHERE id = $1 AND status = 'ACTIVE' AND email_verified_at IS NOT NULL FOR UPDATE
     `, [id])
     if (!rows[0]) throw new ForbiddenException('Профиль недоступен')
   }
@@ -347,6 +428,8 @@ export class CatalogService {
     order: string,
     withClause = '',
     search?: ListingSearch,
+    privateFields = false,
+    lowRating?: string,
   ) {
     // Limit the lateral query to one score calculation per matched listing.
     const preamble = search ? (withClause ? withClause + ',' : 'WITH ') + search.ctes : withClause
@@ -359,16 +442,21 @@ export class CatalogService {
       ) ranking
     ` : '')
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
+    const visible = lowRating ? `(${lowRating}) IS NOT TRUE` : undefined
+    const itemsWhere = visible ? `${where ? where + ' AND' : 'WHERE'} ${visible}` : where
+    const totals = visible
+      ? `count(*) FILTER (WHERE ${visible})::int AS total, count(*) FILTER (WHERE ${lowRating})::int AS "hiddenLowRating"`
+      : 'count(*)::int AS total'
     const countValues = [...params.values]
     const limitParam = params.add(limit)
     const offsetParam = params.add(offset)
     const [items, count] = await Promise.all([
       db.query<ListingRow>(`
-        ${preamble} SELECT ${listingColumns} ${joins} ${where}
+        ${preamble} SELECT ${listingColumnsFor(privateFields ? 'true' : 'false')} ${joins} ${itemsWhere}
         ORDER BY ${order} LIMIT ${limitParam} OFFSET ${offsetParam}
       `, params.values),
-      db.query<{ total: number }>(`${preamble} SELECT count(*)::int AS total ${joins} ${where}`, countValues),
+      db.query<{ total: number; hiddenLowRating?: number }>(`${preamble} SELECT ${totals} ${joins} ${where}`, countValues),
     ])
-    return { items: items.rows, total: count.rows[0]?.total ?? 0, page, limit }
+    return { items: items.rows.map(row => this.found(row)), ...count.rows[0], page, limit }
   }
 }

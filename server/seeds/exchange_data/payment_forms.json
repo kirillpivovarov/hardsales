@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-25",
+  "description": "Условия оплаты (когда и через какой инструмент платят). Хранятся в новом поле listings.payment_terms. Существующее поле listings.payment_methods (BANK_TRANSFER, CARD, CASH, LETTER_OF_CREDIT) не меняется.",
+  "partner_kinds": [
+    {
+      "code": "ESCROW",
+      "label_ru": "Эскроу-партнёр (банк или юрист)"
+    },
+    {
+      "code": "LETTER_OF_CREDIT",
+      "label_ru": "Банк или консультант по аккредитивам"
+    },
+    {
+      "code": "GUARANTEE",
+      "label_ru": "Партнёр по банковским гарантиям"
+    },
+    {
+      "code": "INSPECTION",
+      "label_ru": "Партнёр по инспекции"
+    },
+    {
+      "code": "FINANCING",
+      "label_ru": "Финансирующий партнёр"
+    }
+  ],
+  "payment_terms": [
+    {
+      "code": "PREPAY_100",
+      "demo_id": "prepay100",
+      "label_ru": "100 % предоплата",
+      "when_ru": "Давние контрагенты, малые партии, рынок продавца",
+      "seller_risk_ru": "Минимальный",
+      "buyer_risk_ru": "Высокий: деньги ушли, товара нет",
+      "hint_ru": "Рекомендовать только при уровне «проверен сделкой» у продавца",
+      "partner": null,
+      "sort_order": 10
+    },
+    {
+      "code": "DEPOSIT_INSPECTION",
+      "demo_id": "deposit_inspection",
+      "label_ru": "Депозит + остаток после инспекции",
+      "when_ru": "Первые сделки, товар на складе",
+      "seller_risk_ru": "Отказ покупателя после инспекции, депозит покрывает часть",
+      "buyer_risk_ru": "Потеря депозита при недобросовестном продавце",
+      "hint_ru": "Партнёр по инспекции; депозит 10-30 % как ориентир рынка",
+      "partner": "INSPECTION",
+      "sort_order": 20
+    },
+    {
+      "code": "ESCROW",
+      "demo_id": "escrow",
+      "label_ru": "Эскроу (банк, юрист)",
+      "when_ru": "Новые контрагенты, средние суммы",
+      "seller_risk_ru": "Задержка денег до выполнения условий",
+      "buyer_risk_ru": "Расходы на эскроу, сроки",
+      "hint_ru": "Список партнёров-эскроу, кто платит комиссию договариваются стороны",
+      "partner": "ESCROW",
+      "sort_order": 30
+    },
+    {
+      "code": "LC_CONFIRMED",
+      "demo_id": "lc_confirmed",
+      "label_ru": "Аккредитив подтверждённый",
+      "when_ru": "Крупные партии, банки обеих сторон работают с аккредитивами",
+      "seller_risk_ru": "Сложные документы, расхождения задерживают оплату",
+      "buyer_risk_ru": "Стоимость открытия, деньги заморожены",
+      "hint_ru": "Партнёрский банк или консультант по аккредитивам",
+      "partner": "LETTER_OF_CREDIT",
+      "sort_order": 40
+    },
+    {
+      "code": "LC_TRANSFERABLE",
+      "demo_id": "lc_transferable",
+      "label_ru": "Аккредитив переводной",
+      "when_ru": "Агент или посредник передаёт часть аккредитива фактическому поставщику",
+      "seller_risk_ru": "Зависит от первого бенефициара",
+      "buyer_risk_ru": "Как у подтверждённого",
+      "hint_ru": "Удобно агенту продавца с подтверждённым принципалом",
+      "partner": "LETTER_OF_CREDIT",
+      "sort_order": 50
+    },
+    {
+      "code": "LC_BACK_TO_BACK",
+      "demo_id": "lc_b2b",
+      "label_ru": "Аккредитив back-to-back",
+      "when_ru": "Посредник открывает встречный аккредитив под входящий",
+      "seller_risk_ru": "Два комплекта документов, риск несовпадения",
+      "buyer_risk_ru": "Скрыт от покупателя",
+      "hint_ru": "Подсказывать только посредникам с опытом",
+      "partner": "LETTER_OF_CREDIT",
+      "sort_order": 60
+    },
+    {
+      "code": "BANK_GUARANTEE",
+      "demo_id": "bank_guarantee",
+      "label_ru": "Банковская гарантия",
+      "when_ru": "Продавец даёт отсрочку, нужна защита",
+      "seller_risk_ru": "Стоимость гарантии у покупателя, сроки выдачи",
+      "buyer_risk_ru": "Расходы на гарантию",
+      "hint_ru": "Партнёр по гарантиям",
+      "partner": "GUARANTEE",
+      "sort_order": 70
+    },
+    {
+      "code": "PAY_AFTER_INSPECTION",
+      "demo_id": "pay_after_inspection",
+      "label_ru": "Оплата после инспекции на складе",
+      "when_ru": "Товар на складе, покупатель или партнёр едет проверять",
+      "seller_risk_ru": "Товар «заморожен» на время инспекции",
+      "buyer_risk_ru": "Расходы на инспекцию",
+      "hint_ru": "Партнёр по инспекции, протокол по шаблону",
+      "partner": "INSPECTION",
+      "sort_order": 80
+    },
+    {
+      "code": "STABLECOIN_ESCROW",
+      "demo_id": "stablecoin_escrow",
+      "label_ru": "Стейблкоины через эскроу",
+      "when_ru": "Обе стороны работают с криптоактивами, нужна скорость",
+      "seller_risk_ru": "Курсовой риск при конвертации",
+      "buyer_risk_ru": "Риск эскроу-агента",
+      "hint_ru": "Только через эскроу-партнёра, без прямых переводов",
+      "partner": "ESCROW",
+      "sort_order": 90
+    },
+    {
+      "code": "DEFERRED_FINANCING",
+      "demo_id": "deferred_financing",
+      "label_ru": "Отсрочка с финансирующим партнёром",
+      "when_ru": "Покупатель не готов платить вперёд, продавец хочет деньги сразу",
+      "seller_risk_ru": "Минимальный: платит партнёр",
+      "buyer_risk_ru": "Стоимость финансирования",
+      "hint_ru": "Финансирующий партнёр, заявка через оператора",
+      "partner": "FINANCING",
+      "sort_order": 100
+    }
+  ],
+  "legacy_method_equivalents": [
+    {
+      "payment_method": "LETTER_OF_CREDIT",
+      "payment_terms": [
+        "LC_CONFIRMED",
+        "LC_TRANSFERABLE",
+        "LC_BACK_TO_BACK"
+      ]
+    },
+    {
+      "payment_method": "BANK_TRANSFER",
+      "payment_terms": []
+    },
+    {
+      "payment_method": "CARD",
+      "payment_terms": []
+    },
+    {
+      "payment_method": "CASH",
+      "payment_terms": []
+    }
+  ]
+}

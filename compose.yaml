@@ -1,4 +1,4 @@
-name: hwforai
+name: hwforai-maxv
 
 services:
   postgres:
@@ -18,7 +18,7 @@ services:
   mailpit:
     image: axllent/mailpit:v1.31.5
     ports:
-      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8125}:8025"
 
   app:
     build: .
@@ -31,8 +31,10 @@ services:
     environment:
       NODE_ENV: development
       DEMO_MODE: "true"
+      EXCHANGE_DEMO_FEATURES: ${EXCHANGE_DEMO_FEATURES:-false}
+      CATALOG_SYNC_IN_DEMO: ${CATALOG_SYNC_IN_DEMO:-false}
       DATABASE_URL: postgresql://hwforai:hwforai@postgres:5432/hwforai
-      APP_ORIGIN: http://127.0.0.1:${APP_PORT:-3000}
+      APP_ORIGIN: http://127.0.0.1:${APP_PORT:-3100}
       SMTP_HOST: mailpit
       SMTP_PORT: "1025"
       SMTP_SECURE: "false"
@@ -40,7 +42,7 @@ services:
       MAIL_FROM: "hwforai <no-reply@hwforai.local>"
       MODERATION_AGENT_TOKEN: ${MODERATION_AGENT_TOKEN:-}
     ports:
-      - "127.0.0.1:${APP_PORT:-3000}:3001"
+      - "127.0.0.1:${APP_PORT:-3100}:3001"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/v1/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
       interval: 10s

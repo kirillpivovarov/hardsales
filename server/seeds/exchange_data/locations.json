@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-25",
+  "description": "Ходовые места передачи товара. В hwforai место задаётся страной (origin_country, destination_country, ISO 3166-1 alpha-2) и городом склада (stock_city). Этот список нужен для подсказок города склада и для сопоставления. Совпадение по месту считается по стране (см. 05_matching.md).",
+  "locations": [
+    {
+      "id": "hk",
+      "country": "HK",
+      "city_ru": "Гонконг",
+      "city_en": "Hong Kong",
+      "sort_order": 10
+    },
+    {
+      "id": "dxb",
+      "country": "AE",
+      "city_ru": "Дубай",
+      "city_en": "Dubai",
+      "sort_order": 20
+    },
+    {
+      "id": "szx",
+      "country": "CN",
+      "city_ru": "Шэньчжэнь",
+      "city_en": "Shenzhen",
+      "sort_order": 30
+    },
+    {
+      "id": "sg",
+      "country": "SG",
+      "city_ru": "Сингапур",
+      "city_en": "Singapore",
+      "sort_order": 40
+    },
+    {
+      "id": "msk",
+      "country": "RU",
+      "city_ru": "Москва",
+      "city_en": "Moscow",
+      "sort_order": 50
+    },
+    {
+      "id": "ala",
+      "country": "KZ",
+      "city_ru": "Алматы",
+      "city_en": "Almaty",
+      "sort_order": 60
+    },
+    {
+      "id": "tas",
+      "country": "UZ",
+      "city_ru": "Ташкент",
+      "city_en": "Tashkent",
+      "sort_order": 70
+    }
+  ]
+}

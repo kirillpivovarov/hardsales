@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-25",
+  "description": "Таблица разрывов по оплате. Строка срабатывает, если у продавца есть хотя бы одно условие из seller_terms И у покупателя хотя бы одно из buyer_terms И (seller_representation пусто или равно представительству продавца в объявлении). Если сработала c8, строку c3 не показывать. Если не сработала ни одна строка, показывать fallback.",
+  "rules": [
+    {
+      "id": "c1",
+      "seller_wants_ru": "100 % предоплата",
+      "buyer_wants_ru": "Оплата после инспекции",
+      "seller_terms": [
+        "PREPAY_100"
+      ],
+      "buyer_terms": [
+        "PAY_AFTER_INSPECTION"
+      ],
+      "seller_representation": null,
+      "tool_ru": "Депозит + остаток после инспекции, либо эскроу с условием «акт инспекции»",
+      "suggest_terms": [
+        "DEPOSIT_INSPECTION",
+        "ESCROW"
+      ],
+      "partner": "INSPECTION",
+      "suppresses": []
+    },
+    {
+      "id": "c2",
+      "seller_wants_ru": "100 % предоплата",
+      "buyer_wants_ru": "Постоплата (отсрочка)",
+      "seller_terms": [
+        "PREPAY_100"
+      ],
+      "buyer_terms": [
+        "DEFERRED_FINANCING"
+      ],
+      "seller_representation": null,
+      "tool_ru": "Финансирующий партнёр",
+      "suggest_terms": [
+        "DEFERRED_FINANCING"
+      ],
+      "partner": "FINANCING",
+      "suppresses": []
+    },
+    {
+      "id": "c8",
+      "seller_wants_ru": "Предоплата (агент продавца)",
+      "buyer_wants_ru": "Аккредитив",
+      "seller_terms": [
+        "PREPAY_100"
+      ],
+      "buyer_terms": [
+        "LC_CONFIRMED",
+        "LC_TRANSFERABLE",
+        "LC_BACK_TO_BACK"
+      ],
+      "seller_representation": "AGENT",
+      "tool_ru": "Переводной аккредитив на принципала",
+      "suggest_terms": [
+        "LC_TRANSFERABLE"
+      ],
+      "partner": "LETTER_OF_CREDIT",
+      "suppresses": [
+        "c3"
+      ]
+    },
+    {
+      "id": "c3",
+      "seller_wants_ru": "100 % предоплата",
+      "buyer_wants_ru": "Аккредитив",
+      "seller_terms": [
+        "PREPAY_100"
+      ],
+      "buyer_terms": [
+        "LC_CONFIRMED",
+        "LC_TRANSFERABLE",
+        "LC_BACK_TO_BACK"
+      ],
+      "seller_representation": null,
+      "tool_ru": "Аккредитив с оплатой по предъявлении документов на отгрузку",
+      "suggest_terms": [
+        "LC_CONFIRMED"
+      ],
+      "partner": "LETTER_OF_CREDIT",
+      "suppresses": []
+    },
+    {
+      "id": "c4",
+      "seller_wants_ru": "Аккредитив подтверждённый",
+      "buyer_wants_ru": "Эскроу",
+      "seller_terms": [
+        "LC_CONFIRMED"
+      ],
+      "buyer_terms": [
+        "ESCROW"
+      ],
+      "seller_representation": null,
+      "tool_ru": "Эскроу банка с тем же набором документов",
+      "suggest_terms": [
+        "ESCROW"
+      ],
+      "partner": "ESCROW",
+      "suppresses": []
+    },
+    {
+      "id": "c5",
+      "seller_wants_ru": "Деньги до отгрузки",
+      "buyer_wants_ru": "Деньги после получения",
+      "seller_terms": [
+        "PREPAY_100",
+        "DEPOSIT_INSPECTION"
+      ],
+      "buyer_terms": [
+        "PAY_AFTER_INSPECTION",
+        "DEFERRED_FINANCING"
+      ],
+      "seller_representation": null,
+      "tool_ru": "Эскроу (банк или юрист)",
+      "suggest_terms": [
+        "ESCROW"
+      ],
+      "partner": "ESCROW",
+      "suppresses": []
+    },
+    {
+      "id": "c6",
+      "seller_wants_ru": "Предоплата",
+      "buyer_wants_ru": "Банковская гарантия от продавца",
+      "seller_terms": [
+        "PREPAY_100",
+        "DEPOSIT_INSPECTION"
+      ],
+      "buyer_terms": [
+        "BANK_GUARANTEE"
+      ],
+      "seller_representation": null,
+      "tool_ru": "Гарантия возврата аванса",
+      "suggest_terms": [
+        "BANK_GUARANTEE"
+      ],
+      "partner": "GUARANTEE",
+      "suppresses": []
+    },
+    {
+      "id": "c7",
+      "seller_wants_ru": "Расчёт в стейблкоинах",
+      "buyer_wants_ru": "Банковский перевод",
+      "seller_terms": [
+        "STABLECOIN_ESCROW"
+      ],
+      "buyer_terms": [
+        "PREPAY_100",
+        "DEPOSIT_INSPECTION",
+        "ESCROW",
+        "LC_CONFIRMED",
+        "LC_TRANSFERABLE",
+        "LC_BACK_TO_BACK",
+        "BANK_GUARANTEE",
+        "PAY_AFTER_INSPECTION",
+        "DEFERRED_FINANCING"
+      ],
+      "seller_representation": null,
+      "tool_ru": "Эскроу-партнёр, принимающий обе формы",
+      "suggest_terms": [
+        "ESCROW"
+      ],
+      "partner": "ESCROW",
+      "suppresses": []
+    },
+    {
+      "id": "c9",
+      "seller_wants_ru": "Оплата до инспекции",
+      "buyer_wants_ru": "Инспекция до оплаты",
+      "seller_terms": [
+        "PREPAY_100",
+        "LC_CONFIRMED",
+        "LC_TRANSFERABLE",
+        "LC_BACK_TO_BACK"
+      ],
+      "buyer_terms": [
+        "PAY_AFTER_INSPECTION"
+      ],
+      "seller_representation": null,
+      "tool_ru": "Инспекция + эскроу: деньги в эскроу до акта",
+      "suggest_terms": [
+        "ESCROW",
+        "PAY_AFTER_INSPECTION"
+      ],
+      "partner": "INSPECTION",
+      "suppresses": []
+    }
+  ],
+  "fallback": {
+    "id": "c0",
+    "seller_wants_ru": "Другая форма",
+    "buyer_wants_ru": "Другая форма",
+    "tool_ru": "Эскроу (банк или юрист) с условиями обеих сторон",
+    "suggest_terms": [
+      "ESCROW"
+    ],
+    "partner": "ESCROW"
+  }
+}

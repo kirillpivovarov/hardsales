@@ -1,0 +1,32 @@
+.exchange-page, .exchange-record, .exchange-representation {
+  display: grid;
+  gap: .85rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.exchange-record {
+  align-content: start;
+  padding: 1rem;
+}
+
+.exchange-records, .exchange-events {
+  display: grid;
+  gap: .65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.exchange-actions, .exchange-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .6rem;
+}
+
+.exchange-filter { align-items: end; }
+.exchange-filter > .field { flex: 1 1 9rem; min-width: 0; }
+.exchange-representation fieldset { min-width: 0; padding: .7rem; border: 1px solid var(--line); border-radius: .5rem; }
+.exchange-representation .field { min-width: 0; }
+.exchange-events li + li { border-top: 1px solid var(--line); padding-top: .5rem; }

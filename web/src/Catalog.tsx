@@ -3,6 +3,10 @@ import type { FormEvent } from 'react';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, isStaff } from './api';
 import type { User } from './api';
+import { ActualityBadges } from './ActualityWidgets';
+import { useExchange } from './Exchange';
+import { CatalogModelFilter } from './Models';
+import { ListingExchangeBadges } from './ListingExchangeBadges';
 import { ContextModeration } from './AdminPage';
 import { useI18n } from './i18n';
 import { ListingPhoto } from './ListingImages';
@@ -17,18 +21,20 @@ interface Results {
   page: number;
   limit: number;
   locked: boolean;
+  hiddenLowRating?: number;
 }
 
 const emptyResults: Results = { items: [], total: 0, page: 1, limit: 12, locked: false };
 
 export function CatalogPage({ user, home = false }: { user: User | null; home?: boolean }) {
   const { t, locale } = useI18n();
+  const { features } = useExchange();
   const [query, setQuery] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
   const committedSearch = query.get('q') ?? '';
   const [search, setSearch] = useState(committedSearch);
-  const sort = query.get('sort') ?? (committedSearch.trim() ? 'relevance' : 'newest');
+  const sort = query.get('sort') ?? (committedSearch.trim() ? 'relevance' : features.feature_trust_rating === true ? 'trust' : 'newest');
   const [categoryResults, setCategoryResults] = useState<{ path: string; items: Category[] }>();
   const [listingResults, setListingResults] = useState<{ source: string; data: Results }>();
   const [error, setError] = useState('');
@@ -100,6 +106,10 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   function change(values: Record<string,string>) {
     const next = new URLSearchParams(query);
     if (!('page' in values)) next.delete('page');
+    if ('category' in values && values.category !== selectedCategory) {
+      next.delete('model');
+      next.delete('withAnalogs');
+    }
     for (const [key, value] of Object.entries(values)) {
       if (value) next.set(key, value); else next.delete(key);
     }
@@ -114,7 +124,7 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
 
   const categoryTiles = categories.filter(category => !category.parentId).slice(0, 6);
   const options = (values: string[]) => values.map(value => <option value={value} key={value}>{t(terms[value] ?? value)}</option>);
-  const allFilters = ['category','country','destinationCountry','ownerType','availability','condition','originScope','priceMode','counterparty','paymentMethod','priceMin','priceMax','currency','vat','deliveryIncluded','customsIncluded'];
+  const allFilters = ['model','withAnalogs','representation','principalConfirmed','showAll','category','country','destinationCountry','ownerType','availability','condition','originScope','priceMode','counterparty','paymentMethod','priceMin','priceMax','currency','vat','deliveryIncluded','customsIncluded'];
   const filterCount = allFilters.filter(key => query.has(key)).length;
   const resultPages = Math.ceil(results.total / results.limit);
   const returnTarget = `?next=${encodeURIComponent('/catalog' + (requestedQuery ? '?' + requestedQuery : ''))}`;
@@ -175,6 +185,22 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
           {staff && selectedCategoryRecord && <ContextModeration user={user}
             target={{ type: 'category', id: selectedCategoryRecord.id, title: categoryName(selectedCategoryRecord, locale) }}
             label={t('Редактировать выбранную категорию')} onSaved={result => categorySaved(selectedCategoryRecord, result)} />}
+          {authenticated && <CatalogModelFilter categorySlug={selectedCategory || undefined} modelId={query.get('model') ?? ''}
+            withAnalogs={query.get('withAnalogs') === 'true'}
+            onChange={(modelId, withAnalogs) => change({ model: modelId, withAnalogs: modelId && withAnalogs ? 'true' : '' })} />}
+          {authenticated && features.feature_representation === true && <>
+            <Field label={t('Представительство')}>
+              <select value={query.get('representation') ?? ''} onChange={event => change({ representation: event.target.value })}>
+                <option value="">{t('Все объявления')}</option><option value="DIRECT">{t('Прямая сторона')}</option>
+                <option value="AGENT">{t('Агент')}</option>
+              </select>
+            </Field>
+            <label className="admin-check">
+              <input type="checkbox" checked={query.get('principalConfirmed') === 'true'}
+                onChange={event => change({ principalConfirmed: event.target.checked ? 'true' : '' })} />
+              {t('Подтверждённый принципал')}
+            </label>
+          </>}
           <Field label={t(kind === 'BUY' ? 'Тип покупателя' : 'Тип продавца')}><select value={query.get('ownerType') ?? ''} onChange={event => change({ownerType:event.target.value})}>
             <option value="">{t('Все участники')}</option>{options(['COMPANY','INDIVIDUAL'])}
           </select></Field>
@@ -244,11 +270,18 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
             </div>
             <label className="catalog-sort"><span className="sr-only">{t('Сортировка')}</span><select value={sort} onChange={event => change({sort:event.target.value})}>
               {(committedSearch.trim() || sort === 'relevance') && <option value="relevance">{t('По релевантности')}</option>}
+              {features.feature_trust_rating === true && <option value="trust">{t('По рейтингу объявления')}</option>}
               <option value="newest">{t('Сначала новые')}</option>
               <option value="price-asc">{t('Сначала дешевле')}</option>
               <option value="price-desc">{t('Сначала дороже')}</option>
             </select></label>
           </div>
+          {authenticated && features.feature_trust_rating === true && <label className="admin-check">
+            <input type="checkbox" checked={query.get('showAll') === 'true'}
+              onChange={event => change({ showAll: event.target.checked ? 'true' : '' })} />
+            {t('Показать все объявления, включая низкий рейтинг')}
+            {Boolean(results.hiddenLowRating) && ` · ${results.hiddenLowRating}`}
+          </label>}
           {!home && <form className="catalog-search" onSubmit={submitSearch} role="search">
             <Icon name="search" size={19} /><input aria-label={t('Поиск оборудования')} placeholder={t('Название, модель или спецификация')} value={search} maxLength={150} spellCheck={false} onChange={event => setSearch(event.target.value)} /><Button type="submit">{t('Найти')}</Button>
           </form>}
@@ -308,6 +341,7 @@ function ListingCard({ listing, category, returnTo }: { listing: Listing; catego
     <div className="listing-card-body">
       <span className="listing-kicker">{listing.kind === 'BUY' ? t('Заявка на закупку') : listing.availability ? t(terms[listing.availability] ?? listing.availability) : t('Предложение')}</span>
       <h3>{listing.title}</h3>
+      <ListingExchangeBadges listing={listing} /><ActualityBadges listing={listing} />
       <strong className="listing-price">{price}</strong>
       <span className="listing-place"><Icon name="map-pin" size={15} />{place || t('Любая страна')}</span>
     </div>

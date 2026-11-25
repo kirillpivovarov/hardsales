@@ -2,6 +2,10 @@ import { useEffect, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import { api, ApiError, isStaff } from './api';
 import type { User } from './api';
+import { ActualityBadges } from './ActualityWidgets';
+import { ListingExchangeBadges } from './ListingExchangeBadges';
+import { ListingProof, PaymentRisk } from './Trust';
+import { useExchange } from './Exchange';
 import { ContextModeration } from './AdminPage';
 import { ListingVisual } from './Catalog';
 import { StartChatButton } from './ChatPage';
@@ -18,6 +22,7 @@ const nonPublicStatus: Record<string, string> = {
 };
 
 export function ListingDetail({ user }: { user: User | null }) {
+  const { features } = useExchange();
   const { id } = useParams();
   const returnTo: unknown = useLocation().state?.returnTo;
   const { t, locale } = useI18n();
@@ -114,6 +119,7 @@ export function ListingDetail({ user }: { user: User | null }) {
     <div className="detail-title">
       <span className="listing-kicker">{category ? categoryName(category, locale) : t(listing.kind === 'SELL' ? 'Предложение' : 'Заявка на закупку')}</span>
       <h1>{listing.title}</h1>
+      <ListingExchangeBadges listing={listing} /><ActualityBadges listing={listing} />
       {staff && <div className="contextual-actions">
         <ContextModeration user={user} target={{ type: 'listing', id: listing.id, title: listing.title }}
           label={t('Модерировать объявление')} onSaved={reloadAfterModeration} />
@@ -132,6 +138,8 @@ export function ListingDetail({ user }: { user: User | null }) {
         <section className="panel detail-panel"><h2>{t('Условия сделки')}</h2><dl>
           {properties.filter(([,value]) => value !== null && value !== undefined && value !== '').map(([label, value]) => <div key={label}><dt>{t(String(label))}</dt><dd>{value}</dd></div>)}
         </dl></section>
+        {features.feature_trust_rating === true && <PaymentRisk listing={listing} />}
+        {myListing && features.feature_trust_rating === true && <ListingProof listingId={listing.id} kind={listing.kind} />}
       </div>
       <aside className="panel detail-panel detail-seller">
         <span className="muted">{t(listing.kind === 'SELL' ? 'Цена' : 'Бюджет')}</span>

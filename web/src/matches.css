@@ -1,0 +1,149 @@
+.match-filters,
+.match-actions,
+.match-pagination,
+.match-card-header,
+.match-owner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.match-filters {
+  margin-bottom: 1rem;
+}
+
+.match-card-header {
+  justify-content: space-between;
+}
+
+.match-results,
+.match-card,
+.match-dialog form {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.match-card,
+.match-dialog {
+  padding: 1.25rem;
+  overflow-wrap: anywhere;
+}
+
+.match-card h2,
+.match-card h3,
+.match-card p,
+.match-card dl,
+.match-card ul {
+  margin: 0;
+}
+
+.match-card-listings,
+.match-specs {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.match-card-listings .match-badge {
+  margin-inline-start: 0.45rem;
+}
+
+.match-card-listings a {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.match-specs dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.match-specs dd {
+  margin: 0.15rem 0 0;
+}
+
+.match-owner,
+.match-explanation {
+  border-top: 1px solid var(--line);
+  padding-top: 0.85rem;
+}
+
+.match-explanation ul {
+  padding-inline-start: 1.25rem;
+}
+
+.match-badge {
+  background: var(--surface, var(--panel));
+  border: 1px solid var(--line);
+  color: var(--text);
+  display: inline-block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.2rem 0.55rem;
+  border-radius: 0.35rem;
+}
+
+.match-badge.match-full {
+  background: #e5f6ec;
+  color: #175331;
+  border-color: #b8e6cc;
+}
+
+.match-badge.match-partial {
+  background: #fff5dc;
+  color: #714c09;
+  border-color: #ecd8a3;
+}
+
+.match-dialog {
+  width: min(28rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  margin: auto;
+  color: var(--text);
+}
+
+.match-dialog::backdrop {
+  background: rgb(10 20 30 / 60%);
+}
+
+.match-dialog h2 {
+  margin: 0 0 1rem;
+}
+
+.match-admin-filters,
+.match-rate-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.match-rate-row .notice {
+  grid-column: 1 / -1;
+}
+
+.match-rate-row small {
+  align-self: center;
+}
+
+@media (max-width: 600px) {
+  .match-card,
+  .match-dialog {
+    padding: 1rem;
+  }
+
+  .match-card-listings,
+  .match-specs,
+  .match-admin-filters,
+  .match-rate-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .match-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

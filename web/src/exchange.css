@@ -1,0 +1,16 @@
+.exchange-page { max-width: 960px; }
+.exchange-page h1 { margin-bottom: 1.5rem; }
+.exchange-count { margin-inline-start: .5em; font-variant-numeric: tabular-nums; }
+.exchange-setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .75rem; }
+.exchange-setting input[type=checkbox] { width: 1.25rem; min-height: 1.25rem; }
+.exchange-runs { list-style: none; padding: 0; display: grid; gap: .5rem; }
+.exchange-runs li { display: flex; flex-wrap: wrap; gap: .75rem; overflow-wrap: anywhere; }
+.exchange-admin-nav { display: flex; gap: .35rem; flex-wrap: wrap; margin-bottom: 1rem; }
+@media (max-width: 480px) {
+  .exchange-setting { grid-template-columns: minmax(0, 1fr); }
+  .exchange-setting > button { justify-self: start; }
+}
+.exchange-listing-labels { display: flex; gap: .35rem; flex-wrap: wrap; margin-block: .4rem; }
+.exchange-listing-labels .contextual-status { max-width: 100%; overflow-wrap: anywhere; }
+.exchange-notification-link { position: relative; padding-inline: .7rem; }
+.exchange-notification-link .exchange-count { position: absolute; top: -5px; right: -4px; margin: 0; }

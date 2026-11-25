@@ -12,6 +12,12 @@ export interface User {
   status: 'ACTIVE' | 'FROZEN' | 'BANNED';
   emailVerified: boolean;
   mustChangePassword: boolean;
+  onboardingState?: 'EXEMPT' | 'REQUIRED' | 'DONE';
+  representationMode?: 'DIRECT' | 'AGENT' | 'BOTH';
+  rulesAcceptedVersion?: string | null;
+  rulesVersion?: string;
+  rulesRequired?: boolean;
+  notifyEmail?: boolean;
 }
 
 export function isStaff(user?: User | null): boolean {

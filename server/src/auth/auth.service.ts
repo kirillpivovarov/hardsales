@@ -8,9 +8,12 @@ import type { Request } from 'express';
 import type { PoolClient } from 'pg';
 import { appOrigin, demoMode, isProduction } from '../config';
 import { DatabaseService, type Queryable } from '../database/database.service';
+import { assertCompanyAlias } from '../exchange/disclosure-names';
+import { INVALID_INVITE, INVITE_NO_LONGER_AVAILABLE, InvitesService, type AvailableInvite } from '../exchange/invites.service';
+import { OnboardingService } from '../exchange/onboarding.service';
 import { codesMatch, hashCode, hashPassword, hashToken, passwordMatches, strongAdminPassword } from './auth.crypto';
 import type { CreateModeratorDto, CredentialsDto, LoginDto, ProfileDto, RegisterDto } from './auth.dto';
-import { isStaffRole, sessionUser, type ParticipantRole, type SessionUser, type StaffSession, type UserRow } from './auth.types';
+import { isStaffRole, type ParticipantRole, type SessionUser, type StaffSession, type UserRow } from './auth.types';
 import { MailService } from './mail.service';
 import { CAPTCHA_TTL, createRegistrationCaptcha, verifyRegistrationCaptcha } from './captcha';
 
@@ -32,8 +35,9 @@ const INVALID_CODE = 'Код неверен, истёк или уже испол
 const REGISTRATION_COOLDOWN = 'Код можно запросить ещё раз через минуту.';
 const DUMMY_PASSWORD_HASH = `scrypt$${'0'.repeat(32)}$${'0'.repeat(128)}`;
 
-interface PendingProfile extends Omit<RegisterDto, 'password' | 'captchaToken'> {
+interface PendingProfile extends Omit<RegisterDto, 'password' | 'captchaToken' | 'inviteCode'> {
   passwordHash: string;
+  inviteId?: string;
 }
 
 type PendingRegistration = PendingProfile | { suppressed: true };
@@ -113,7 +117,12 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
   private readonly logger = new Logger(AuthService.name);
   private cleanupTimer?: NodeJS.Timeout;
 
-  constructor(private readonly db: DatabaseService, private readonly mail: MailService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly mail: MailService,
+    private readonly invites: InvitesService,
+    private readonly onboarding: OnboardingService,
+  ) {}
 
   onApplicationBootstrap(): void {
     void this.cleanup();
@@ -130,12 +139,32 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     return createRegistrationCaptcha();
   }
 
+  async registrationMode() {
+    return (await this.invites.registration()).mode;
+  }
+
   async register(input: RegisterDto, ip: string): Promise<ChallengeResult> {
     await this.limit('register-ip', ip, 12, 3600);
-    const { captchaToken, password, ...profile } = input;
+    const { captchaToken, password, inviteCode, ...profile } = input;
     const signature = await verifyRegistrationCaptcha(captchaToken);
     // A challenge can be submitted only once, even across application replicas or encoded differently.
     await this.limit('registration-captcha-used', signature, 1, CAPTCHA_TTL);
+
+    const { mode } = await this.invites.registration();
+    let invite: AvailableInvite | undefined;
+    if (mode === 'INVITE' || inviteCode !== undefined) {
+      await this.inviteLimit('register-invite-ip', ip, 20);
+      invite = inviteCode === undefined ? undefined : await this.invites.available(inviteCode);
+      if (!invite) {
+        await this.inviteLimit('register-invite-bad-ip', ip, 10);
+        throw new BadRequestException(INVALID_INVITE);
+      }
+      if (invite.preset_role && invite.preset_role !== profile.role) {
+        throw new BadRequestException('Приглашение выдано для другой роли');
+      }
+    }
+
+    if (profile.participantType === 'COMPANY') await assertCompanyAlias(this.db, profile.companyName, profile.username);
 
     const passwordHash = await hashPassword(password);
     const challenge = await this.db.transaction(async (client) => {
@@ -143,7 +172,7 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       await this.checkRegistrationCooldown(client, profile.email);
       const pending: PendingRegistration = await this.registeredEmail(client, profile.email)
         ? { suppressed: true }
-        : { ...profile, passwordHash };
+        : { ...profile, passwordHash, inviteId: invite?.id };
       return this.insertChallenge(client, 'REGISTER', profile.email, null, pending, null);
     });
     return this.deliverChallenge(challenge);
@@ -230,14 +259,19 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       let user: UserRow | undefined;
       if (challenge.purpose === 'REGISTER') {
         if (!pending || (pending.role !== 'BUYER' && pending.role !== 'SELLER')) return null;
+        const registration = await this.invites.lockRegistration(client);
+        if (!pending.inviteId && registration.mode === 'INVITE') throw new ConflictException(INVITE_NO_LONGER_AVAILABLE);
+        const invite = pending.inviteId ? await this.invites.lockAvailable(client, pending.inviteId, pending.role) : null;
         user = (await client.query<UserRow>(`
           INSERT INTO users (username, display_name, email, password_hash, role, participant_type,
-            company_name, city, country, telegram, email_verified_at)
-          VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+            company_name, city, country, telegram, email_verified_at, invite_id, onboarding_state)
+          VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11)
           ON CONFLICT DO NOTHING RETURNING *
         `, [pending.username, pending.email, pending.passwordHash, pending.role, pending.participantType,
           pending.participantType === 'COMPANY' ? pending.companyName : null,
-          pending.city, pending.country, pending.telegram.replace(/^@/, '')])).rows[0];
+          pending.city, pending.country, pending.telegram.replace(/^@/, ''), invite?.id ?? null,
+          registration.enabled || invite ? 'REQUIRED' : 'EXEMPT'])).rows[0];
+        if (invite && user) await this.invites.consume(client, invite, user.id, user.display_name);
       } else {
         user = (await client.query<UserRow>('SELECT * FROM users WHERE id = $1 FOR UPDATE', [challenge.user_id])).rows[0];
       }
@@ -276,7 +310,7 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
         WHERE s.token_hash = $1 AND s.expires_at > now()
       `, [hashToken(token)]);
       const user = rows[0];
-      if (user?.status === 'ACTIVE' && user.email_verified_at) return sessionUser(user);
+      if (user?.status === 'ACTIVE' && user.email_verified_at) return this.onboarding.presentUser(user);
       if (user && user.status !== 'ACTIVE' && required) throw statusError(user.status);
     }
     if (required) throw new UnauthorizedException('Войдите в аккаунт и подтвердите почту.');
@@ -334,7 +368,7 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
         await this.recordStaffAction(client, actor, created.id, 'moderator-created', {
           role: created.role, emailVerified: false, mustChangePassword: true,
         });
-        return sessionUser(created);
+        return this.onboarding.presentUser(created, client);
       });
     } catch (error) {
       if (isUniqueViolation(error)) throw new ConflictException('Этот логин или адрес уже используется.');
@@ -362,6 +396,15 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       throw new BadRequestException('Название компании доступно только компаниям.');
     }
     return this.db.transaction(async (client) => {
+      if (input.companyName !== undefined || input.displayName !== undefined) {
+        const { rows: [current] } = await client.query<UserRow>('SELECT * FROM users WHERE id = $1 FOR UPDATE', [owner.id]);
+        if (!current) throw new ForbiddenException('Профиль недоступен.');
+        const name = input.companyName ?? current.company_name;
+        const nickname = input.displayName ?? current.display_name;
+        if (name !== current.company_name || nickname !== current.display_name) {
+          await assertCompanyAlias(client, name, current.username, nickname);
+        }
+      }
       const { rows: [updated] } = await client.query<UserRow>(`
         UPDATE users SET
           display_name = COALESCE($2, display_name),
@@ -369,17 +412,18 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
           country = COALESCE($4, country),
           telegram = COALESCE($5, telegram),
           company_name = COALESCE($6, company_name),
+          notify_email = COALESCE($8, notify_email),
           updated_at = now()
         WHERE id = $1 AND status = 'ACTIVE'
           AND EXISTS (SELECT 1 FROM auth_sessions WHERE token_hash = $7 AND user_id = $1 AND expires_at > now())
         RETURNING *
       `, [owner.id, input.displayName, input.city, input.country, input.telegram?.replace(/^@/, ''), input.companyName,
-        hashToken(sessionToken(request)!)]);
+        hashToken(sessionToken(request)!), input.notifyEmail]);
       if (!updated) throw new ForbiddenException('Профиль недоступен.');
       await this.recordStaffAction(client, updated, updated.id, 'profile-edited', {
         fields: Object.keys(input).filter((key) => input[key as keyof ProfileDto] !== undefined),
       });
-      return sessionUser(updated);
+      return this.onboarding.presentUser(updated, client);
     });
   }
 
@@ -441,7 +485,16 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       VALUES ($1, $2, now() + $3::integer * interval '1 second')
     `, [hashToken(token), user.id, SESSION_TTL]);
     if (signingIn) await this.recordStaffAction(client, user, user.id, 'login');
-    return { user: sessionUser(user), token };
+    return { user: await this.onboarding.presentUser(user, client), token };
+  }
+
+  private async inviteLimit(namespace: string, ip: string, attempts: number): Promise<void> {
+    try {
+      await this.limit(namespace, ip, attempts, 3600);
+    } catch (error) {
+      if (!(error instanceof HttpException) || error.getStatus() !== HttpStatus.TOO_MANY_REQUESTS) throw error;
+      throw new HttpException('Слишком много попыток. Попробуйте через час', HttpStatus.TOO_MANY_REQUESTS);
+    }
   }
 
   private async insertChallenge(

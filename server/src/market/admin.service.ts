@@ -5,13 +5,16 @@ import type { PoolClient } from 'pg'
 import { isStaffRole, type Role, type StaffSession } from '../auth/auth.types'
 import { isPublicProfileText } from '../contact'
 import { DatabaseService, type Queryable } from '../database/database.service'
+import { assertCompanyAlias } from '../exchange/disclosure-names'
+import { representationEnabled } from '../exchange/representation.rules'
+import { TrustService } from '../exchange/trust.service'
 import { CatalogService } from './catalog.service'
 import { ListingMediaService, type ListingImageUpload } from './listing-media.service'
 import {
   accountStatuses, accountTypes, boolean, country, escapedSearch, integer, listingStatuses, localeCode,
   object, oneOf, pageParams, Parameters, reportStatuses, reviewStatuses, slug, str, telegram, uuid,
 } from './market.inputs'
-import { categoryColumns } from './market.queries'
+import { actualityRequestedSql, categoryColumns } from './market.queries'
 
 const participantRoles = ['BUYER', 'SELLER'] as const
 const userRoles = [...participantRoles, 'ADMIN', 'MODERATOR'] as const
@@ -24,6 +27,9 @@ function userColumns(restrictStaffContacts = false) {
   return `
     u.id, u.username, u.display_name AS "displayName", ${contact('email')}, u.role, u.participant_type AS "participantType",
     u.company_name AS "companyName", u.city, u.country, ${contact('telegram')}, u.status,
+    CASE WHEN ${participantRow} AND ${representationEnabled} THEN
+      CASE WHEN u.company_email_confirmed_at IS NULL THEN 'UNVERIFIED' ELSE u.company_email_domain_kind END
+    END AS "companyEmailStatus",
     (u.email_verified_at IS NOT NULL) AS "emailVerified", u.created_at AS "createdAt", u.updated_at AS "updatedAt"
   `
 }
@@ -48,7 +54,7 @@ const reportJoins = 'FROM reports r JOIN users a ON a.id = r.reporter_id JOIN us
 
 const statusTables = {
   users: { choices: accountStatuses, table: 'users' },
-  listings: { choices: listingStatuses, table: 'listings' },
+  listings: { choices: listingStatuses.filter(status => status !== 'HIDDEN'), table: 'listings' },
   reviews: { choices: reviewStatuses, table: 'reviews' },
   reports: { choices: reportStatuses, table: 'reports' },
 } as const
@@ -64,6 +70,7 @@ const editableUserFields = new Set(['displayName', 'city', 'country', 'telegram'
 export class AdminService {
   constructor(
     private readonly db: DatabaseService, private readonly catalog: CatalogService, private readonly media: ListingMediaService,
+    private readonly trust: TrustService,
   ) {}
 
   users(actor: StaffActor, query: Record<string, unknown>) {
@@ -123,6 +130,9 @@ export class AdminService {
       const handle = telegram(next.telegram)
       const participantType = oneOf(next.participantType, accountTypes, 'Тип участника')
       const companyName = participantType === 'COMPANY' ? str(next.companyName, 'Компания', 2, 120) : null
+      if (displayName !== before.displayName || companyName !== before.companyName) {
+        await assertCompanyAlias(client, companyName, before.username, displayName)
+      }
       const result = await client.query(`
           UPDATE users AS u SET display_name = $2, city = $3, country = $4, telegram = $5,
             participant_type = $6, company_name = $7, updated_at = now()
@@ -147,6 +157,7 @@ export class AdminService {
     const raw = object(body)
     const images = await this.media.prepare(raw.imageOrder, uploads)
     return this.staffTransaction(actor, async (client, currentActor) => {
+      await this.catalog.lockListingOwner(client, id)
       const before = await this.catalog.lock(client, id)
       const after = await this.catalog.update(client, before, raw, images)
       await this.audit(client, currentActor, 'listings', id, 'edited', null, before, after)
@@ -255,8 +266,9 @@ export class AdminService {
           return { error: new ForbiddenException('Недостаточно прав для изменения статуса сотрудника') }
         }
       }
+      const listingOwner = entity === 'listings' ? await this.catalog.lockListingOwner(client, id) : undefined
       const { rows } = await client.query(`
-        SELECT status${entity === 'reports' ? ', resolution' : ''}
+        SELECT status${entity === 'reports' ? ', resolution, reason AS report_reason, subject_id' : ''}
         FROM ${table} WHERE id = $1 FOR UPDATE
       `, [id])
       const before = rows[0]
@@ -274,20 +286,33 @@ export class AdminService {
       const changed = before.status !== status || (entity === 'reports' && before.resolution !== reason)
       if (changed) {
         if (entity === 'listings' && status === 'ACTIVE') {
-          await this.catalog.assertRepublishable(client, await this.catalog.show(client, id))
+          const listing = await this.catalog.show(client, id)
+          if (currentActor === 'agent:moderation' && listing.spotCheckHold) {
+            throw new ForbiddenException('Проверку может закрыть только сотрудник площадки')
+          }
+          await this.catalog.assertRepublishable(client, listing)
         }
         const extra = {
           reports: ', resolution = $3',
           users: ', updated_at = now(), credential_version = credential_version + 1',
-          listings: ', updated_at = now()',
+          listings: `, updated_at = now(), expires_at = CASE
+            WHEN $2 = 'ACTIVE' AND (status = 'ARCHIVED' OR expires_at IS NULL OR expires_at <= now())
+            THEN greatest(now(), (SELECT starts_at FROM actuality_activation WHERE singleton AND ${actualityRequestedSql}))
+              + lifetime_days * interval '1 day'
+            ELSE expires_at END`,
           reviews: '',
         }[entity]
         const values = entity === 'reports' ? [id, status, reason] : [id, status]
         await client.query(`UPDATE ${table} SET status = $2${extra} WHERE id = $1`, values)
         if (entity === 'users') await client.query('DELETE FROM auth_sessions WHERE user_id = $1', [id])
+        if (listingOwner) await this.trust.refresh(client, listingOwner)
       }
       await this.audit(client, currentActor, entity, id, changed ? 'status-changed' : 'status-unchanged', reason,
         { status: before.status }, { status }, idempotency)
+      if (changed && entity === 'users') await this.trust.refresh(client, id)
+      if (entity === 'reports' && before.status !== status && before.report_reason === 'FRAUD') {
+        await this.trust.refresh(client, before.subject_id)
+      }
       return { entity, id, status, changed, replayed: false }
     })
     if (result.error) throw result.error

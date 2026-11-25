@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-25",
+  "description": "Естественные аналоги: модели одного семейства и одной категории. Стоечные системы (form_factor rack) не считаются аналогами 8-GPU серверов. Группа из одной модели не выводится. Площадка ПРЕДЛАГАЕТ аналоги покупателю, совпадение по аналогу работает только если покупатель отметил его в заявке.",
+  "groups": [
+    {
+      "id": "h200-servers-unit",
+      "family": "h200",
+      "category": "servers",
+      "rack": false,
+      "model_ids": [
+        "hgx-h200-8",
+        "hgx-h200-4",
+        "dgx-h200",
+        "srv-h200nvl-8"
+      ]
+    },
+    {
+      "id": "b300-servers-unit",
+      "family": "b300",
+      "category": "servers",
+      "rack": false,
+      "model_ids": [
+        "hgx-b300-8",
+        "dgx-b300"
+      ]
+    },
+    {
+      "id": "b200-servers-unit",
+      "family": "b200",
+      "category": "servers",
+      "rack": false,
+      "model_ids": [
+        "hgx-b200-8",
+        "dgx-b200"
+      ]
+    },
+    {
+      "id": "h100-servers-unit",
+      "family": "h100",
+      "category": "servers",
+      "rack": false,
+      "model_ids": [
+        "hgx-h100-8",
+        "dgx-h100"
+      ]
+    },
+    {
+      "id": "rtx-servers-unit",
+      "family": "rtx",
+      "category": "servers",
+      "rack": false,
+      "model_ids": [
+        "srv-rtx5090-8",
+        "srv-rtxpro6000-8",
+        "srv-l40s-8"
+      ]
+    },
+    {
+      "id": "h200-gpu-unit",
+      "family": "h200",
+      "category": "gpu",
+      "rack": false,
+      "model_ids": [
+        "h200-nvl",
+        "h200-sxm"
+      ]
+    },
+    {
+      "id": "h100-gpu-unit",
+      "family": "h100",
+      "category": "gpu",
+      "rack": false,
+      "model_ids": [
+        "h100-sxm",
+        "h100-pcie"
+      ]
+    },
+    {
+      "id": "rtx-gpu-unit",
+      "family": "rtx",
+      "category": "gpu",
+      "rack": false,
+      "model_ids": [
+        "rtx-5090",
+        "rtx-pro-6000",
+        "rtx-6000-ada",
+        "rtx-4090"
+      ]
+    },
+    {
+      "id": "l-a-gpu-unit",
+      "family": "l-a",
+      "category": "gpu",
+      "rack": false,
+      "model_ids": [
+        "l40s",
+        "l40",
+        "l4",
+        "a100-80",
+        "a40",
+        "a16",
+        "t4"
+      ]
+    }
+  ]
+}

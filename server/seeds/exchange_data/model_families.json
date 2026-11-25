@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-25",
+  "description": "Семейства моделей и порядок показа (сначала самые ходовые). key совпадает с models.json -> family. Модели без семейства идут в other.",
+  "families": [
+    {
+      "key": "H200",
+      "code": "h200",
+      "label_ru": "H200 (Hopper)",
+      "sort_order": 10
+    },
+    {
+      "key": "B300",
+      "code": "b300",
+      "label_ru": "B300 (Blackwell Ultra)",
+      "sort_order": 20
+    },
+    {
+      "key": "B200",
+      "code": "b200",
+      "label_ru": "B200 (Blackwell)",
+      "sort_order": 30
+    },
+    {
+      "key": "Rubin",
+      "code": "rubin",
+      "label_ru": "Rubin: новое поколение",
+      "sort_order": 40
+    },
+    {
+      "key": "H100",
+      "code": "h100",
+      "label_ru": "H100 (Hopper)",
+      "sort_order": 50
+    },
+    {
+      "key": "RTX",
+      "code": "rtx",
+      "label_ru": "RTX и серверы на картах PCIe",
+      "sort_order": 60
+    },
+    {
+      "key": "L и A",
+      "code": "l-a",
+      "label_ru": "Серии L, A и T",
+      "sort_order": 70
+    },
+    {
+      "key": "AMD",
+      "code": "amd",
+      "label_ru": "AMD",
+      "sort_order": 80
+    },
+    {
+      "key": "other",
+      "code": "other",
+      "label_ru": "Другие",
+      "sort_order": 90
+    }
+  ]
+}

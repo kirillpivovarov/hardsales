@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { isEmail } from 'class-validator';
+import type { PoolClient } from 'pg';
 import { hashPassword, strongAdminPassword } from '../auth/auth.crypto';
 import { USERNAME_PATTERN } from '../auth/auth.dto';
 import { demoMode, isProduction } from '../config';
@@ -9,6 +10,31 @@ import { DatabaseService } from './database.service';
 const DEMO_SELLER = '00000000-0000-4000-8000-000000000001';
 const DEMO_BUYER = '00000000-0000-4000-8000-000000000002';
 const DEMO_ADMIN = '00000000-0000-4000-8000-000000000003';
+
+async function seedExchangeFile(client: PoolClient, name: 'exchange' | 'exchange-features'): Promise<void> {
+  const marker = `seed:demo-${name}`;
+  const existing = await client.query('SELECT 1 FROM schema_migrations WHERE file_name = $1', [marker]);
+  if (existing.rowCount) return;
+
+  let sql: string;
+  try {
+    sql = await readFile(resolve(__dirname, `../../seeds/${name}.sql`), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  await client.query(sql);
+  await client.query(
+    "INSERT INTO schema_migrations (file_name, checksum) VALUES ($1, repeat('0', 64))", [marker],
+  );
+}
+
+async function seedDemoExchange(client: PoolClient): Promise<void> {
+  const enableFeatures = process.env.EXCHANGE_DEMO_FEATURES === 'true';
+  await client.query("SELECT set_config('hwforai.demo_exchange', $1, true)", [enableFeatures ? 'on' : 'off']);
+  await seedExchangeFile(client, 'exchange');
+  if (enableFeatures) await seedExchangeFile(client, 'exchange-features');
+}
 
 export async function seedConfiguredUsers(database: DatabaseService): Promise<void> {
   await database.transaction(async (client) => {
@@ -23,6 +49,7 @@ export async function seedConfiguredUsers(database: DatabaseService): Promise<vo
       );
       if (seeded.length) {
         if (!admin) throw new Error('The seeded demo administrator is missing');
+        await seedDemoExchange(client);
         return;
       }
 
@@ -48,6 +75,7 @@ export async function seedConfiguredUsers(database: DatabaseService): Promise<vo
       await client.query(
         "INSERT INTO schema_migrations (file_name, checksum) VALUES ($1, repeat('0', 64))", ['seed:demo-market'],
       );
+      await seedDemoExchange(client);
       return;
     }
 

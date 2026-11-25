@@ -1,0 +1,17 @@
+.model-fields, .models-page, .model-panel, .model-form, .model-editor {
+  display: grid;
+  min-width: 0;
+  gap: .8rem;
+}
+.model-fields > button { justify-self: start; }
+.model-inline { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; }
+.model-analogs, .model-editor { padding: .85rem; border: 1px solid var(--line); border-radius: .7rem; }
+.model-analogs summary { cursor: pointer; }
+.model-analogs details { margin-top: .6rem; }
+.model-checkboxes { display: grid; gap: .4rem; padding: .45rem 0; }
+.model-records { display: grid; list-style: none; padding: 0; gap: .55rem; }
+.model-records li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .65rem; align-items: start; padding: .8rem; border: 1px solid var(--line); border-radius: .6rem; min-width: 0; }
+.model-records li > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.model-records li .muted { white-space: pre-line; }
+.model-records .model-source-urls { display: grid; gap: .25rem; margin: .55rem 0 0; padding: 0; }
+.model-records .model-source-urls li { display: block; padding: 0; border: 0; }

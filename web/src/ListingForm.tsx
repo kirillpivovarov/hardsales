@@ -4,6 +4,12 @@ import { api, type User } from './api';
 import { useI18n } from './i18n';
 import { ListingImagesEditor, listingImagePayload } from './ListingImages';
 import type { ListingImageDraft } from './ListingImages';
+import { useExchange } from './Exchange';
+import { ListingModelFields } from './Models';
+import { ListingRepresentationFields, readListingRepresentation } from './Representation';
+import { PaymentTerms } from './Trust';
+import locationData from '../../server/seeds/exchange_data/locations.json';
+import paymentData from '../../server/seeds/exchange_data/payment_forms.json';
 import { CountrySelect } from './CountrySelect';
 import { categoryName, type Category, type Listing } from './market';
 import { Button, Field, Notice, Spinner } from './ui';
@@ -17,6 +23,7 @@ interface ListingFormProps {
   kind?: Kind;
   homeCountry?: string;
   ownerId?: string;
+  user?: User;
   onSaved: (listing: { id: string }) => void;
 }
 
@@ -53,6 +60,7 @@ export function ListingEditorPage({ user }: { user: User }) {
           kind={user.role === 'BUYER' ? 'BUY' : 'SELL'}
           homeCountry={user.country}
           ownerId={user.id}
+          user={user}
           onSaved={listing => navigate(`/listings/${listing.id}`)}
         />
       </div>
@@ -88,7 +96,7 @@ export function ListingForm(props: ListingFormProps) {
   if (state.listing && !admin && state.listing.owner.id !== props.ownerId) {
     return <Notice tone="error">{t('Редактировать объявление может только его автор.')}</Notice>;
   }
-  if (!admin && (state.listing?.status === 'FROZEN' || state.listing?.status === 'BANNED')) {
+  if (!admin && (state.listing?.status === 'FROZEN' || state.listing?.status === 'BANNED' || state.listing?.status === 'HIDDEN')) {
     return <Notice tone="error">{t('Редактирование приостановлено модератором.')}</Notice>;
   }
   return <ListingFields key={key} {...props} categories={state.categories} listing={state.listing} listingPath={listingPath} />;
@@ -100,9 +108,18 @@ function ListingFields({
   listingPath,
   kind = 'SELL',
   homeCountry = 'RU',
+  admin,
+  user,
   onSaved,
 }: ListingFormProps & { listing?: Listing; categories: Category[]; listingPath: string }) {
   const { t, locale } = useI18n();
+  const { features } = useExchange();
+  const [title, setTitle] = useState(listing?.title ?? '');
+  const [modelSelection, setModelSelection] = useState({
+    modelId: listing?.modelId ?? listing?.model?.id ?? null,
+    analogModelIds: listing?.analogModelIds ?? [],
+  });
+  const [draftSpecs, setDraftSpecs] = useState<Record<string, string>>(listing?.specs ?? {});
   const isBuyer = (listing?.kind ?? kind) === 'BUY';
   const [categoryId, setCategoryId] = useState(listing?.categoryId ?? '');
   const [priceMode, setPriceMode] = useState<string>(listing?.priceMode ?? 'FIXED');
@@ -164,6 +181,12 @@ function ListingFields({
         counterparty: value('counterparty'),
         paymentMethods,
         specs,
+        ...modelSelection,
+        ...readListingRepresentation(form),
+        ...(value('lifetimeDays') ? { lifetimeDays: Number(value('lifetimeDays')) } : {}),
+        ...(value('minLot') ? { minLot: Number(value('minLot')) } : {}),
+        ...(form.has('shipDays') ? { shipDays: value('shipDays') ? Number(value('shipDays')) : null } : {}),
+        ...(features.feature_matching === true || features.feature_trust_rating === true ? { paymentTerms: form.getAll('paymentTerms') } : {}),
       };
       const saved = await api<{ id: string }>(listingPath, {
         method: listing ? 'PATCH' : 'POST',
@@ -179,17 +202,20 @@ function ListingFields({
 
   return (
     <form className="workflow-stack" onSubmit={submit} aria-busy={busy}>
+      {user && <ListingRepresentationFields user={user} listing={listing} />}
       <section className="panel workflow-section">
         <h2>{t(isBuyer ? 'Какое оборудование нужно' : 'Какое оборудование продаётся')}</h2>
         <div className="form-grid workflow-form">
           <div className="workflow-span">
             <Field label={t('Заголовок')}>
-              <input name="title" defaultValue={listing?.title} placeholder={t('Например, сервер с 4 × NVIDIA H100')} minLength={3} maxLength={140} required />
+              <input name="title" value={title} onChange={event => setTitle(event.target.value)} placeholder={t('Например, сервер с 4 × NVIDIA H100')} minLength={3} maxLength={140} required />
             </Field>
           </div>
           <div className="workflow-span">
             <Field label={t('Категория')}>
-              <select name="categoryId" value={categoryId} onChange={event => setCategoryId(event.target.value)} required>
+              <select name="categoryId" value={categoryId} onChange={event => {
+                setCategoryId(event.target.value); setModelSelection({ modelId: null, analogModelIds: [] }); setDraftSpecs({});
+              }} required>
                 <option value="">{t('Выберите категорию')}</option>
                 {categories.filter(category => category.active || category.id === listing?.categoryId).map(category => {
                   const parent = categories.find(item => item.id === category.parentId);
@@ -199,9 +225,22 @@ function ListingFields({
               </select>
             </Field>
           </div>
+          {selectedCategory && <div className="workflow-span">
+            <ListingModelFields categorySlug={selectedCategory.slug} title={title} buyer={isBuyer} canPropose={!admin}
+              {...modelSelection} onChange={setModelSelection} onSelectModel={model => setDraftSpecs(current => {
+                const values: Record<string, string> = {
+                  'Модель': model.nameEn, 'Видеопамять': model.memoryGb ? model.memoryGb + ' ГБ' : '',
+                  'Форм-фактор': model.formFactor ?? '', 'Количество GPU': model.gpuCount ? String(model.gpuCount) : '',
+                };
+                return { ...current, ...Object.fromEntries(attributes.filter(key => !current[key] && values[key]).map(key => [key, values[key]])) };
+              })} />
+          </div>}
           <Field label={t('Количество, шт.')}>
             <input name="quantity" type="number" min={1} max={1_000_000} defaultValue={listing?.quantity ?? 1} required />
           </Field>
+          {features.feature_matching === true && <Field label={t('Минимальная партия, шт.')}>
+            <input name="minLot" type="number" min={1} max={1_000_000} defaultValue={listing?.minLot ?? 1} required />
+          </Field>}
           <Field label={t('Состояние')}>
             <select name="condition" defaultValue={listing?.condition ?? (isBuyer ? 'ANY' : 'NEW')}>
               {isBuyer && <option value="ANY">{t('Любое')}</option>}
@@ -217,7 +256,7 @@ function ListingFields({
           </div>
           {attributes.map(attribute => (
             <Field key={`${categoryId}-${attribute}`} label={t(attribute)}>
-              <input name={`spec:${attribute}`} defaultValue={listing?.categoryId === categoryId ? listing.specs?.[attribute] : undefined} maxLength={300} />
+              <input name={`spec:${attribute}`} value={draftSpecs[attribute] ?? ''} onChange={event => setDraftSpecs(values => ({ ...values, [attribute]: event.target.value }))} maxLength={300} />
             </Field>
           ))}
         </div>
@@ -255,7 +294,9 @@ function ListingFields({
           )}
           {!isBuyer && availability === 'STOCK' && (
             <Field label={t('Город склада')} hint={t('Если складов несколько, укажите основной город.')}>
-              <input name="stockCity" defaultValue={listing?.stockCity ?? ''} minLength={2} maxLength={120} required />
+              <input name="stockCity" list="exchange-stock-cities" defaultValue={listing?.stockCity ?? ''} minLength={2} maxLength={120} required />
+              <datalist id="exchange-stock-cities">{locationData.locations.map(place =>
+                <option key={place.id} value={locale.startsWith('ru') ? place.city_ru : place.city_en} />)}</datalist>
             </Field>
           )}
           {!isBuyer && (
@@ -265,6 +306,13 @@ function ListingFields({
               hint={t('Можно оставить пустым, чтобы обсудить географию поставок в чате.')}
             />
           )}
+          {features.feature_actuality === true && <Field label={t('Срок показа, дней')}
+            hint={t('Актуальность объявления нужно подтверждать ежедневно.')}>
+            <input name="lifetimeDays" type="number" min={1} max={60} defaultValue={listing?.lifetimeDays ?? (isBuyer ? 21 : 14)} required />
+          </Field>}
+          {!isBuyer && features.feature_matching === true && <Field label={t('Отгрузка в течение, дней')}>
+            <input name="shipDays" type="number" min={0} max={365} defaultValue={listing?.shipDays ?? ''} />
+          </Field>}
           <Field label={t(isBuyer ? 'Требуется доставка до' : 'Предложение действительно до')}
             hint={isBuyer ? undefined : t('Если указать дату, предложение будет видно в каталоге до конца этого дня по UTC.')}>
             <input name="deliveryBy" type="date" min={hasPreviousDate ? undefined : earliestDate} defaultValue={listing?.deliveryBy?.slice(0, 10)} required={isBuyer} />
@@ -325,6 +373,16 @@ function ListingFields({
           </fieldset>
         </div>
       </section>
+      {features.feature_trust_rating === true && <PaymentTerms selected={listing?.paymentTerms} />}
+      {features.feature_matching === true && features.feature_trust_rating !== true && <fieldset className="panel workflow-section">
+        <legend>{t('Условия расчёта')}</legend>
+        <div className="form-grid">
+          {paymentData.payment_terms.map(term => <label className="admin-check" key={term.code}>
+            <input type="checkbox" name="paymentTerms" value={term.code} defaultChecked={listing?.paymentTerms?.includes(term.code)} />
+            {t(term.label_ru)}
+          </label>)}
+        </div>
+      </fieldset>}
       {error && <Notice tone="error">{t(error)}</Notice>}
       <div className="workflow-actions">
         <Button type="submit" disabled={busy}>{t(busy ? 'Сохраняем объявление…' : listing ? 'Сохранить изменения' : 'Опубликовать объявление')}</Button>

@@ -1,6 +1,6 @@
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import {
-  Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, CircleAlert,
+  Bell, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, CircleAlert,
   CircleCheck, CircuitBoard, ClipboardList, Cpu, Fan, Gpu, HardDrive,
   Info, Layers, ListFilter, LoaderCircle, Lock, LockKeyhole, MapPin,
   MemoryStick, Menu, MessageCircle, MessagesSquare, Network, PanelsTopLeft, Plus,
@@ -11,7 +11,7 @@ import type { LucideIcon } from 'lucide-react';
 import { useI18n } from './i18n';
 
 const iconMap: Record<string, LucideIcon> = {
-  Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, CircleAlert,
+  Bell, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, CircleAlert,
   CircleCheck, CircuitBoard, ClipboardList, Cpu, Fan, Gpu, HardDrive,
   Info, Layers, ListFilter, LoaderCircle, Lock, LockKeyhole, MapPin,
   MemoryStick, Menu, MessageCircle, MessagesSquare, Network, PanelsTopLeft, Plus,

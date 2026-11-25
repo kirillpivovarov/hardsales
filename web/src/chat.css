@@ -199,6 +199,8 @@
   font-size: 0.85rem;
 }
 
+.chat-partner-details a { color: var(--accent); text-decoration: underline; text-underline-offset: .15em; }
+
 .chat-partner-rating {
   font-weight: 600;
   color: var(--accent);
@@ -265,6 +267,19 @@
   max-width: 100%;
   overflow-wrap: anywhere;
 }
+
+.chat-telegram:has(.chat-disclosure-rules) { flex-wrap: wrap; }
+.chat-disclosure-rules {
+  flex-basis: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: .55rem;
+  padding: .65rem .8rem;
+  font-size: .875rem;
+  overflow-wrap: anywhere;
+}
+.chat-disclosure-rules ul { padding-inline-start: 1.15rem; margin: 0 0 .6rem; }
+.chat-disclosure-rules li + li { margin-block-start: .3rem; }
 
 .chat-messages {
   flex: 1;

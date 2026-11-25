@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { lazy, Suspense, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, isStaff, type User } from './api'
@@ -9,6 +9,8 @@ import { categoryIcons, countryName } from './market'
 import { Button, Field, Notice, Spinner } from './ui'
 import './admin.css'
 
+const ExchangeAdministration = lazy(() => import('./ExchangeAdmin'))
+
 const tabs = {
   users: 'Пользователи',
   listings: 'Объявления',
@@ -18,6 +20,7 @@ const tabs = {
   content: 'Страницы',
   locales: 'Языки',
   moderators: 'Модераторы',
+  exchange: 'Закрытая биржа',
   audit: 'Журнал действий',
 } as const
 
@@ -88,6 +91,7 @@ type UserRow = {
   companyName: string | null
   status: string
   emailVerified: boolean
+  companyEmailStatus?: 'CORPORATE' | 'PUBLIC' | 'UNVERIFIED' | null
   createdAt: string
 }
 
@@ -323,15 +327,20 @@ function isMarketProfile(row: UserRow) {
   return row.role === 'BUYER' || row.role === 'SELLER'
 }
 
-function Users({ version, edit }: PagedProps) {
+function Users({ version, edit, administrator }: PagedProps & { administrator: boolean }) {
   const { t, locale } = useI18n()
   return <PagedRecords<UserRow> tab="users" version={version} columns={[
     { label: t('Пользователь'), render: row => <RecordLabel title={row.displayName} detail={<>{row.username}{row.email && ` · ${row.email}`}{(row.city || row.country) && <><br />{geography(row.city, row.country, locale)}</>}</>} /> },
     { label: t('Роль'), render: row => <RecordLabel title={statusLabel(t, row.role)} detail={row.companyName || (row.participantType ? statusLabel(t, row.participantType) : undefined)} /> },
-    { label: t('Статус'), render: row => <RecordLabel title={statusLabel(t, row.status)} detail={<>{row.emailVerified ? t('Почта подтверждена') : t('Почта ожидает подтверждения')}<br />{formatDate(locale, row.createdAt)}</>} /> },
+    { label: t('Статус'), render: row => <RecordLabel title={statusLabel(t, row.status)} detail={<>
+      {row.emailVerified ? t('Почта подтверждена') : t('Почта ожидает подтверждения')}<br />{formatDate(locale, row.createdAt)}
+      {row.companyEmailStatus && <><br />{t(row.companyEmailStatus === 'CORPORATE' ? 'Почта компании подтверждена'
+        : row.companyEmailStatus === 'PUBLIC' ? 'Почта компании подтверждена, общий домен' : 'Почта компании не проверена')}</>}
+    </>} /> },
     { label: t('Действия'), render: row => isMarketProfile(row) && <div className="admin-actions">
       <Button variant="secondary" type="button" onClick={() => edit({ type: 'user', id: row.id })}>{t('Редактировать')}</Button>
       {row.status !== 'BANNED' && <Button variant="ghost" type="button" onClick={() => edit({ type: 'status', tab: 'users', id: row.id, name: row.displayName, status: row.status })}>{t('Статус')}</Button>}
+      {administrator && <Link className="button button-ghost" to={'/admin?section=exchange&part=onboarding&userId=' + row.id}>{t('Анкета')}</Link>}
     </div> },
   ]} />
 }
@@ -985,11 +994,12 @@ export function AdminPage({ user }: { user?: User | null }) {
       </nav>
       <section className="panel admin-panel" aria-label={t(tabs[tab])}>
         {saved && <Notice tone="success">{t('Изменения сохранены.')}</Notice>}
-        {tab === 'users' && <Users {...props} />}
+        {tab === 'users' && <Users {...props} administrator={user?.role === 'ADMIN'} />}
         {tab === 'listings' && <Listings {...props} />}
         {tab === 'reviews' && <Reviews {...props} />}
         {tab === 'reports' && <Reports {...props} />}
         {tab === 'moderators' && <Moderators {...props} />}
+        {tab === 'exchange' && user && <Suspense fallback={<Spinner />}><ExchangeAdministration user={user} /></Suspense>}
         {tab === 'audit' && <Audit version={version} />}
         {(tab === 'categories' || tab === 'content' || tab === 'locales') && <ReferenceRecords tab={tab} {...props} />}
       </section>

@@ -47,7 +47,8 @@ export class AuthController {
 
   @Get('me')
   async me(@Req() request: Request) {
-    return { user: await this.auth.resolve(request) };
+    const [user, registrationMode] = await Promise.all([this.auth.resolve(request), this.auth.registrationMode()]);
+    return registrationMode === 'INVITE' ? { user, registrationMode } : { user };
   }
 
   @Post('logout')
