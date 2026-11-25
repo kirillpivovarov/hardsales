@@ -1,0 +1,177 @@
+.workflow-page {
+  padding-block: clamp(1.25rem, 4vw, 3rem) 4rem;
+}
+
+.workflow-intro {
+  margin-bottom: 1.5rem;
+}
+
+.workflow-intro h1,
+.workflow-section h2 {
+  margin-block: 0 0.5rem;
+}
+
+.workflow-intro p {
+  color: var(--muted, currentColor);
+  margin-block: 0;
+  max-width: 60ch;
+}
+
+.workflow-intro a,
+.workflow-auth-links a {
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.workflow-auth {
+  width: min(100%, 29rem);
+  margin-inline: auto;
+  padding: clamp(1.25rem, 4vw, 2rem);
+}
+
+.workflow-auth-wide {
+  width: min(100%, 46rem);
+}
+
+.workflow-auth-links {
+  margin-top: 1.25rem;
+}
+
+.workflow-auth-links p {
+  margin: 0;
+}
+
+.workflow-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.workflow-form {
+  align-items: start;
+}
+
+.workflow-span {
+  grid-column: 1 / -1;
+}
+
+.workflow-account {
+  max-width: 52rem;
+}
+
+.workflow-section {
+  padding: clamp(1rem, 3vw, 1.5rem);
+  min-width: 0;
+}
+
+.workflow-section h2 {
+  margin-bottom: 1rem;
+}
+
+.workflow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.workflow-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.workflow-page-heading h1 {
+  margin: 0;
+}
+
+.workflow-checks {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+.workflow-checks legend {
+  font-weight: 600;
+  margin-bottom: 0.6rem;
+}
+
+.workflow-checkbox-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.7rem 1rem;
+}
+
+.workflow-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.workflow-checkbox input[type="checkbox"] {
+  width: 1.1rem;
+  height: 1.1rem;
+  padding: 0;
+  margin: 0.16em 0 0;
+  flex-shrink: 0;
+}
+
+.workflow-own-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.workflow-own-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: center;
+}
+
+.workflow-own-item h2 {
+  font-size: 1.15rem;
+  margin: 0 0 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.workflow-own-item p {
+  margin: 0;
+}
+
+.workflow-muted-line {
+  color: var(--muted, currentColor);
+  margin-block: 0;
+}
+
+.workflow-confirmation {
+  padding: 0.85rem 1rem;
+}
+
+.workflow-confirmation p {
+  margin-block: 0 0.7rem;
+}
+
+.workflow-editor {
+  max-width: 52rem;
+}
+
+.workflow-editor .field textarea {
+  min-height: 8rem;
+  resize: vertical;
+}
+
+@media (max-width: 600px) {
+  .workflow-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflow-own-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

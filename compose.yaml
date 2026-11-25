@@ -1,0 +1,51 @@
+name: hwforai
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: hwforai
+      POSTGRES_USER: hwforai
+      POSTGRES_PASSWORD: hwforai
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hwforai -d hwforai"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mailpit:
+    image: axllent/mailpit:v1.31.5
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+
+  app:
+    build: .
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    environment:
+      NODE_ENV: development
+      DEMO_MODE: "true"
+      DATABASE_URL: postgresql://hwforai:hwforai@postgres:5432/hwforai
+      APP_ORIGIN: http://127.0.0.1:${APP_PORT:-3000}
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_SECURE: "false"
+      SMTP_REQUIRE_TLS: "false"
+      MAIL_FROM: "hwforai <no-reply@hwforai.local>"
+      MODERATION_AGENT_TOKEN: ${MODERATION_AGENT_TOKEN:-}
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/v1/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  postgres-data:

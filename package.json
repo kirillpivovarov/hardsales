@@ -1,0 +1,10 @@
+{
+  "name": "hwforai",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "bash scripts/preview.sh",
+    "build": "npm --prefix web run build && npm --prefix server run build",
+    "check": "npm --prefix web run typecheck && npm --prefix server run check"
+  }
+}

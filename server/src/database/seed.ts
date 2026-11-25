@@ -1,0 +1,68 @@
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { isEmail } from 'class-validator';
+import { hashPassword } from '../auth/auth.crypto';
+import { USERNAME_PATTERN } from '../auth/auth.dto';
+import { demoMode, isProduction } from '../config';
+import { DatabaseService } from './database.service';
+
+const DEMO_SELLER = '00000000-0000-4000-8000-000000000001';
+const DEMO_BUYER = '00000000-0000-4000-8000-000000000002';
+const DEMO_ADMIN = '00000000-0000-4000-8000-000000000003';
+
+export async function seedConfiguredUsers(database: DatabaseService): Promise<void> {
+  await database.transaction(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(18403, 2)');
+    if (demoMode()) {
+      const { rows: seeded } = await client.query(
+        'SELECT 1 FROM schema_migrations WHERE file_name = $1', ['seed:demo-market'],
+      );
+      if (seeded.length) return;
+
+      const demoUsers = [
+        { id: DEMO_SELLER, username: 'test1', displayName: 'TechSupply', role: 'SELLER', city: 'Москва', company: 'ТехСапплай', telegram: 'hwforai_demo_seller' },
+        { id: DEMO_BUYER, username: 'test2', displayName: 'ComputeLab', role: 'BUYER', city: 'Новосибирск', company: 'КомпьютЛаб', telegram: 'hwforai_demo_buyer' },
+        { id: DEMO_ADMIN, username: 'admin', displayName: 'Администратор', role: 'ADMIN', city: null, company: null, telegram: null },
+      ];
+
+      for (const user of demoUsers) {
+        await client.query(`
+          INSERT INTO users (id, username, display_name, email, password_hash, role, participant_type,
+            company_name, city, country, telegram, email_verified_at, must_change_password)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), $12)
+          ON CONFLICT (id) DO NOTHING
+        `, [user.id, user.username, user.displayName, `${user.username}@example.test`,
+          await hashPassword(user.username), user.role, user.company ? 'COMPANY' : null,
+          user.company, user.city, user.city ? 'RU' : null, user.telegram, user.role === 'ADMIN']);
+      }
+
+      const demoSql = await readFile(resolve(__dirname, '../../seeds/market.sql'), 'utf8');
+      await client.query(demoSql);
+      await client.query(
+        "INSERT INTO schema_migrations (file_name, checksum) VALUES ($1, repeat('0', 64))", ['seed:demo-market'],
+      );
+      return;
+    }
+
+    if (isProduction()) {
+      const demo = await client.query('SELECT 1 FROM users WHERE id = ANY($1::uuid[]) LIMIT 1', [[DEMO_SELLER, DEMO_BUYER, DEMO_ADMIN]]);
+      if (demo.rowCount) throw new Error('Use a database without demo accounts for production');
+    }
+
+    const administrators = await client.query("SELECT 1 FROM users WHERE role = 'ADMIN' LIMIT 1");
+    if (administrators.rowCount) return;
+
+    const username = process.env.BOOTSTRAP_ADMIN_USERNAME?.trim() || 'admin';
+    const email = process.env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
+    const password = process.env.BOOTSTRAP_ADMIN_PASSWORD;
+    if (!email && !password && !isProduction()) return;
+    if (!USERNAME_PATTERN.test(username) || !email || !isEmail(email) || !password ||
+        password.length < 12 || password.length > 128) {
+      throw new Error('Configure BOOTSTRAP_ADMIN_EMAIL and a 12–128 character BOOTSTRAP_ADMIN_PASSWORD');
+    }
+    await client.query(`
+      INSERT INTO users (username, display_name, email, password_hash, role, email_verified_at, must_change_password)
+      VALUES ($1, 'Администратор', $2, $3, 'ADMIN', now(), true)
+    `, [username, email, await hashPassword(password)]);
+  });
+}
