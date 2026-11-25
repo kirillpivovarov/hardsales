@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api } from './api';
 import type { User } from './api';
 import { useI18n } from './i18n';
+import { ListingPhoto } from './ListingImages';
 import { categoryIcon, categoryName, countries, countryName, formatMoney, terms } from './market';
 import type { Category, Listing } from './market';
 import { Button, Field, Icon, Notice, Spinner } from './ui';
@@ -21,7 +22,8 @@ const emptyResults: Results = { items: [], total: 0, page: 1, limit: 12, locked:
 export function CatalogPage({ user, home = false }: { user: User | null; home?: boolean }) {
   const { t, locale } = useI18n();
   const [query, setQuery] = useSearchParams();
-  const [search, setSearch] = useState(query.get('q') ?? '');
+  const committedSearch = query.get('q') ?? '';
+  const [search, setSearch] = useState(committedSearch);
   const [categories, setCategories] = useState<Category[]>([]);
   const [results, setResults] = useState<Results>(emptyResults);
   const [busy, setBusy] = useState(true);
@@ -31,13 +33,15 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   const oppositeKind = user?.role === 'SELLER' ? 'BUY' : user?.role === 'BUYER' ? 'SELL' : null;
   const kind = oppositeKind ?? (query.get('kind') === 'BUY' ? 'BUY' : 'SELL');
   const selectedCategory = query.get('category') ?? '';
+  const selectedOrigin = query.get('country') ?? '';
+  const showFlexibleOriginHint = kind === 'SELL' && /^[A-Z]{2}$/.test(selectedOrigin);
   const authenticated = Boolean(user?.emailVerified);
   const locked = !authenticated || results.locked;
   const requestedQuery = query.toString();
   const sortedCountries = useMemo(() => countries.map(code => ({code, name: countryName(code,locale)}))
     .sort((a,b) => a.name.localeCompare(b.name, locale)), [locale]);
 
-  useEffect(() => { setSearch(query.get('q') ?? ''); }, [query]);
+  useEffect(() => { setSearch(committedSearch); }, [committedSearch]);
   useEffect(() => {
     const controller = new AbortController();
     void api<Category[]>('/categories', { signal: controller.signal }).then(setCategories).catch(() => {});
@@ -85,6 +89,7 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   const filterCount = allFilters.filter(key => query.has(key)).length;
   const resultPages = Math.ceil(results.total / results.limit);
   const returnTarget = `?next=${encodeURIComponent('/catalog' + (requestedQuery ? '?' + requestedQuery : ''))}`;
+  const catalogReturn = `${home ? '/' : '/catalog'}${requestedQuery ? '?' + requestedQuery : ''}#catalog`;
 
   return <div className="container market-page">
     {home && <section className="market-hero" aria-labelledby="hero-title">
@@ -130,9 +135,16 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
           <Field label={t(kind === 'BUY' ? 'Тип покупателя' : 'Тип продавца')}><select value={query.get('ownerType') ?? ''} onChange={event => change({ownerType:event.target.value})}>
             <option value="">{t('Все участники')}</option>{options(['COMPANY','INDIVIDUAL'])}
           </select></Field>
-          <Field label={t(kind === 'BUY' ? 'Страна закупки' : 'Страна отгрузки')}><select value={query.get('country') ?? ''} onChange={event => change({country:event.target.value})}>
-            <option value="">{t('Любая страна')}</option>{countryOptions}
-          </select></Field>
+          <div className="field">
+            <Field label={t(kind === 'BUY' ? 'Страна закупки' : 'Страна отгрузки')}>
+              <select value={selectedOrigin} aria-describedby={showFlexibleOriginHint ? 'origin-filter-hint' : undefined}
+                onChange={event => change({country:event.target.value})}>
+                <option value="">{t('Без ограничения')}</option>
+                <option value="ANY">{t('Указана любая страна')}</option>{countryOptions}
+              </select>
+            </Field>
+            {showFlexibleOriginHint && <small id="origin-filter-hint">{t('Поиск также включает предложения с отгрузкой из любой страны.')}</small>}
+          </div>
           {kind === 'SELL' && <Field label={t('Наличие')}><select value={query.get('availability') ?? ''} onChange={event => change({availability:event.target.value})}>
             <option value="">{t('Любое')}</option>{options(['STOCK','TRANSIT','ORDER'])}
           </select></Field>}
@@ -201,9 +213,9 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
           </div> :
           results.items.length === 0 ? <div className="locked-panel panel"><span className="lock-icon"><Icon name="search-x" size={25} /></span>
             <h3>{t('Объявления не найдены')}</h3><p>{t('Измените запрос или уберите часть фильтров.')}</p>
-            <Button variant="secondary" onClick={() => change({ ...Object.fromEntries(allFilters.map(key => [key, ''])), q: '' })}>{t('Очистить поиск')}</Button>
+            <Button variant="secondary" onClick={() => { setSearch(''); change({ ...Object.fromEntries(allFilters.map(key => [key, ''])), q: '' }); }}>{t('Очистить поиск')}</Button>
           </div> : <>
-            <div className="listing-grid">{results.items.map(listing => <ListingCard key={listing.id} listing={listing} category={listing.category ?? categories.find(category => category.id === listing.categoryId)} />)}</div>
+            <div className="listing-grid">{results.items.map(listing => <ListingCard key={listing.id} listing={listing} category={listing.category ?? categories.find(category => category.id === listing.categoryId)} returnTo={catalogReturn} />)}</div>
             {resultPages > 1 && <nav className="pagination" aria-label={t('Страницы каталога')}>
               <Button variant="secondary" disabled={results.page <= 1} onClick={() => change({page:String(results.page - 1)})}><Icon name="chevron-left" size={16} /> {t('Назад')}</Button>
               <span>{t('{page} из {total}', { page: results.page, total: resultPages })}</span>
@@ -217,18 +229,21 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
 }
 
 export function ListingVisual({ listing, category }: { listing: Listing; category?: Category }) {
+  const cover = listing.images?.[0];
   const imageKey = listing.imageKey && ['h100','h200','l40s','server'].includes(listing.imageKey) ? listing.imageKey : null;
   return <div className="listing-visual">
-    {imageKey ? <img src={`/images/${imageKey}.webp`} alt="" loading="lazy" /> :
+    {cover ? <ListingPhoto src={cover.url} alt="" loading="lazy" /> :
+      imageKey ? <img src={`/images/${imageKey}.webp`} alt="" loading="lazy" /> :
       <Icon name={category ? categoryIcon(category) : listing.kind === 'BUY' ? 'clipboard-list' : 'server'} size={55} />}
   </div>;
 }
 
-export function ListingCard({ listing, category }: { listing: Listing; category?: Category }) {
+function ListingCard({ listing, category, returnTo }: { listing: Listing; category?: Category; returnTo: string }) {
   const { t, locale } = useI18n();
-  const place = [listing.stockCity, listing.originCountry ? countryName(listing.originCountry, locale) : listing.destinationCountry ? countryName(listing.destinationCountry, locale) : listing.owner.city].filter(Boolean).join(', ');
+  const place = listing.kind === 'SELL' && listing.originScope === 'ANY' ? t('Любая страна')
+    : [listing.stockCity, listing.originCountry ? countryName(listing.originCountry, locale) : listing.destinationCountry ? countryName(listing.destinationCountry, locale) : listing.owner.city].filter(Boolean).join(', ');
   const price = listing.price == null ? t('По договорённости') : (listing.kind === 'BUY' ? t('До {price}', { price: formatMoney(listing.price, listing.currency, locale) }) : formatMoney(listing.price, listing.currency, locale));
-  return <Link className="listing-card" to={`/listings/${listing.id}`}>
+  return <Link className="listing-card" to={`/listings/${listing.id}`} state={{ returnTo }}>
     <ListingVisual listing={listing} category={category} />
     <div className="listing-card-body">
       <span className="listing-kicker">{listing.kind === 'BUY' ? t('Заявка на закупку') : listing.availability ? t(terms[listing.availability] ?? listing.availability) : t('Предложение')}</span>

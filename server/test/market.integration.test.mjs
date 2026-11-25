@@ -154,6 +154,48 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
     assert.deepEqual((await nestedSearch()).map(item => item.id), [nested.id]);
   });
 
+  await t.test('flexible seller origins match country searches and can be edited', async () => {
+    const title = 'Тест географии отгрузки ' + suffix;
+    const fixture = {
+      categoryId: listing.categoryId,
+      title,
+      description: 'Проверяем условия отгрузки со склада и фильтр по стране.',
+      availability: 'STOCK',
+    };
+    const create = (body, status) => call('/listings', {
+      method: 'POST', cookie: seller.cookie, status, body: { ...fixture, ...body },
+    });
+    await create({ originScope: 'DOMESTIC', stockCity: 'Казань' }, 400);
+    await create({ originScope: 'ANY', originCountry: 'RU', stockCity: 'Казань' }, 400);
+    await create({ originScope: 'ANY' }, 400);
+    const { payload: flexible } = await create({ originScope: 'ANY', originCountry: null, stockCity: 'Казань' }, 201);
+    assert.equal(flexible.originScope, 'ANY');
+    assert.equal(flexible.originCountry, null);
+    assert.equal(flexible.stockCity, 'Казань');
+
+    const search = async filters => (await call('/listings?' + new URLSearchParams({
+      q: title, ...filters,
+    }), { cookie: buyer.cookie })).payload.items.map(item => item.id);
+    const edit = async body => (await call('/listings/' + flexible.id, {
+      method: 'PATCH', cookie: seller.cookie, body,
+    })).payload;
+    assert.deepEqual(await search({ country: 'ANY' }), [flexible.id]);
+    assert.deepEqual(await search({ originCountry: 'CN' }), [flexible.id]);
+    assert.deepEqual(await search({ originScope: 'COUNTRY' }), []);
+    assert.equal((await edit({ quantity: 2 })).originScope, 'ANY');
+
+    const specific = await edit({ originCountry: 'KZ' });
+    assert.equal(specific.originScope, 'COUNTRY');
+    assert.equal(specific.originCountry, 'KZ');
+    assert.deepEqual(await search({ originCountry: 'CN' }), []);
+    assert.deepEqual(await search({ originCountry: 'KZ', originScope: 'COUNTRY' }), [flexible.id]);
+    assert.deepEqual(await search({ originCountry: 'ANY' }), []);
+
+    const switchedBack = await edit({ originScope: 'ANY' });
+    assert.equal(switchedBack.originScope, 'ANY');
+    assert.equal(switchedBack.originCountry, null);
+  });
+
   await t.test('chat membership, warning and mutual consent including reset', async () => {
     await call('/chats', {
       method: 'POST', cookie: outsider.cookie, status: 403, body: { listingId: listing.id },

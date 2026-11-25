@@ -16,7 +16,14 @@ export const listingColumns = `
   l.delivery_included AS "deliveryIncluded", l.customs_included AS "customsIncluded", l.vat, l.counterparty,
   l.payment_methods AS "paymentMethods", l.specs, l.image_key AS "imageKey", l.status,
   l.created_at AS "createdAt", l.updated_at AS "updatedAt",
-  c.name AS "categoryName", c.slug AS "categorySlug", ${publicProfile('u')} AS owner
+  c.name AS "categoryName", c.slug AS "categorySlug", ${publicProfile('u')} AS owner,
+  COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'id', i.id, 'width', i.width, 'height', i.height,
+      'url', '/api/v1/listings/' || l.id::text || '/images/' || i.id::text
+    ) ORDER BY i.position)
+    FROM listing_images i WHERE i.listing_id = l.id
+  ), '[]'::jsonb) AS images
 `
 export const listingJoins = `FROM listings l JOIN users u ON u.id = l.owner_id JOIN categories c ON c.id = l.category_id`
 
@@ -35,6 +42,11 @@ export const listingPublicWhere = `
   l.status = 'ACTIVE' AND u.status = 'ACTIVE' AND u.email_verified_at IS NOT NULL
   AND (l.delivery_by IS NULL OR l.delivery_by >= (now() AT TIME ZONE 'UTC')::date)
   AND l.category_id IN (SELECT id FROM available_categories)
+`
+
+// Both the listing and its images enforce visibility in the same database snapshot.
+export const listingDetailWhere = `
+  l.id = $1 AND ($2 OR l.owner_id = $3 OR (l.kind = $4 AND ${listingPublicWhere}))
 `
 
 export const listingEditableColumns = [

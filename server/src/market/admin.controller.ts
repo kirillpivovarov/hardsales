@@ -1,6 +1,6 @@
 import {
   BadRequestException, Body, Controller, Get, Headers, NotFoundException, Param, Patch, Post,
-  Put, Query, Req, UnauthorizedException,
+  Put, Query, Req, UnauthorizedException, UploadedFiles, UseGuards, UseInterceptors,
 } from '@nestjs/common'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { Request } from 'express'
@@ -8,6 +8,9 @@ import { AuthService } from '../auth/auth.service'
 import { DatabaseService } from '../database/database.service'
 import { AdminService } from './admin.service'
 import { CatalogService } from './catalog.service'
+import type { ListingImageUpload } from './listing-media.service'
+import { ListingAdminGuard, ListingMultipart, ListingUploadCapacity, listingMutation } from './listing-upload'
+import type { ListingMutationRequest } from './listing-upload'
 import { oneOf, uuid } from './market.inputs'
 
 @Controller('admin')
@@ -48,8 +51,12 @@ export class AdminController {
   }
 
   @Patch('listings/:id')
-  async editListing(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.editListing((await this.auth.admin(request)).username, id, body)
+  @UseGuards(ListingAdminGuard)
+  @UseInterceptors(ListingUploadCapacity, ListingMultipart)
+  editListing(@Req() request: ListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
+    @UploadedFiles() files?: ListingImageUpload[]) {
+    const { data, uploads } = listingMutation(request, body, files)
+    return this.admin.editListing(request.listingEditor.username, id, data, uploads)
   }
 
   @Patch('listings/:id/status')

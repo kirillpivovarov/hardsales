@@ -60,9 +60,11 @@ def main():
         page.locator("h1").click()
         capture(page, "01-guest-desktop.png")
 
+        search = page.get_by_role("textbox", name="Поиск оборудования")
+        search.fill("NVIDIA")
         page.get_by_role("button", name="GPU и ускорители").click()
         assert parse_qs(urlparse(page.url).query)["category"] == ["gpu"]
-        page.get_by_role("textbox", name="Поиск оборудования").fill("NVIDIA")
+        expect(search).to_have_value("NVIDIA")
         page.get_by_role("button", name="Найти", exact=True).click()
         expect(page).to_have_url(re.compile(r"q=NVIDIA"))
         page.locator(".locked-panel").get_by_role("link", name="Войти", exact=True).click()
@@ -81,6 +83,16 @@ def main():
         check_width(page)
         capture(page, "03-listing-desktop.png")
         detail_path = urlparse(page.url).path
+
+        page.get_by_role("link", name="К каталогу").click()
+        expect(page).to_have_url(re.compile(r"/catalog\?.*q=NVIDIA.*#catalog$"))
+        assert parse_qs(urlparse(page.url).query)["category"] == ["gpu"]
+        expect(page.get_by_role("textbox", name="Поиск оборудования")).to_have_value("NVIDIA")
+
+        page.goto(BASE_URL + "/?category=gpu&q=NVIDIA")
+        page.locator(".listing-card").first.click()
+        page.get_by_role("link", name="К каталогу").click()
+        expect(page).to_have_url(BASE_URL + "/?category=gpu&q=NVIDIA#catalog")
 
         for width in (320, 390, 768, 1024):
             mobile = browser.new_context(viewport={"width": width, "height": 844}, is_mobile=True, device_scale_factor=1, has_touch=True)
@@ -125,7 +137,7 @@ def main():
         expect(seller_page.locator(".listing-card").first).to_be_visible()
 
         assert not errors, errors
-        print("Catalogue UI passed: desktop and four viewport widths; guest lock, keyboard focus, URL filters, login return, both roles, detail, empty state.")
+        print("Catalogue UI passed: responsive layouts, guest lock, keyboard focus, filter draft, login and detail returns, both roles and empty state.")
         browser.close()
 
 

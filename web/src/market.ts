@@ -31,6 +31,13 @@ export function categoryName(category: Category, locale: string, short = false) 
   return translation?.shortName || translation?.name || category.shortName || category.name;
 }
 
+export interface ListingImage {
+  id: string;
+  url: string;
+  width: number;
+  height: number;
+}
+
 export interface Listing {
   id: string;
   title: string;
@@ -58,6 +65,7 @@ export interface Listing {
   owner: { id?: string; nickname?: string; displayName?: string; city: string; country: string; accountType?: string; participantType?: string; rating: number | null; ratingCount: number };
   status: string;
   imageKey?: string | null;
+  images?: ListingImage[];
   createdAt: string;
 }
 

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, type User } from './api';
 import { useI18n } from './i18n';
+import { ListingImagesEditor, listingImagePayload } from './ListingImages';
+import type { ListingImageDraft } from './ListingImages';
 import { categoryName, countries, countryName, type Category, type Listing } from './market';
 import { Button, Field, Notice, Spinner } from './ui';
 import './workflows.css';
@@ -105,10 +107,14 @@ function ListingFields({
   const [priceMode, setPriceMode] = useState<string>(listing?.priceMode ?? 'FIXED');
   const [availability, setAvailability] = useState(listing?.availability ?? 'STOCK');
   const [originScope, setOriginScope] = useState(listing?.originScope ?? 'ANY');
+  const sellerDefaultCountry = listing?.originScope === 'ANY' ? 'ANY' : homeCountry;
+  const defaultOriginCountry = listing?.originCountry ?? (isBuyer ? '' : sellerDefaultCountry);
+  const [photoDraft, setPhotoDraft] = useState<ListingImageDraft[]>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const earliestDate = new Date().toISOString().slice(0, 10);
   const hasPreviousDate = listing?.deliveryBy && listing.deliveryBy < earliestDate;
+  const photos = photoDraft ?? (listing?.images ?? []).map(image => ({ key: image.id, image }));
   const selectedCategory = categories.find(category => category.id === categoryId);
   const attributes = [...new Set([
     ...(selectedCategory?.attributeKeys ?? []),
@@ -122,8 +128,12 @@ function ListingFields({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy) return;
     const form = new FormData(event.currentTarget);
     const value = (name: string) => String(form.get(name) ?? '').trim();
+    const sourceCountry = value('originCountry');
+    const sellerScope = sourceCountry === 'ANY' ? 'ANY' : 'COUNTRY';
+    const sourceScope = isBuyer ? originScope : sellerScope;
     const paymentMethods = form.getAll('paymentMethods');
     if (!paymentMethods.length) {
       setError('Выберите хотя бы один способ оплаты.');
@@ -136,31 +146,32 @@ function ListingFields({
     setError('');
     setBusy(true);
     try {
+      const details = {
+        title: value('title'),
+        description: value('description'),
+        categoryId,
+        kind: isBuyer ? 'BUY' : 'SELL',
+        quantity: Number(value('quantity')),
+        condition: value('condition'),
+        availability: isBuyer ? null : availability,
+        stockCity: !isBuyer && availability === 'STOCK' ? value('stockCity') : null,
+        originCountry: sourceScope === 'COUNTRY' ? sourceCountry : null,
+        originScope: sourceScope,
+        destinationCountry: value('destinationCountry') || null,
+        deliveryBy: value('deliveryBy') || null,
+        priceMode,
+        price: priceMode === 'FIXED' ? Number(value('price')) : null,
+        currency: value('currency'),
+        deliveryIncluded: form.has('deliveryIncluded'),
+        customsIncluded: form.has('customsIncluded'),
+        vat: value('vat'),
+        counterparty: value('counterparty'),
+        paymentMethods,
+        specs,
+      };
       const saved = await api<{ id: string }>(listingPath, {
         method: listing ? 'PATCH' : 'POST',
-        body: {
-          title: value('title'),
-          description: value('description'),
-          categoryId,
-          kind: isBuyer ? 'BUY' : 'SELL',
-          quantity: Number(value('quantity')),
-          condition: value('condition'),
-          availability: isBuyer ? null : availability,
-          stockCity: !isBuyer && availability === 'STOCK' ? value('stockCity') : null,
-          originCountry: !isBuyer || originScope === 'COUNTRY' ? value('originCountry') : null,
-          originScope: isBuyer ? originScope : null,
-          destinationCountry: value('destinationCountry') || null,
-          deliveryBy: value('deliveryBy') || null,
-          priceMode,
-          price: priceMode === 'FIXED' ? Number(value('price')) : null,
-          currency: value('currency'),
-          deliveryIncluded: form.has('deliveryIncluded'),
-          customsIncluded: form.has('customsIncluded'),
-          vat: value('vat'),
-          counterparty: value('counterparty'),
-          paymentMethods,
-          specs,
-        },
+        body: listingImagePayload(details, photoDraft, listing?.images),
       });
       onSaved(saved);
     } catch (cause) {
@@ -215,6 +226,7 @@ function ListingFields({
           ))}
         </div>
       </section>
+      <ListingImagesEditor drafts={photos} onChange={setPhotoDraft} disabled={busy} />
       <section className="panel workflow-section">
         <h2>{t('Сроки и география')}</h2>
         <div className="form-grid workflow-form">
@@ -241,15 +253,16 @@ function ListingFields({
             </Field>
           )}
           {(!isBuyer || originScope === 'COUNTRY') && (
-            <Field label={t(isBuyer ? 'Страна происхождения поставки' : availability === 'STOCK' ? 'Страна склада' : 'Страна отгрузки')}>
-              <select name="originCountry" defaultValue={listing?.originCountry ?? (isBuyer ? '' : homeCountry)} required>
+            <Field label={t(isBuyer ? 'Страна происхождения поставки' : 'Страна отгрузки')}>
+              <select name="originCountry" defaultValue={defaultOriginCountry} required>
                 <option value="">{t('Выберите страну')}</option>
+                {!isBuyer && <option value="ANY">{t('Из любой страны')}</option>}
                 {countryChoices}
               </select>
             </Field>
           )}
           {!isBuyer && availability === 'STOCK' && (
-            <Field label={t('Город склада')}>
+            <Field label={t('Город склада')} hint={t('Если складов несколько, укажите основной город.')}>
               <input name="stockCity" defaultValue={listing?.stockCity ?? ''} minLength={2} maxLength={120} required />
             </Field>
           )}
@@ -261,7 +274,8 @@ function ListingFields({
               </select>
             </Field>
           )}
-          <Field label={t(isBuyer ? 'Требуется доставка до' : 'Ориентировочная дата готовности')}>
+          <Field label={t(isBuyer ? 'Требуется доставка до' : 'Ориентировочная дата готовности')}
+            hint={isBuyer ? undefined : t('После этой даты объявление перестанет показываться в каталоге.')}>
             <input name="deliveryBy" type="date" min={hasPreviousDate ? undefined : earliestDate} defaultValue={listing?.deliveryBy?.slice(0, 10)} required={isBuyer} />
           </Field>
         </div>
@@ -322,7 +336,7 @@ function ListingFields({
       </section>
       {error && <Notice tone="error">{t(error)}</Notice>}
       <div className="workflow-actions">
-        <Button type="submit" disabled={busy}>{t(listing ? 'Сохранить изменения' : 'Опубликовать объявление')}</Button>
+        <Button type="submit" disabled={busy}>{t(busy ? 'Сохраняем объявление…' : listing ? 'Сохранить изменения' : 'Опубликовать объявление')}</Button>
       </div>
     </form>
   );

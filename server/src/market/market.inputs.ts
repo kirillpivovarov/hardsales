@@ -12,6 +12,7 @@ export const currencies = ['RUB', 'USD', 'EUR', 'CNY', 'KZT', 'AED'] as const
 export const conditions = ['NEW', 'USED', 'REFURBISHED', 'ANY'] as const
 export const availability = ['STOCK', 'TRANSIT', 'ORDER'] as const
 export const originScopes = ['DOMESTIC', 'ANY', 'COUNTRY'] as const
+const sellerOriginScopes = ['ANY', 'COUNTRY'] as const
 export const paymentMethods = ['BANK_TRANSFER', 'CARD', 'CASH', 'LETTER_OF_CREDIT'] as const
 export const vatModes = ['INCLUDED', 'EXCLUDED', 'NA'] as const
 export const counterparties = ['COMPANY', 'ANY'] as const
@@ -124,7 +125,8 @@ export function escapedSearch(value: unknown): string {
 }
 
 export function listingInput(body: unknown, existing: Record<string, unknown>, kind: typeof kinds[number]) {
-  const input = { ...existing, ...object(body) }
+  const patch = object(body)
+  const input = { ...existing, ...patch }
   const title = str(input.title, 'Название', 3, 140)
   const description = str(input.description, 'Описание', 10, 8000)
   if ([title, description].some(outsideContact)) {
@@ -140,7 +142,15 @@ export function listingInput(body: unknown, existing: Record<string, unknown>, k
   const destinationCountry = kind === 'BUY' || input.destinationCountry
     ? country(input.destinationCountry, 'Страна доставки')
     : null
-  const source = kind === 'BUY' ? oneOf(input.originScope ?? 'ANY', originScopes, 'География поставки') : null
+  const sellerSource = patch.originScope === undefined && patch.originCountry != null
+    ? 'COUNTRY'
+    : input.originScope ?? 'COUNTRY'
+  const source = kind === 'BUY'
+    ? oneOf(input.originScope ?? 'ANY', originScopes, 'География поставки')
+    : oneOf(sellerSource, sellerOriginScopes, 'География отгрузки')
+  if (kind === 'SELL' && source === 'ANY' && patch.originCountry != null) {
+    throw new BadRequestException('Для отгрузки из любой страны уберите конкретную страну')
+  }
   const originCountry = source === 'DOMESTIC' ? destinationCountry
     : source === 'ANY' ? null
     : country(input.originCountry, 'Страна отгрузки')

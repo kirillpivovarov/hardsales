@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useParams } from 'react-router-dom';
 import { api, ApiError } from './api';
 import type { User } from './api';
 import { ListingVisual } from './Catalog';
 import { StartChatButton } from './ChatPage';
 import { useI18n } from './i18n';
+import { ListingGallery } from './ListingImages';
 import { categoryName, countryName, formatMoney, terms } from './market';
 import type { Category, Listing } from './market';
 import { Icon, Notice, Spinner } from './ui';
 
 export function ListingDetail({ user }: { user: User | null }) {
   const { id } = useParams();
+  const returnTo: unknown = useLocation().state?.returnTo;
   const { t, locale } = useI18n();
   const [listing, setListing] = useState<Listing | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -28,7 +30,9 @@ export function ListingDetail({ user }: { user: User | null }) {
     void api<Category[]>('/categories', { signal: controller.signal }).then(setCategories).catch(() => {});
     return () => controller.abort();
   }, [id, user?.id, user?.emailVerified]);
-  const back = <Link className="back-link" to="/catalog"><Icon name="chevron-left" size={16} /> {t('К каталогу')}</Link>;
+  const returnPath = typeof returnTo === 'string' ? returnTo.split(/[?#]/, 1)[0] : '';
+  const catalogPath = typeof returnTo === 'string' && (returnPath === '/' || returnPath === '/catalog') ? returnTo : '/catalog';
+  const back = <Link className="back-link" to={catalogPath}><Icon name="chevron-left" size={16} /> {t('К каталогу')}</Link>;
   if (!user?.emailVerified) return <div className="container detail-page">{back}<div className="panel locked-panel">
     <span className="lock-icon"><Icon name="lock-keyhole" size={25} /></span><h1>{t('Объявление доступно участникам')}</h1><p>{t('Войдите в аккаунт с подтверждённой почтой, чтобы увидеть условия сделки.')}</p>
     <div className="lock-actions"><Link className="button button-primary" to={`/login?next=${encodeURIComponent('/listings/' + id)}`}>{t('Войти')}</Link><Link className="button button-secondary" to={`/register?next=${encodeURIComponent('/listings/' + id)}`}>{t('Зарегистрироваться')}</Link></div>
@@ -47,10 +51,11 @@ export function ListingDetail({ user }: { user: User | null }) {
     ['Количество', listing.quantity],
     ['Наличие', stringTerm(listing.availability)],
     ['Состояние', listing.condition === 'ANY' ? t('Любое') : stringTerm(listing.condition)],
-    [listing.kind === 'BUY' ? 'Страна закупки' : listing.availability === 'STOCK' ? 'Страна склада' : 'Страна отгрузки', localCountry(listing.originCountry)],
+    [listing.kind === 'BUY' ? 'Страна закупки' : 'Страна отгрузки',
+      listing.kind === 'SELL' && listing.originScope === 'ANY' ? t('Любая страна') : localCountry(listing.originCountry)],
     ['Город склада', listing.stockCity],
     ['Страна поставки', localCountry(listing.destinationCountry)],
-    ['География закупки', stringTerm(listing.originScope)],
+    ['География закупки', listing.kind === 'BUY' ? stringTerm(listing.originScope) : ''],
     [listing.kind === 'BUY' ? 'Поставка до' : 'Ориентировочная дата готовности', listing.deliveryBy ? new Intl.DateTimeFormat(locale, {dateStyle:'medium', timeZone:'UTC'}).format(new Date(listing.deliveryBy)) : ''],
     ['Доставка в стоимости', inclusion(listing.deliveryIncluded)],
     ['Таможня и пошлины в стоимости', inclusion(listing.customsIncluded)],
@@ -64,8 +69,10 @@ export function ListingDetail({ user }: { user: User | null }) {
     <div className="detail-title"><span className="listing-kicker">{category ? categoryName(category, locale) : t(listing.kind === 'SELL' ? 'Предложение' : 'Заявка на закупку')}</span><h1>{listing.title}</h1></div>
     <div className="detail-layout">
       <div className="detail-main">
-        <ListingVisual listing={listing} category={category} />
-        {listing.imageKey && <span className="illustration-note">{t('Иллюстрация оборудования')}</span>}
+        {listing.images?.length ? <ListingGallery key={listing.id} images={listing.images} /> : <>
+          <ListingVisual listing={listing} category={category} />
+          {listing.imageKey && <span className="illustration-note">{t('Иллюстрация оборудования')}</span>}
+        </>}
         <section className="panel detail-panel"><h2>{t('Описание')}</h2><p className="preserve-text">{listing.description}</p></section>
         <section className="panel detail-panel"><h2>{t('Условия сделки')}</h2><dl>
           {properties.filter(([,value]) => value !== null && value !== undefined && value !== '').map(([label, value]) => <div key={label}><dt>{t(String(label))}</dt><dd>{value}</dd></div>)}

@@ -2,13 +2,14 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import type { PoolClient } from 'pg'
 import type { SessionUser } from '../auth/auth.types'
 import { DatabaseService, type Queryable } from '../database/database.service'
+import { ListingMediaService, type ListingImage, type ListingImageData, type ListingImageUpdate, type ListingImageUpload } from './listing-media.service'
 import {
   accountTypes, availability, boolean, conditions, counterparties, country, currencies, escapedSearch,
   kinds, listingInput, listingStatuses, object, oneOf, originScopes, pageParams, Parameters, paymentMethods,
   priceValue, slug, str, uuid, vatModes,
 } from './market.inputs'
 import {
-  categoryColumns, listingColumns, listingEditableColumns, listingJoins, listingPublicWhere,
+  categoryColumns, listingColumns, listingDetailWhere, listingEditableColumns, listingJoins, listingPublicWhere,
   visibleCategories,
 } from './market.queries'
 
@@ -18,11 +19,12 @@ type ListingRow = Record<string, unknown> & {
   kind: typeof kinds[number]
   categoryId: string
   status: typeof listingStatuses[number]
+  images: ListingImage[]
 }
 
 @Injectable()
 export class CatalogService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(private readonly db: DatabaseService, private readonly media: ListingMediaService) {}
 
   async categories(includeInactive = false) {
     const { rows } = await this.db.query(`
@@ -79,7 +81,6 @@ export class CatalogService {
     const selections = [
       ['ownerType', 'u.participant_type', accountTypes, 'Тип участника'],
       ['availability', 'l.availability', availability, 'Наличие'],
-      ['originScope', 'l.origin_scope', originScopes, 'География поставки'],
       ['priceMode', 'l.price_mode', ['FIXED', 'NEGOTIABLE'], 'Тип цены'],
       ['vat', 'l.vat', vatModes, 'НДС'],
       ['counterparty', 'l.counterparty', counterparties, 'Тип контрагента'],
@@ -87,15 +88,25 @@ export class CatalogService {
     for (const [key, field, valid, label] of selections) {
       if (query[key]) filters.push(`${field} = ${params.add(oneOf(query[key], valid, label))}`)
     }
+    if (query.originScope) {
+      const scope = oneOf(query.originScope, originScopes, 'География поставки')
+      const matching = `l.origin_scope = ${params.add(scope)}`
+      filters.push(scope === 'COUNTRY' ? `(${matching} OR (l.kind = 'SELL' AND l.origin_scope IS NULL))` : matching)
+    }
     if (query.condition) {
       const condition = oneOf(query.condition, conditions, 'Состояние')
       const matching = `l.condition = ${params.add(condition)}`
       const acceptsAny = condition !== 'ANY' && (allowed || requestedKind) === 'BUY'
       filters.push(acceptsAny ? `(${matching} OR l.condition = 'ANY')` : matching)
     }
+    for (const key of ['country', 'originCountry']) {
+      const origin = query[key]
+      if (!origin) continue
+      const matching = origin === 'ANY' ? "l.origin_scope = 'ANY'"
+        : `(l.origin_country = ${params.add(country(origin, 'Страна отгрузки'))} OR (l.kind = 'SELL' AND l.origin_scope = 'ANY'))`
+      filters.push(matching)
+    }
     const countries = [
-      ['country', 'l.origin_country', 'Страна отгрузки'],
-      ['originCountry', 'l.origin_country', 'Страна отгрузки'],
       ['destinationCountry', 'l.destination_country', 'Страна доставки'],
       ['ownerCountry', 'u.country', 'Страна участника'],
     ] as const
@@ -150,14 +161,31 @@ export class CatalogService {
   }
 
   async detail(user: SessionUser, idInput: string) {
-    const id = uuid(idInput)
-    const otherKind = user.role === 'ADMIN' ? null : this.oppositeKind(user)
     const result = await this.db.query<ListingRow>(`
       ${visibleCategories}
       SELECT ${listingColumns} ${listingJoins}
-      WHERE l.id = $1 AND ($2 OR l.owner_id = $3 OR (l.kind = $4 AND ${listingPublicWhere}))
-    `, [id, user.role === 'ADMIN', user.id, otherKind])
+      WHERE ${listingDetailWhere}
+    `, this.detailParams(user, idInput))
     return this.found(result.rows[0])
+  }
+
+  async image(user: SessionUser, idInput: string, imageIdInput: string) {
+    const { rows } = await this.db.query<ListingImageData>(`
+      ${visibleCategories}
+      SELECT i.content, i.mime_type AS "mimeType"
+      ${listingJoins} JOIN listing_images i ON i.listing_id = l.id
+      WHERE ${listingDetailWhere} AND i.id = $5
+    `, [...this.detailParams(user, idInput), uuid(imageIdInput, 'Фотография')])
+    if (!rows[0]) throw new NotFoundException('Фотография не найдена')
+    return rows[0]
+  }
+
+  async assertEditableBy(user: SessionUser, idInput: string) {
+    const { rows } = await this.db.query<Pick<ListingRow, 'ownerId' | 'status'>>(`
+      SELECT owner_id AS "ownerId", status FROM listings WHERE id = $1
+    `, [uuid(idInput)])
+    if (!rows[0]) throw new NotFoundException('Объявление не найдено')
+    this.assertOwnership(rows[0], user)
   }
 
   async show(db: Queryable, id: string) {
@@ -165,12 +193,13 @@ export class CatalogService {
     return this.found(rows[0])
   }
 
-  async create(user: SessionUser, body: unknown) {
+  async create(user: SessionUser, body: unknown, uploads?: ListingImageUpload[]) {
     if (user.role === 'ADMIN') throw new ForbiddenException('Администратор не публикует объявления')
     const kind = user.role === 'SELLER' ? 'SELL' : 'BUY'
     const raw = object(body)
     if (raw.kind && raw.kind !== kind) throw new ForbiddenException('Вид объявления зависит от роли')
     const values = listingInput(raw, {}, kind)
+    const images = await this.media.prepare(raw.imageOrder, uploads)
     return this.db.transaction(async client => {
       await this.categoryReady(client, values[0] as string)
       const markers = listingEditableColumns.map((_, index) => `$${index + 3}`).join(', ')
@@ -181,27 +210,30 @@ export class CatalogService {
         RETURNING id
       `, [user.id, kind, ...values])
       if (!rows[0]) throw new ForbiddenException('Профиль недоступен')
+      if (images) await this.media.save(client, rows[0].id, [], images)
       return this.show(client, rows[0].id)
     })
   }
 
-  async change(user: SessionUser, idInput: string, body: unknown) {
+  async change(user: SessionUser, idInput: string, body: unknown, uploads?: ListingImageUpload[]) {
     const id = uuid(idInput)
+    const raw = object(body)
+    const images = await this.media.prepare(raw.imageOrder, uploads)
     return this.db.transaction(async client => {
       const existing = await this.lock(client, id)
       this.assertOwnership(existing, user)
       await this.activeUser(client, user.id)
-      return this.update(client, existing, body)
+      return this.update(client, existing, raw, images)
     })
   }
 
-  async update(client: PoolClient, existing: ListingRow, body: unknown) {
-    const raw = object(body)
+  async update(client: PoolClient, existing: ListingRow, raw: Record<string, unknown>, images?: ListingImageUpdate) {
     if (raw.kind && raw.kind !== existing.kind) throw new BadRequestException('Вид объявления нельзя изменить')
     const values = listingInput(raw, existing, existing.kind)
     if (values[0] !== existing.categoryId) await this.categoryReady(client, values[0] as string)
     const assignments = listingEditableColumns.map((name, index) => `${name} = $${index + 2}`).join(', ')
     await client.query(`UPDATE listings SET ${assignments}, updated_at = now() WHERE id = $1`, [existing.id, ...values])
+    if (images) await this.media.save(client, existing.id, existing.images, images)
     return this.show(client, existing.id)
   }
 
@@ -241,7 +273,11 @@ export class CatalogService {
     return user.role === 'SELLER' ? 'BUY' : 'SELL'
   }
 
-  private assertOwnership(existing: ListingRow, user: SessionUser) {
+  private detailParams(user: SessionUser, idInput: string) {
+    return [uuid(idInput), user.role === 'ADMIN', user.id, this.oppositeKind(user)]
+  }
+
+  private assertOwnership(existing: Pick<ListingRow, 'ownerId' | 'status'>, user: SessionUser) {
     if (existing.ownerId !== user.id) throw new NotFoundException('Объявление не найдено')
     if (existing.status === 'FROZEN' || existing.status === 'BANNED') {
       throw new ForbiddenException('Объявление ограничено модератором')

@@ -1,9 +1,15 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req } from '@nestjs/common'
+import {
+  Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req, StreamableFile,
+  UploadedFiles, UseGuards, UseInterceptors,
+} from '@nestjs/common'
 import type { Request } from 'express'
 import { AuthService } from '../auth/auth.service'
 import { AdminService } from './admin.service'
 import { CatalogService } from './catalog.service'
 import { ChatsService } from './chats.service'
+import type { ListingImageUpload } from './listing-media.service'
+import { ListingMemberGuard, ListingMultipart, ListingUploadCapacity, listingMutation } from './listing-upload'
+import type { ListingMutationRequest } from './listing-upload'
 
 @Controller()
 export class MarketController {
@@ -43,14 +49,27 @@ export class MarketController {
     return this.catalog.detail(await this.auth.require(request), id)
   }
 
+  @Get('listings/:id/images/:imageId')
+  async image(@Req() request: Request, @Param('id') id: string, @Param('imageId') imageId: string) {
+    const image = await this.catalog.image(await this.auth.require(request), id, imageId)
+    return new StreamableFile(image.content, { type: image.mimeType })
+  }
+
   @Post('listings')
-  async create(@Req() request: Request, @Body() body: unknown) {
-    return this.catalog.create(await this.auth.require(request), body)
+  @UseGuards(ListingMemberGuard)
+  @UseInterceptors(ListingUploadCapacity, ListingMultipart)
+  create(@Req() request: ListingMutationRequest, @Body() body: unknown, @UploadedFiles() files?: ListingImageUpload[]) {
+    const { data, uploads } = listingMutation(request, body, files)
+    return this.catalog.create(request.listingEditor, data, uploads)
   }
 
   @Patch('listings/:id')
-  async edit(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.catalog.change(await this.auth.require(request), id, body)
+  @UseGuards(ListingMemberGuard)
+  @UseInterceptors(ListingUploadCapacity, ListingMultipart)
+  edit(@Req() request: ListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
+    @UploadedFiles() files?: ListingImageUpload[]) {
+    const { data, uploads } = listingMutation(request, body, files)
+    return this.catalog.change(request.listingEditor, id, data, uploads)
   }
 
   @Delete('listings/:id')

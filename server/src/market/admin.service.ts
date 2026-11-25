@@ -5,6 +5,7 @@ import type { PoolClient } from 'pg'
 import { isPublicProfileText } from '../contact'
 import { DatabaseService } from '../database/database.service'
 import { CatalogService } from './catalog.service'
+import { ListingMediaService, type ListingImageUpload } from './listing-media.service'
 import {
   accountStatuses, accountTypes, boolean, country, escapedSearch, integer, listingStatuses, localeCode,
   object, oneOf, pageParams, Parameters, reportStatuses, reviewStatuses, slug, str, telegram, uuid,
@@ -33,7 +34,9 @@ type StatusAudit = { entity: string; entity_id: string; reason: string; action: 
 
 @Injectable()
 export class AdminService {
-  constructor(private readonly db: DatabaseService, private readonly catalog: CatalogService) {}
+  constructor(
+    private readonly db: DatabaseService, private readonly catalog: CatalogService, private readonly media: ListingMediaService,
+  ) {}
 
   users(query: Record<string, unknown>) {
     const params = new Parameters()
@@ -81,11 +84,13 @@ export class AdminService {
     })
   }
 
-  async editListing(actor: string, idInput: string, body: unknown) {
+  async editListing(actor: string, idInput: string, body: unknown, uploads?: ListingImageUpload[]) {
     const id = uuid(idInput)
+    const raw = object(body)
+    const images = await this.media.prepare(raw.imageOrder, uploads)
     return this.db.transaction(async client => {
       const before = await this.catalog.lock(client, id)
-      const after = await this.catalog.update(client, before, body)
+      const after = await this.catalog.update(client, before, raw, images)
       await this.audit(client, actor, 'listings', id, 'edited', null, before, after)
       return after
     })
