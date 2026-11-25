@@ -9,8 +9,8 @@ import { DatabaseService } from '../database/database.service'
 import { AdminService } from './admin.service'
 import { CatalogService } from './catalog.service'
 import type { ListingImageUpload } from './listing-media.service'
-import { ListingAdminGuard, ListingMultipart, ListingUploadCapacity, listingMutation } from './listing-upload'
-import type { ListingMutationRequest } from './listing-upload'
+import { ListingStaffGuard, ListingMultipart, ListingUploadCapacity, listingMutation } from './listing-upload'
+import type { StaffListingMutationRequest } from './listing-upload'
 import { oneOf, uuid } from './market.inputs'
 
 @Controller('admin')
@@ -24,36 +24,40 @@ export class AdminController {
 
   @Get('users')
   async users(@Req() request: Request, @Query() query: Record<string, unknown>) {
-    await this.auth.admin(request)
-    return this.admin.users(query)
+    return this.admin.users(await this.auth.staff(request), query)
+  }
+
+  @Get('users/:id')
+  async user(@Req() request: Request, @Param('id') id: string) {
+    return this.admin.user(await this.auth.staff(request), id)
   }
 
   @Patch('users/:id')
   async editUser(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.editUser(await this.auth.admin(request), id, body)
+    return this.admin.editUser(await this.auth.staff(request), id, body)
   }
 
   @Patch('users/:id/status')
   async userStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.status(await this.auth.admin(request), 'users', id, body)
+    return this.admin.status(await this.auth.staff(request), 'users', id, body)
   }
 
   @Get('listings')
   async listings(@Req() request: Request, @Query() query: Record<string, unknown>) {
-    await this.auth.admin(request)
+    await this.auth.staff(request)
     return this.catalog.administrativeListings(query)
   }
 
   @Get('listings/:id')
   async listing(@Req() request: Request, @Param('id') id: string) {
-    await this.auth.admin(request)
+    await this.auth.staff(request)
     return this.catalog.show(this.db, uuid(id))
   }
 
   @Patch('listings/:id')
-  @UseGuards(ListingAdminGuard)
+  @UseGuards(ListingStaffGuard)
   @UseInterceptors(ListingUploadCapacity, ListingMultipart)
-  editListing(@Req() request: ListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
+  editListing(@Req() request: StaffListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
     @UploadedFiles() files?: ListingImageUpload[]) {
     const { data, uploads } = listingMutation(request, body, files)
     return this.admin.editListing(request.listingEditor, id, data, uploads)
@@ -61,77 +65,87 @@ export class AdminController {
 
   @Patch('listings/:id/status')
   async listingStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.status(await this.auth.admin(request), 'listings', id, body)
+    return this.admin.status(await this.auth.staff(request), 'listings', id, body)
   }
 
   @Get('categories')
   async categories(@Req() request: Request) {
-    await this.auth.admin(request)
+    await this.auth.staff(request)
     return this.catalog.categories(true)
   }
 
   @Post('categories')
   async createCategory(@Req() request: Request, @Body() body: unknown) {
-    return this.admin.saveCategory(await this.auth.admin(request), null, body)
+    return this.admin.saveCategory(await this.auth.staff(request), null, body)
   }
 
   @Patch('categories/:id')
   async editCategory(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.saveCategory(await this.auth.admin(request), id, body)
+    return this.admin.saveCategory(await this.auth.staff(request), id, body)
   }
 
   @Get('reviews')
   async reviews(@Req() request: Request, @Query() query: Record<string, unknown>) {
-    await this.auth.admin(request)
+    await this.auth.staff(request)
     return this.admin.reviews(query)
+  }
+
+  @Get('reviews/:id')
+  async review(@Req() request: Request, @Param('id') id: string) {
+    await this.auth.staff(request)
+    return this.admin.review(id)
   }
 
   @Patch('reviews/:id/status')
   async reviewStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.status(await this.auth.admin(request), 'reviews', id, body)
+    return this.admin.status(await this.auth.staff(request), 'reviews', id, body)
   }
 
   @Get('reports')
   async reports(@Req() request: Request, @Query() query: Record<string, unknown>) {
-    await this.auth.admin(request)
-    return this.admin.reports(query)
+    return this.admin.reports(await this.auth.staff(request), query)
+  }
+
+  @Get('reports/:id')
+  async report(@Req() request: Request, @Param('id') id: string) {
+    return this.admin.report(await this.auth.staff(request), id)
   }
 
   @Get('reports/:id/messages')
   async evidence(@Req() request: Request, @Param('id') id: string, @Query() query: Record<string, unknown>) {
-    return this.admin.evidence(await this.auth.admin(request), id, query)
+    return this.admin.evidence(await this.auth.staff(request), id, query)
   }
 
   @Patch('reports/:id/status')
   async reportStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.admin.status(await this.auth.admin(request), 'reports', id, body)
+    return this.admin.status(await this.auth.staff(request), 'reports', id, body)
   }
 
   @Get('locales')
   async locales(@Req() request: Request) {
-    await this.auth.admin(request)
+    await this.auth.staff(request)
     return this.admin.locales(true)
   }
 
   @Put('locales/:code')
   async locale(@Req() request: Request, @Param('code') code: string, @Body() body: unknown) {
-    return this.admin.saveLocale(await this.auth.admin(request), code, body)
+    return this.admin.saveLocale(await this.auth.staff(request), code, body)
   }
 
   @Get('content')
   async content(@Req() request: Request) {
-    await this.auth.admin(request)
+    await this.auth.staff(request)
     return this.admin.content(true)
   }
 
   @Put('content/:key')
   async page(@Req() request: Request, @Param('key') key: string, @Body() body: unknown) {
-    return this.admin.saveContent(await this.auth.admin(request), key, body)
+    return this.admin.saveContent(await this.auth.staff(request), key, body)
   }
 
   @Get('audit')
   async audit(@Req() request: Request, @Query() query: Record<string, unknown>) {
-    await this.auth.admin(request)
+    await this.auth.staff(request)
     return this.admin.history(query)
   }
 }

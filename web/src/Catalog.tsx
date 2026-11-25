@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
-import { api } from './api';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { api, isStaff } from './api';
 import type { User } from './api';
+import { ContextModeration } from './AdminPage';
 import { useI18n } from './i18n';
 import { ListingPhoto } from './ListingImages';
 import { CountrySelect } from './CountrySelect';
@@ -23,15 +24,17 @@ const emptyResults: Results = { items: [], total: 0, page: 1, limit: 12, locked:
 export function CatalogPage({ user, home = false }: { user: User | null; home?: boolean }) {
   const { t, locale } = useI18n();
   const [query, setQuery] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   const committedSearch = query.get('q') ?? '';
   const [search, setSearch] = useState(committedSearch);
   const sort = query.get('sort') ?? (committedSearch.trim() ? 'relevance' : 'newest');
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [results, setResults] = useState<Results>(emptyResults);
-  const [busy, setBusy] = useState(true);
+  const [categoryResults, setCategoryResults] = useState<{ path: string; items: Category[] }>();
+  const [listingResults, setListingResults] = useState<{ source: string; data: Results }>();
   const [error, setError] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [retry, setRetry] = useState(0);
+  const [moderationRevision, setModerationRevision] = useState(0);
   const oppositeKind = user?.role === 'SELLER' ? 'BUY' : user?.role === 'BUYER' ? 'SELL' : null;
   const kind = oppositeKind ?? (query.get('kind') === 'BUY' ? 'BUY' : 'SELL');
   const selectedCategory = query.get('category') ?? '';
@@ -42,35 +45,57 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   const priceMin = query.get('priceMin') ?? '';
   const priceMax = query.get('priceMax') ?? '';
   const currency = query.get('currency') || (priceMin || priceMax ? 'RUB' : '');
-  const authenticated = Boolean(user?.emailVerified);
-  const locked = !authenticated || results.locked;
+  const authenticated = Boolean(user?.emailVerified && !user.mustChangePassword);
+  const staff = authenticated && isStaff(user);
   const requestedQuery = query.toString();
+  const source = JSON.stringify([requestedQuery, kind, user?.id, authenticated]);
+  const results = listingResults?.source === source ? listingResults.data : emptyResults;
+  const busy = listingResults?.source !== source;
+  const locked = !authenticated || results.locked;
+  const categoryPath = staff ? '/admin/categories' : '/categories';
+  const categories = categoryResults?.path === categoryPath ? categoryResults.items : [];
+  const selectedCategoryRecord = categories.find(category => category.slug === selectedCategory);
 
   useEffect(() => { setSearch(committedSearch); }, [committedSearch]);
   useEffect(() => {
     const controller = new AbortController();
-    void api<Category[]>('/categories', { signal: controller.signal }).then(setCategories).catch(() => {});
+    void api<Category[]>(categoryPath, { signal: controller.signal }).then(items => {
+      if (!controller.signal.aborted) setCategoryResults({ path: categoryPath, items });
+    }).catch(() => {});
     return () => controller.abort();
-  }, [retry]);
+  }, [categoryPath, retry, moderationRevision]);
 
   useEffect(() => {
     const controller = new AbortController();
-    setBusy(true);
     setError('');
     const params = new URLSearchParams(requestedQuery);
     params.set('kind', kind);
     if (kind === 'BUY') params.delete('availability');
     else params.delete('originScope');
     api<Results>('/listings?' + params.toString(), { signal: controller.signal }).then(data => {
-      setResults(data);
-      setBusy(false);
+      if (!controller.signal.aborted) setListingResults({ source, data });
     }).catch((caught: Error) => {
       if (controller.signal.aborted) return;
       setError(caught.message);
-      setBusy(false);
     });
     return () => controller.abort();
-  }, [requestedQuery, kind, user?.id, authenticated, retry]);
+  }, [requestedQuery, kind, source, retry, moderationRevision]);
+
+  function reloadAfterModeration() {
+    setModerationRevision(value => value + 1);
+  }
+
+  function categorySaved(category: Category, result?: unknown) {
+    if (selectedCategory === category.slug && result && typeof result === 'object' &&
+      'slug' in result && typeof result.slug === 'string' && result.slug !== category.slug) {
+      const next = new URLSearchParams(query);
+      next.set('category', result.slug);
+      navigate({ pathname: location.pathname, search: next.toString(), hash: location.hash }, {
+        replace: true, state: location.state, preventScrollReset: true,
+      });
+    }
+    reloadAfterModeration();
+  }
 
   function change(values: Record<string,string>) {
     const next = new URLSearchParams(query);
@@ -112,11 +137,22 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
     {categoryTiles.length > 0 && <section className="categories-section" aria-labelledby="category-title">
       <div className="section-heading"><h2 id="category-title">{t('Категории')}</h2><a className="text-link" href="#catalog" onClick={() => change({category:''})}>{t('Все категории')} <Icon name="chevron-down" size={16} /></a></div>
       <div className="category-grid">
-        {categoryTiles.map(category => <button key={category.id} className={'category-tile' + (category.slug === selectedCategory ? ' selected' : '')} aria-pressed={category.slug === selectedCategory}
-          onClick={() => { change({ category: category.slug === selectedCategory ? '' : category.slug }); document.getElementById('catalog')?.scrollIntoView(); }}>
-          <span className="category-icon"><Icon name={categoryIcon(category)} size={24} /></span>
-          <span>{categoryName(category, locale, true)}</span>
-        </button>)}
+        {categoryTiles.map(category => {
+          const name = categoryName(category, locale);
+          const tile = <button className={'category-tile' + (category.slug === selectedCategory ? ' selected' : '')} aria-pressed={category.slug === selectedCategory}
+            onClick={() => { change({ category: category.slug === selectedCategory ? '' : category.slug }); document.getElementById('catalog')?.scrollIntoView(); }}>
+            <span className="category-icon"><Icon name={categoryIcon(category)} size={24} /></span>
+            <span>{categoryName(category, locale, true)}</span>
+          </button>;
+          return staff ? <div className="contextual-card" key={category.id}>
+            {tile}
+            <div className="contextual-card-actions">
+              <ContextModeration user={user} target={{ type: 'category', id: category.id, title: name }} label={t('Редактировать')}
+                accessibleLabel={t('Редактировать категорию {name}', { name })} onSaved={result => categorySaved(category, result)} />
+              {!category.active && <span className="contextual-status">{t('Скрыта')}</span>}
+            </div>
+          </div> : <Fragment key={category.id}>{tile}</Fragment>;
+        })}
       </div>
     </section>}
     <section className="catalog" id="catalog" aria-labelledby="catalog-title">
@@ -134,8 +170,11 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
           </div>
           <Field label={t('Категория')}><select value={selectedCategory} onChange={event => change({category:event.target.value})}>
             <option value="">{t('Все категории')}</option>
-            {categories.map(category => <option key={category.id} value={category.slug}>{categoryName(category,locale)}</option>)}
+            {categories.map(category => <option key={category.id} value={category.slug}>{categoryName(category,locale)}{staff && !category.active ? ` (${t('скрыта')})` : ''}</option>)}
           </select></Field>
+          {staff && selectedCategoryRecord && <ContextModeration user={user}
+            target={{ type: 'category', id: selectedCategoryRecord.id, title: categoryName(selectedCategoryRecord, locale) }}
+            label={t('Редактировать выбранную категорию')} onSaved={result => categorySaved(selectedCategoryRecord, result)} />}
           <Field label={t(kind === 'BUY' ? 'Тип покупателя' : 'Тип продавца')}><select value={query.get('ownerType') ?? ''} onChange={event => change({ownerType:event.target.value})}>
             <option value="">{t('Все участники')}</option>{options(['COMPANY','INDIVIDUAL'])}
           </select></Field>
@@ -226,7 +265,17 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
             <h3>{t('Объявления не найдены')}</h3><p>{t('Измените запрос или уберите часть фильтров.')}</p>
             <Button variant="secondary" onClick={() => { setSearch(''); change({ ...Object.fromEntries(allFilters.map(key => [key, ''])), q: '' }); }}>{t('Очистить поиск')}</Button>
           </div> : <>
-            <div className="listing-grid">{results.items.map(listing => <ListingCard key={listing.id} listing={listing} category={listing.category ?? categories.find(category => category.id === listing.categoryId)} returnTo={catalogReturn} />)}</div>
+            <div className="listing-grid">{results.items.map(listing => {
+              const category = listing.category ?? categories.find(category => category.id === listing.categoryId);
+              if (!staff) return <ListingCard key={listing.id} listing={listing} category={category} returnTo={catalogReturn} />;
+              return <div className="contextual-card" key={listing.id}>
+                <ListingCard listing={listing} category={category} returnTo={catalogReturn} />
+                <div className="contextual-card-actions">
+                  <ContextModeration user={user} target={{ type: 'listing', id: listing.id, title: listing.title }}
+                    label={t('Модерировать')} accessibleLabel={t('Модерировать объявление {name}', { name: listing.title })} onSaved={reloadAfterModeration} />
+                </div>
+              </div>;
+            })}</div>
             {resultPages > 1 && <nav className="pagination" aria-label={t('Страницы каталога')}>
               <Button variant="secondary" disabled={results.page <= 1} onClick={() => change({page:String(results.page - 1)})}><Icon name="chevron-left" size={16} /> {t('Назад')}</Button>
               <span>{t('{page} из {total}', { page: results.page, total: resultPages })}</span>

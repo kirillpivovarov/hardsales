@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api } from './api'
+import { api, isStaff, type User } from './api'
 import { useI18n } from './i18n'
 import { ListingForm } from './ListingForm'
 import { CountrySelect } from './CountrySelect'
@@ -16,15 +17,18 @@ const tabs = {
   reports: 'Жалобы',
   content: 'Страницы',
   locales: 'Языки',
+  moderators: 'Модераторы',
   audit: 'Журнал действий',
 } as const
 
 type Tab = keyof typeof tabs
-type PagedTab = 'users' | 'listings' | 'reviews' | 'reports' | 'audit'
+type StatusTab = 'users' | 'listings' | 'reviews' | 'reports'
+type PagedTab = StatusTab | 'moderators' | 'audit'
 type Translator = ReturnType<typeof useI18n>['t']
 
 const statuses: Partial<Record<PagedTab, readonly string[]>> = {
   users: ['ACTIVE', 'FROZEN', 'BANNED'],
+  moderators: ['ACTIVE', 'FROZEN', 'BANNED'],
   listings: ['ACTIVE', 'FROZEN', 'BANNED', 'ARCHIVED'],
   reviews: ['ACTIVE', 'HIDDEN', 'BANNED'],
   reports: ['OPEN', 'RESOLVED', 'REJECTED'],
@@ -44,6 +48,8 @@ const labels: Record<string, string> = {
   BUYER: 'Покупатель',
   SELLER: 'Продавец',
   ADMIN: 'Администратор',
+  MODERATOR: 'Модератор',
+  AGENT: 'Агент модерации',
   COMPANY: 'Компания',
   INDIVIDUAL: 'Частное лицо',
   FRAUD: 'Подозрение на мошенничество',
@@ -55,8 +61,18 @@ const labels: Record<string, string> = {
   created: 'Создание',
   'status-changed': 'Изменение статуса',
   'status-unchanged': 'Проверка статуса',
+  'status-denied': 'Отказ в смене статуса',
+  'edit-denied': 'Отказ в редактировании',
+  'profiles-listed': 'Просмотр списка профилей',
+  'profile-viewed': 'Просмотр профиля',
+  'profile-edited': 'Редактирование профиля',
+  'reports-listed': 'Просмотр списка жалоб',
+  'report-viewed': 'Просмотр жалобы',
   'evidence-viewed': 'Просмотр переписки по жалобе',
   'credentials-changed': 'Смена данных для входа',
+  'moderator-created': 'Создание модератора',
+  login: 'Вход в аккаунт',
+  logout: 'Выход из аккаунта',
 }
 
 type UserRow = {
@@ -64,11 +80,11 @@ type UserRow = {
   username: string
   displayName: string
   role: string
-  participantType: string
-  city: string
-  country: string
-  email: string
-  telegram: string
+  participantType: string | null
+  city: string | null
+  country: string | null
+  email: string | null
+  telegram: string | null
   companyName: string | null
   status: string
   emailVerified: boolean
@@ -115,6 +131,7 @@ type ReportMessage = { id: number; body: string; nickname: string; createdAt: st
 type AuditRow = {
   id: number
   actor: string | { username?: string; nickname?: string; id?: string } | null
+  actorRole: 'ADMIN' | 'MODERATOR' | 'AGENT' | null
   entity: string
   entityId: string
   action: string
@@ -157,12 +174,13 @@ type LocaleRow = {
 type Page<T> = { items: T[]; total: number; page: number; limit: number }
 
 type Editor =
-  | { type: 'user'; row: UserRow }
+  | { type: 'user'; id: string; row?: UserRow }
   | { type: 'listing'; id: string }
-  | { type: 'status'; tab: Exclude<PagedTab, 'audit'>; id: string; name: string; status: string; report?: ReportRow }
+  | { type: 'status'; tab: StatusTab; id: string; name: string; status: string; report?: ReportRow }
   | { type: 'category'; row?: CategoryRow; categories: CategoryRow[]; locales: LocaleRow[] }
   | { type: 'content'; row?: ContentRow; locales: LocaleRow[]; existingKeys?: string[] }
   | { type: 'locale'; row?: LocaleRow; existingCodes?: string[] }
+  | { type: 'moderator' }
 
 function statusLabel(t: Translator, value: string) {
   return Object.hasOwn(labels, value) ? t(labels[value]) : value
@@ -179,7 +197,7 @@ function formText(data: FormData, key: string) {
   return String(data.get(key) ?? '').trim()
 }
 
-function geography(city: string | undefined, country: string | undefined, locale: string) {
+function geography(city: string | null | undefined, country: string | null | undefined, locale: string) {
   return [city, country ? countryName(country, locale) : undefined].filter(Boolean).join(', ')
 }
 
@@ -229,23 +247,30 @@ function RecordLabel({ title, detail }: { title: ReactNode; detail?: ReactNode }
 }
 
 function PagedRecords<T extends { id: string | number; status?: string }>({
-  tab, version, columns,
+  tab, version, columns, headerAction, subjectId,
 }: {
   tab: PagedTab
   version: number
   columns: Column<T>[]
+  headerAction?: ReactNode
+  subjectId?: string
 }) {
   const { t } = useI18n()
   const [page, setPage] = useState(1)
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('')
+  const [actorRole, setActorRole] = useState('')
   const [retry, setRetry] = useState(0)
   const limit = 20
   const params = new URLSearchParams({ page: String(page), limit: String(limit) })
   if (query) params.set('q', query)
   if (status) params.set('status', status)
-  const { data, loading, error } = useAdminData<Page<T>>('/admin/' + tab + '?' + params.toString(), version + retry)
+  if (tab === 'audit' && actorRole) params.set('actorRole', actorRole)
+  if (tab === 'moderators') params.set('role', 'MODERATOR')
+  if (subjectId) params.set('subjectId', subjectId)
+  const path = tab === 'moderators' ? 'users' : tab
+  const { data, loading, error } = useAdminData<Page<T>>('/admin/' + path + '?' + params.toString(), version + retry)
   const pages = Math.max(1, Math.ceil((data?.total ?? 0) / limit))
   useEffect(() => {
     if (data && page > pages) setPage(pages)
@@ -258,7 +283,7 @@ function PagedRecords<T extends { id: string | number; status?: string }>({
   }
 
   return <>
-    <div className="admin-toolbar"><h2>{t(tabs[tab])}</h2>{data && <span className="muted">{t('Всего записей · {count}', { count: data.total })}</span>}</div>
+    <div className="admin-toolbar"><h2>{t(tabs[tab])}</h2>{data && <span className="muted">{t('Всего записей · {count}', { count: data.total })}</span>}{headerAction}</div>
     <form className="admin-filters" onSubmit={search}>
       <Field label={t('Поиск')}>
         <input type="search" value={draft} onChange={event => setDraft(event.target.value)} maxLength={120} />
@@ -267,6 +292,12 @@ function PagedRecords<T extends { id: string | number; status?: string }>({
         <select value={status} onChange={event => { setStatus(event.target.value); setPage(1) }}>
           <option value="">{t('Все статусы')}</option>
           {statuses[tab].map(value => <option key={value} value={value}>{statusLabel(t, value)}</option>)}
+        </select>
+      </Field>}
+      {tab === 'audit' && <Field label={t('Роль исполнителя')}>
+        <select value={actorRole} onChange={event => { setActorRole(event.target.value); setPage(1) }}>
+          <option value="">{t('Все роли')}</option>
+          {['ADMIN', 'MODERATOR', 'AGENT'].map(role => <option key={role} value={role}>{statusLabel(t, role)}</option>)}
         </select>
       </Field>}
       <Button variant="secondary" type="submit">{t('Найти')}</Button>
@@ -288,23 +319,38 @@ function PagedRecords<T extends { id: string | number; status?: string }>({
 
 type PagedProps = { version: number; edit: (editor: Editor) => void }
 
+function isMarketProfile(row: UserRow) {
+  return row.role === 'BUYER' || row.role === 'SELLER'
+}
+
 function Users({ version, edit }: PagedProps) {
   const { t, locale } = useI18n()
   return <PagedRecords<UserRow> tab="users" version={version} columns={[
-    { label: t('Пользователь'), render: row => <RecordLabel title={row.displayName} detail={<>{row.username} · {row.email}<br />{geography(row.city, row.country, locale)}</>} /> },
-    { label: t('Роль'), render: row => <RecordLabel title={statusLabel(t, row.role)} detail={row.role === 'ADMIN' ? undefined : row.companyName || statusLabel(t, row.participantType)} /> },
+    { label: t('Пользователь'), render: row => <RecordLabel title={row.displayName} detail={<>{row.username}{row.email && ` · ${row.email}`}{(row.city || row.country) && <><br />{geography(row.city, row.country, locale)}</>}</>} /> },
+    { label: t('Роль'), render: row => <RecordLabel title={statusLabel(t, row.role)} detail={row.companyName || (row.participantType ? statusLabel(t, row.participantType) : undefined)} /> },
     { label: t('Статус'), render: row => <RecordLabel title={statusLabel(t, row.status)} detail={<>{row.emailVerified ? t('Почта подтверждена') : t('Почта ожидает подтверждения')}<br />{formatDate(locale, row.createdAt)}</>} /> },
-    { label: t('Действия'), render: row => row.role !== 'ADMIN' && <div className="admin-actions">
-      <Button variant="secondary" type="button" onClick={() => edit({ type: 'user', row })}>{t('Редактировать')}</Button>
+    { label: t('Действия'), render: row => isMarketProfile(row) && <div className="admin-actions">
+      <Button variant="secondary" type="button" onClick={() => edit({ type: 'user', id: row.id })}>{t('Редактировать')}</Button>
       {row.status !== 'BANNED' && <Button variant="ghost" type="button" onClick={() => edit({ type: 'status', tab: 'users', id: row.id, name: row.displayName, status: row.status })}>{t('Статус')}</Button>}
     </div> },
   ]} />
 }
 
+function Moderators({ version, edit }: PagedProps) {
+  const { t, locale } = useI18n()
+  return <PagedRecords<UserRow> tab="moderators" version={version}
+    headerAction={<Button onClick={() => edit({ type: 'moderator' })}>{t('Добавить модератора')}</Button>}
+    columns={[
+      { label: t('Модератор'), render: row => <RecordLabel title={row.displayName} detail={<>{row.username}{row.email && ` · ${row.email}`}</>} /> },
+      { label: t('Статус'), render: row => <RecordLabel title={statusLabel(t, row.status)} detail={<>{row.emailVerified ? t('Почта подтверждена') : t('Почта ожидает подтверждения')}<br />{formatDate(locale, row.createdAt)}</>} /> },
+      { label: t('Действия'), render: row => row.status !== 'BANNED' && <Button variant="ghost" onClick={() => edit({ type: 'status', tab: 'users', id: row.id, name: row.displayName, status: row.status })}>{t('Статус')}</Button> },
+    ]} />
+}
+
 function Listings({ version, edit }: PagedProps) {
   const { t, locale } = useI18n()
   return <PagedRecords<ListingRow> tab="listings" version={version} columns={[
-    { label: t('Объявление'), render: row => <RecordLabel title={row.title} detail={statusLabel(t, row.kind)} /> },
+    { label: t('Объявление'), render: row => <RecordLabel title={<Link className="text-link" to={'/listings/' + row.id}>{row.title}</Link>} detail={statusLabel(t, row.kind)} /> },
     { label: t('Автор'), render: row => <RecordLabel title={row.owner?.nickname ?? '—'} detail={geography(row.owner?.city, row.owner?.country, locale)} /> },
     { label: t('Статус'), render: row => <RecordLabel title={statusLabel(t, row.status)} detail={formatDate(locale, row.createdAt)} /> },
     { label: t('Действия'), render: row => <div className="admin-actions">
@@ -314,9 +360,9 @@ function Listings({ version, edit }: PagedProps) {
   ]} />
 }
 
-function Reviews({ version, edit }: PagedProps) {
+function Reviews({ version, edit, subjectId }: PagedProps & { subjectId?: string }) {
   const { t, locale } = useI18n()
-  return <PagedRecords<ReviewRow> tab="reviews" version={version} columns={[
+  return <PagedRecords<ReviewRow> tab="reviews" version={version} subjectId={subjectId} columns={[
     { label: t('Отзыв'), render: row => <RecordLabel title={t('{rating} из 5', { rating: row.rating })} detail={row.comment} /> },
     { label: t('Участники'), render: row => <RecordLabel title={row.author?.nickname ?? '—'} detail={t('О профиле {name}', { name: row.subject?.nickname ?? '—' })} /> },
     { label: t('Статус'), render: row => <RecordLabel title={statusLabel(t, row.status)} detail={formatDate(locale, row.createdAt)} /> },
@@ -324,13 +370,13 @@ function Reviews({ version, edit }: PagedProps) {
   ]} />
 }
 
-function Reports({ version, edit }: PagedProps) {
+function Reports({ version, edit, subjectId }: PagedProps & { subjectId?: string }) {
   const { t, locale } = useI18n()
-  return <PagedRecords<ReportRow> tab="reports" version={version} columns={[
+  return <PagedRecords<ReportRow> tab="reports" version={version} subjectId={subjectId} columns={[
     { label: t('Жалоба'), render: row => <RecordLabel title={statusLabel(t, row.reason)} detail={row.details.length > 150 ? row.details.slice(0, 149) + '…' : row.details} /> },
     { label: t('Участники'), render: row => <RecordLabel title={row.reporter?.nickname ?? '—'} detail={t('На профиль {name}', { name: row.subject?.nickname ?? '—' })} /> },
     { label: t('Статус'), render: row => <RecordLabel title={statusLabel(t, row.status)} detail={formatDate(locale, row.createdAt)} /> },
-    { label: t('Действия'), render: row => <Button variant="secondary" type="button" onClick={() => edit({ type: 'status', tab: 'reports', id: row.id, name: statusLabel(t, row.reason), status: row.status, report: row })}>{t('Рассмотреть')}</Button> },
+    { label: t('Действия'), render: row => <Button variant="secondary" type="button" onClick={() => edit({ type: 'status', tab: 'reports', id: row.id, name: statusLabel(t, row.reason), status: row.status })}>{t('Рассмотреть')}</Button> },
   ]} />
 }
 
@@ -339,7 +385,7 @@ function Audit({ version }: { version: number }) {
   return <PagedRecords<AuditRow> tab="audit" version={version} columns={[
     { label: t('Действие'), render: row => <RecordLabel title={statusLabel(t, row.action)} detail={row.reason} /> },
     { label: t('Объект'), render: row => <RecordLabel title={Object.hasOwn(tabs, row.entity) ? t(tabs[row.entity as Tab]) : row.entity} detail={row.entityId} /> },
-    { label: t('Исполнитель'), render: row => <RecordLabel title={typeof row.actor === 'string' ? row.actor : row.actor?.username ?? row.actor?.nickname ?? row.actor?.id ?? '—'} detail={formatDate(locale, row.createdAt, true)} /> },
+    { label: t('Исполнитель'), render: row => <RecordLabel title={typeof row.actor === 'string' ? row.actor : row.actor?.username ?? row.actor?.nickname ?? row.actor?.id ?? '—'} detail={<>{row.actorRole && <>{statusLabel(t, row.actorRole)}<br /></>}{formatDate(locale, row.createdAt, true)}</>} /> },
     { label: t('Изменения'), render: row => <details className="admin-audit">
       <summary>{t('Подробнее')}</summary>
       <pre>{JSON.stringify({ [t('До')]: row.before, [t('После')]: row.after }, null, 2)}</pre>
@@ -379,7 +425,7 @@ function ReferenceRecords({ tab, version, edit }: { tab: 'categories' | 'content
         <Button type="button" onClick={() => edit({ type: 'content', locales: locales.data ?? [], existingKeys: pages.map(row => row.key) })}>{t('Добавить страницу')}</Button>
       </div>
       <AdminTable identify={row => row.key} items={pages} columns={[
-        { label: t('Страница'), render: row => <RecordLabel title={row.translations[locale]?.title ?? row.translations.ru?.title ?? row.key} detail={'/info/' + row.key} /> },
+      { label: t('Страница'), render: row => <RecordLabel title={<Link className="text-link" to={'/info/' + row.key}>{row.translations[locale]?.title ?? row.translations.ru?.title ?? row.key}</Link>} detail={'/info/' + row.key} /> },
         { label: t('Статус'), render: row => <RecordLabel title={row.active ? t('Опубликована') : t('Скрыта')} detail={formatDate(locale, row.updatedAt)} /> },
         { label: t('Действия'), render: row => <Button variant="secondary" type="button" onClick={() => edit({ type: 'content', row, locales: locales.data ?? [] })}>{t('Редактировать')}</Button> },
       ]} />
@@ -402,26 +448,31 @@ function ReferenceRecords({ tab, version, edit }: { tab: 'categories' | 'content
 
 function AdminDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   const dialog = useRef<HTMLDialogElement>(null)
+  const titleId = useId()
   const { t } = useI18n()
   useEffect(() => {
     const node = dialog.current
+    const trigger = document.activeElement
     node?.showModal()
-    return () => node?.close()
+    return () => {
+      node?.close()
+      if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({ preventScroll: true })
+    }
   }, [])
-  return <dialog ref={dialog} className="admin-dialog panel" aria-labelledby="admin-dialog-title" onCancel={event => { event.preventDefault(); onClose() }}>
+  return createPortal(<dialog ref={dialog} className="admin-dialog panel" aria-labelledby={titleId} onCancel={event => { event.preventDefault(); onClose() }}>
     <div className="admin-dialog-header">
-      <h2 id="admin-dialog-title">{title}</h2>
+      <h2 id={titleId}>{title}</h2>
       <Button variant="ghost" type="button" onClick={onClose}>{t('Закрыть')}</Button>
     </div>
     {children}
-  </dialog>
+  </dialog>, document.body)
 }
 
 function MutationForm({
   onClose, onSaved, save, children, buttonLabel,
 }: {
   onClose: () => void
-  onSaved: () => void
+  onSaved: (result?: unknown) => void
   save: (data: FormData) => Promise<unknown>
   children: ReactNode
   buttonLabel?: string
@@ -436,8 +487,8 @@ function MutationForm({
     setBusy(true)
     setError('')
     try {
-      await save(data)
-      onSaved()
+      const result = await save(data)
+      onSaved(result)
     } catch (error) {
       setError(t(error instanceof Error ? error.message : 'Не удалось сохранить изменения.'))
     } finally {
@@ -456,7 +507,7 @@ function MutationForm({
 
 function UserForm({ row, onClose, onSaved }: { row: UserRow; onClose: () => void; onSaved: () => void }) {
   const { t } = useI18n()
-  const [participantType, setParticipantType] = useState(row.participantType)
+  const [participantType, setParticipantType] = useState(row.participantType ?? 'INDIVIDUAL')
   const company = participantType === 'COMPANY'
   return <MutationForm onClose={onClose} onSaved={onSaved} save={data => api('/admin/users/' + row.id, {
     method: 'PATCH',
@@ -478,11 +529,55 @@ function UserForm({ row, onClose, onSaved }: { row: UserRow; onClose: () => void
           <option value="COMPANY">{t('Компания')}</option>
         </select>
       </Field>
-      {company && <Field label={t('Название компании')}><input name="companyName" defaultValue={row.companyName ?? ''} required minLength={2} maxLength={160} /></Field>}
-      <Field label={t('Город')}><input name="city" defaultValue={row.city} required minLength={2} maxLength={120} /></Field>
-      <CountrySelect label={t('Страна')} name="country" defaultValue={row.country} required />
-      <Field label={t('Ник в Telegram')}><input name="telegram" defaultValue={row.telegram} required pattern="@?[A-Za-z][A-Za-z0-9_]{4,31}" maxLength={33} /></Field>
+      {company && <Field label={t('Название компании')}><input name="companyName" defaultValue={row.companyName ?? ''} required minLength={2} maxLength={120} /></Field>}
+      <Field label={t('Город')}><input name="city" defaultValue={row.city ?? ''} required minLength={2} maxLength={80} /></Field>
+      <CountrySelect label={t('Страна')} name="country" defaultValue={row.country ?? ''} required />
+      <Field label={t('Ник в Telegram')}><input name="telegram" defaultValue={row.telegram ?? ''} required pattern="@?[A-Za-z][A-Za-z0-9_]{4,31}" maxLength={33} /></Field>
     </div>
+  </MutationForm>
+}
+
+function UserEditor({ id, close, saved }: { id: string } & EditorActions) {
+  const { t } = useI18n()
+  const [retry, setRetry] = useState(0)
+  const { data: row, error, loading } = useAdminData<UserRow>('/admin/users/' + id, retry)
+  if (loading) return <Spinner />
+  if (error) return <Notice tone="error">{error} <Button variant="ghost" onClick={() => setRetry(current => current + 1)}>{t('Повторить')}</Button></Notice>
+  if (!row || !isMarketProfile(row)) return <Notice>{t('Запись недоступна для редактирования.')}</Notice>
+  return <UserForm row={row} onClose={close} onSaved={saved} />
+}
+
+function ModeratorForm({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const { t } = useI18n()
+  const [temporaryPassword, setTemporaryPassword] = useState('')
+  const [passwordVisible, setPasswordVisible] = useState(false)
+  function generatePassword() {
+    const bytes = crypto.getRandomValues(new Uint8Array(24))
+    setTemporaryPassword(Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(''))
+    setPasswordVisible(true)
+  }
+  return <MutationForm onClose={onClose} onSaved={onSaved} buttonLabel={t('Создать модератора')} save={data => api('/admin/moderators', {
+    method: 'POST', body: {
+      username: formText(data, 'username'),
+      displayName: formText(data, 'displayName'),
+      email: formText(data, 'email'),
+      temporaryPassword: String(data.get('temporaryPassword') ?? ''),
+    },
+  })}>
+    <div className="form-grid">
+      <Field label={t('Логин')}><input name="username" autoComplete="off" autoCapitalize="none" spellCheck={false} required pattern={String.raw`[A-Za-z0-9][A-Za-z0-9_.\-]{2,31}`} maxLength={32} /></Field>
+      <Field label={t('Отображаемое имя')}><input name="displayName" autoComplete="off" required minLength={2} maxLength={80} /></Field>
+      <Field label={t('Электронная почта')}><input name="email" type="email" autoComplete="off" required maxLength={254} /></Field>
+      <Field label={t('Временный пароль')} hint={t('Не менее 12 символов.')}>
+        <input name="temporaryPassword" type={passwordVisible ? 'text' : 'password'} value={temporaryPassword}
+          onChange={event => setTemporaryPassword(event.target.value)} autoComplete="new-password" required minLength={12} maxLength={128} />
+      </Field>
+    </div>
+    <div className="admin-password-actions">
+      <Button variant="secondary" onClick={generatePassword}>{t('Создать случайный пароль')}</Button>
+      <Button variant="ghost" onClick={() => setPasswordVisible(current => !current)}>{t(passwordVisible ? 'Скрыть пароль' : 'Показать пароль')}</Button>
+    </div>
+    <p className="muted admin-first-login">{t('Передайте модератору логин и временный пароль. При первом входе модератор введёт код из письма и выберет свой пароль.')}</p>
   </MutationForm>
 }
 
@@ -515,8 +610,20 @@ function StatusForm({
     <Field label={t('Причина')} hint={t('Причина сохранится в журнале действий.')}>
       <textarea name="reason" required minLength={3} maxLength={500} rows={3} />
     </Field>
-    {status === 'BANNED' && <Notice>{t('Блокировка окончательная.')}</Notice>}
+    {status === 'BANNED' && <>
+      <Notice>{t('Бессрочную блокировку «{name}» нельзя отменить.', { name: editor.name })}</Notice>
+      <label className="admin-check"><input type="checkbox" required />{t('Подтверждаю бессрочную блокировку')}</label>
+    </>}
   </MutationForm>
+}
+
+function ReportStatusForm({ editor, ...actions }: { editor: Extract<Editor, { type: 'status' }> } & EditorActions) {
+  const { t } = useI18n()
+  const [retry, setRetry] = useState(0)
+  const { data: report, error, loading } = useAdminData<ReportRow>('/admin/reports/' + editor.id, retry)
+  if (loading) return <Spinner />
+  if (!report) return <Notice tone="error">{error} <Button variant="ghost" onClick={() => setRetry(current => current + 1)}>{t('Повторить')}</Button></Notice>
+  return <StatusForm editor={{ ...editor, name: statusLabel(t, report.reason), status: report.status, report }} onClose={actions.close} onSaved={actions.saved} />
 }
 
 function ReportEvidence({ reportId }: { reportId: string }) {
@@ -710,30 +817,143 @@ function LocaleForm({ row, existingCodes = [], onClose, onSaved }: { row?: Local
   </MutationForm>
 }
 
-function EditorDialog({ editor, close, saved }: { editor: Editor; close: () => void; saved: () => void }) {
-  const { t } = useI18n()
-  const actions = { onClose: close, onSaved: saved }
+function editorTitle(editor: Editor, t: Translator) {
   switch (editor.type) {
-    case 'user':
-      return <AdminDialog title={t('Редактирование профиля')} onClose={close}><UserForm row={editor.row} {...actions} /></AdminDialog>
-    case 'listing':
-      return <AdminDialog title={t('Редактирование объявления')} onClose={close}><ListingForm listingId={editor.id} admin onSaved={saved} /></AdminDialog>
-    case 'status':
-      return <AdminDialog title={t('Модерация')} onClose={close}><StatusForm editor={editor} {...actions} /></AdminDialog>
-    case 'category':
-      return <AdminDialog title={t(editor.row ? 'Редактирование категории' : 'Новая категория')} onClose={close}><CategoryForm {...editor} {...actions} /></AdminDialog>
-    case 'content':
-      return <AdminDialog title={t(editor.row ? 'Редактирование страницы' : 'Новая страница')} onClose={close}><ContentForm {...editor} {...actions} /></AdminDialog>
-    case 'locale':
-      return <AdminDialog title={t(editor.row ? 'Редактирование языка' : 'Новый язык')} onClose={close}><LocaleForm {...editor} {...actions} /></AdminDialog>
+    case 'user': return t('Редактирование профиля')
+    case 'listing': return t('Редактирование объявления')
+    case 'status': return t('Модерация')
+    case 'category': return t(editor.row ? 'Редактирование категории' : 'Новая категория')
+    case 'content': return t(editor.row ? 'Редактирование страницы' : 'Новая страница')
+    case 'locale': return t(editor.row ? 'Редактирование языка' : 'Новый язык')
+    case 'moderator': return t('Новый модератор')
   }
 }
 
-export function AdminPage() {
+type EditorActions = { close: () => void; saved: (result?: unknown) => void }
+
+function EditorFields({ editor, close, saved }: { editor: Editor } & EditorActions) {
+  const actions = { onClose: close, onSaved: saved }
+  switch (editor.type) {
+    case 'user': return editor.row ? <UserForm row={editor.row} {...actions} /> : <UserEditor id={editor.id} close={close} saved={saved} />
+    case 'listing': return <ListingForm listingId={editor.id} admin onSaved={saved} />
+    case 'status': return editor.tab === 'reports' ? <ReportStatusForm editor={editor} close={close} saved={saved} /> : <StatusForm editor={editor} {...actions} />
+    case 'category': return <CategoryForm {...editor} {...actions} />
+    case 'content': return <ContentForm {...editor} {...actions} />
+    case 'locale': return <LocaleForm {...editor} {...actions} />
+    case 'moderator': return <ModeratorForm {...actions} />
+  }
+}
+
+export type ContextModerationTarget = { type: 'listing' | 'user' | 'category' | 'content' | 'locale'; id: string; title: string }
+
+type ContextModerationProps = {
+  user: User | null
+  target: ContextModerationTarget
+  label?: string
+  accessibleLabel?: string
+  onSaved?: (result?: unknown) => void
+}
+
+export function ContextModeration({ user, target, label, accessibleLabel, onSaved }: ContextModerationProps) {
+  const { t, reloadLocales } = useI18n()
+  const [open, setOpen] = useState(false)
+  const [saved, setSaved] = useState(false)
+  if (!isStaff(user) || !user?.emailVerified || user.mustChangePassword || user.status !== 'ACTIVE') return null
+
+  return <div className="context-moderation">
+    <Button variant="secondary" aria-haspopup="dialog" aria-label={accessibleLabel ?? label ?? t('Модерировать {name}', { name: target.title })}
+      onClick={() => { setSaved(false); setOpen(true) }}>{label ?? t('Модерировать')}</Button>
+    {saved && <span className="context-moderation-feedback" role="status">{t('Изменения сохранены.')}</span>}
+    {open && <AdminDialog title={t('Модерация · {name}', { name: target.title })} onClose={() => setOpen(false)}>
+      <ContextModerationFields key={target.type + target.id} target={target} close={() => setOpen(false)} saved={result => {
+        setOpen(false)
+        setSaved(true)
+        if (target.type === 'locale') reloadLocales()
+        onSaved?.(result)
+      }} />
+    </AdminDialog>}
+  </div>
+}
+
+function ContextModerationFields({ target, close, saved }: { target: ContextModerationTarget } & EditorActions) {
+  const { t } = useI18n()
+  const [operation, setOperation] = useState<'edit' | 'status' | 'reviews' | 'reports'>()
+  const [retry, setRetry] = useState(0)
+  const listing = useAdminData<ListingRow>(target.type === 'listing' ? '/admin/listings/' + target.id : null, retry)
+  const profile = useAdminData<UserRow>(target.type === 'user' ? '/admin/users/' + target.id : null, retry)
+  const categories = useAdminData<CategoryRow[]>(target.type === 'category' ? '/admin/categories' : null, retry)
+  const pages = useAdminData<ContentRow[]>(target.type === 'content' ? '/admin/content' : null, retry)
+  const needsLocales = target.type === 'locale' || target.type === 'content' || target.type === 'category'
+  const locales = useAdminData<LocaleRow[]>(needsLocales ? '/admin/locales' : null, retry)
+
+  if (listing.loading || profile.loading || categories.loading || pages.loading || locales.loading) return <Spinner />
+  const error = listing.error ?? profile.error ?? categories.error ?? pages.error ?? locales.error
+  if (error) return <Notice tone="error">{error} <Button variant="ghost" onClick={() => setRetry(current => current + 1)}>{t('Повторить')}</Button></Notice>
+
+  let available: { editor: Editor; status: string; name: string; tab: 'listings' | 'users' } | undefined
+  if (listing.data) {
+    available = { editor: { type: 'listing', id: target.id }, status: listing.data.status, name: listing.data.title, tab: 'listings' }
+  }
+  if (profile.data && isMarketProfile(profile.data)) {
+    available = { editor: { type: 'user', id: target.id, row: profile.data }, status: profile.data.status, name: profile.data.displayName, tab: 'users' }
+  }
+  if (available) {
+    if (operation === 'reviews' || operation === 'reports') {
+      return <RelatedModeration tab={operation} subjectId={target.id} back={() => setOperation(undefined)} saved={saved} />
+    }
+    if (!operation) return <>
+      <p className="muted">{available.name !== target.title && <>{available.name} · </>}{t('Текущий статус: {status}', { status: statusLabel(t, available.status) })}</p>
+      <div className="admin-actions context-moderation-options">
+        <Button variant="secondary" onClick={() => setOperation('edit')}>{t('Редактировать')}</Button>
+        {available.status !== 'BANNED' && <Button variant="secondary" onClick={() => setOperation('status')}>{t('Изменить статус')}</Button>}
+        {target.type === 'user' && <>
+          <Button variant="secondary" onClick={() => setOperation('reviews')}>{t('Отзывы о профиле')}</Button>
+          <Button variant="secondary" onClick={() => setOperation('reports')}>{t('Жалобы на профиль')}</Button>
+        </>}
+      </div>
+    </>
+    const editor: Editor = operation === 'status'
+      ? { type: 'status', tab: available.tab, id: target.id, name: available.name, status: available.status }
+      : available.editor
+    return <EditorFields editor={editor} close={close} saved={saved} />
+  }
+
+  let editor: Editor | undefined
+  if (target.type === 'category' && categories.data && locales.data) {
+    const row = categories.data.find(item => item.id === target.id)
+    if (row) editor = { type: 'category', row, categories: categories.data, locales: locales.data }
+  }
+  if (target.type === 'content' && pages.data && locales.data) {
+    const row = pages.data.find(item => item.key === target.id)
+    if (row) editor = { type: 'content', row, locales: locales.data }
+  }
+  if (target.type === 'locale' && locales.data) {
+    const row = locales.data.find(item => item.code === target.id)
+    if (row) editor = { type: 'locale', row }
+  }
+  return editor ? <EditorFields editor={editor} close={close} saved={saved} /> : <Notice>{t('Запись недоступна для редактирования.')}</Notice>
+}
+
+function RelatedModeration({ tab, subjectId, back, saved }: {
+  tab: 'reviews' | 'reports'; subjectId: string; back: () => void; saved: EditorActions['saved']
+}) {
+  const { t } = useI18n()
+  const [editor, setEditor] = useState<Editor>()
+  if (editor) return <EditorFields editor={editor} close={() => setEditor(undefined)} saved={saved} />
+
+  const props = { version: 0, edit: setEditor, subjectId }
+  return <div className="context-related">
+    <Button variant="ghost" onClick={back}>{t('К действиям профиля')}</Button>
+    {tab === 'reviews' ? <Reviews {...props} /> : <Reports {...props} />}
+  </div>
+}
+
+export function AdminPage({ user }: { user?: User | null }) {
   const { t, reloadLocales } = useI18n()
   const [params] = useSearchParams()
   const requestedTab = params.get('section')
-  const tab = requestedTab && Object.hasOwn(tabs, requestedTab) ? requestedTab as Tab : 'users'
+  const availableTabs = (Object.keys(tabs) as Tab[]).filter(key => key !== 'moderators' || user?.role === 'ADMIN')
+  const tab = availableTabs.find(key => key === requestedTab) ?? 'users'
   const [editor, setEditor] = useState<Editor>()
   const [version, setVersion] = useState(0)
   const [saved, setSaved] = useState(false)
@@ -755,7 +975,7 @@ export function AdminPage() {
     </header>
     <div className="admin-layout">
       <nav className="panel admin-nav" aria-label={t('Разделы администрирования')}>
-        {(Object.keys(tabs) as Tab[]).map(key => <Link
+        {availableTabs.map(key => <Link
           key={key}
           to={'/admin?section=' + key}
           className={'button button-' + (key === tab ? 'secondary' : 'ghost')}
@@ -769,11 +989,12 @@ export function AdminPage() {
         {tab === 'listings' && <Listings {...props} />}
         {tab === 'reviews' && <Reviews {...props} />}
         {tab === 'reports' && <Reports {...props} />}
+        {tab === 'moderators' && <Moderators {...props} />}
         {tab === 'audit' && <Audit version={version} />}
         {(tab === 'categories' || tab === 'content' || tab === 'locales') && <ReferenceRecords tab={tab} {...props} />}
       </section>
     </div>
-    {editor && <EditorDialog editor={editor} close={close} saved={refresh} />}
+    {editor && <AdminDialog title={editorTitle(editor, t)} onClose={close}><EditorFields editor={editor} close={close} saved={refresh} /></AdminDialog>}
   </div>
 }
 

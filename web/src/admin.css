@@ -168,8 +168,10 @@
 }
 
 .admin-dialog-header h2 {
+  min-width: 0;
   margin: 0;
   font-size: 1.25rem;
+  overflow-wrap: anywhere;
 }
 
 .admin-dialog form {
@@ -180,6 +182,30 @@
 .admin-dialog .admin-actions {
   justify-content: end;
   margin-block-start: .5rem;
+}
+
+.admin-password-actions,
+.context-moderation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .625rem;
+}
+
+.admin-first-login {
+  margin: 0;
+}
+
+.context-moderation-feedback {
+  font-size: .85rem;
+}
+
+.admin-dialog .context-moderation-options {
+  justify-content: start;
+}
+
+.context-related > .button {
+  margin-block-end: .85rem;
 }
 
 .admin-full {

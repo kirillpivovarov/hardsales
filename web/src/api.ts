@@ -2,7 +2,7 @@ export interface User {
   id: string;
   username: string;
   displayName: string;
-  role: 'BUYER' | 'SELLER' | 'ADMIN';
+  role: 'BUYER' | 'SELLER' | 'ADMIN' | 'MODERATOR';
   participantType: 'COMPANY' | 'INDIVIDUAL';
   city: string;
   country: string;
@@ -12,6 +12,10 @@ export interface User {
   status: 'ACTIVE' | 'FROZEN' | 'BANNED';
   emailVerified: boolean;
   mustChangePassword: boolean;
+}
+
+export function isStaff(user?: User | null): boolean {
+  return user?.role === 'ADMIN' || user?.role === 'MODERATOR';
 }
 
 export class ApiError extends Error {

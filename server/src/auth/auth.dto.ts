@@ -144,3 +144,25 @@ export class CredentialsDto extends PasswordDto {
   @Matches(USERNAME_PATTERN, { message: 'Проверьте формат логина (от 3 до 32 латинских символов).' })
   username?: string;
 }
+
+export class CreateModeratorDto {
+  @Transform(trimText)
+  @Matches(USERNAME_PATTERN, { message: 'Проверьте формат логина (от 3 до 32 латинских символов).' })
+  username!: string;
+
+  @Transform(trimText)
+  @IsString({ message: 'Введите отображаемое имя.' })
+  @Length(2, 80, { message: 'Отображаемое имя должно содержать от 2 до 80 символов.' })
+  @SingleLineText('public')
+  displayName!: string;
+
+  @Transform(emailValue)
+  @IsEmail({}, { message: 'Укажите действующий адрес электронной почты.' })
+  @Length(3, 254, { message: 'Адрес электронной почты слишком длинный.' })
+  @SingleLineText()
+  email!: string;
+
+  @IsString({ message: 'Введите временный пароль.' })
+  @Length(12, 128, { message: 'Временный пароль должен содержать от 12 до 128 символов.' })
+  temporaryPassword!: string;
+}

@@ -16,10 +16,10 @@ async function mailbox() {
   return (await response.json()).messages;
 }
 
-async function codeFromMail(previousIds) {
+async function codeFromMail(previousIds, email) {
   for (let attempt = 0; attempt < 50; attempt++) {
     const message = (await mailbox()).find(item =>
-      !previousIds.has(item.ID) && item.To.some(recipient => recipient.Address === adminEmail));
+      !previousIds.has(item.ID) && item.To.some(recipient => recipient.Address === email));
     if (message) {
       const response = await fetch(mailpitUrl + '/api/v1/message/' + message.ID);
       assert.ok(response.ok);
@@ -31,7 +31,7 @@ async function codeFromMail(previousIds) {
     }
     await setTimeout(100);
   }
-  assert.fail('Mailpit did not receive a fresh administrator verification code');
+  assert.fail('Mailpit did not receive a fresh staff verification code');
 }
 
 async function request(path, method, body, { origin = appOrigin, cookie } = {}) {
@@ -45,18 +45,18 @@ async function request(path, method, body, { origin = appOrigin, cookie } = {}) 
   });
 }
 
-async function beginSignIn(credentials) {
+async function beginSignIn(credentials, email = adminEmail) {
   const previousIds = new Set((await mailbox()).map(item => item.ID));
   const login = await request('/auth/login', 'POST', credentials);
   assert.equal(login.status, 200, await login.clone().text());
   assert.equal(login.headers.get('set-cookie'), null);
   const { challengeId } = await login.json();
   assert.ok(challengeId);
-  return { challengeId, code: await codeFromMail(previousIds) };
+  return { challengeId, code: await codeFromMail(previousIds, email) };
 }
 
-async function signIn(credentials) {
-  const verification = await beginSignIn(credentials);
+async function signIn(credentials, email) {
+  const verification = await beginSignIn(credentials, email);
   const wrongCode = verification.code === '000000' ? '000001' : '000000';
   const rejected = await request('/auth/verify', 'POST', { ...verification, code: wrongCode });
   assert.equal(rejected.status, 400);
@@ -73,7 +73,7 @@ async function signIn(credentials) {
   return { cookie: token.split(';')[0], user: (await verified.json()).user };
 }
 
-test('production administrator signs in over SMTP and rotates credentials atomically with audit', async () => {
+test('production staff verify email over SMTP and rotate credentials with audit', async t => {
   assert.ok(apiUrl && appOrigin?.startsWith('https://') && mailpitUrl && adminLogin && adminEmail && adminPassword,
     'Set HWFORAI_PRODUCTION_TEST_URL, APP_ORIGIN, MAILPIT_URL and BOOTSTRAP_ADMIN_* for an isolated production-configured instance');
   assert.equal((await fetch(apiUrl + '/health')).status, 200);
@@ -129,4 +129,39 @@ test('production administrator signs in over SMTP and rotates credentials atomic
   assert.equal(credentialChanges[0].entityId, renewed.user.id);
   assert.equal(credentialChanges[0].before, null);
   assert.deepEqual(credentialChanges[0].after, { usernameChanged: true });
+
+  await t.test('administrator provisions a moderator who must verify mail and rotate before moderation', async () => {
+    const username = process.env.HWFORAI_PRODUCTION_MODERATOR_USERNAME || `qa-staff-${randomBytes(5).toString('hex')}`;
+    const email = username + '@example.test';
+    const temporaryPassword = randomBytes(24).toString('hex');
+    const newPassword = process.env.HWFORAI_PRODUCTION_MODERATOR_PASSWORD || randomBytes(24).toString('hex');
+    const response = await request('/admin/moderators', 'POST', {
+      username, email, temporaryPassword, displayName: 'Модератор проверки',
+    }, { cookie: renewed.cookie });
+    assert.equal(response.status, 201, await response.clone().text());
+    const { user: staff } = await response.json();
+    assert.equal(staff.role, 'MODERATOR');
+    assert.equal(staff.emailVerified, false);
+    assert.equal(response.headers.get('set-cookie'), null);
+
+    const activated = await signIn({ login: username, password: temporaryPassword }, email);
+    assert.equal(activated.user.id, staff.id);
+    assert.equal(activated.user.emailVerified, true);
+    assert.equal(activated.user.mustChangePassword, true);
+    assert.equal((await adminPage(activated.cookie)).status, 403);
+
+    const rotated = await request('/auth/password', 'POST', {
+      currentPassword: temporaryPassword, newPassword,
+    }, { cookie: activated.cookie });
+    assert.equal(rotated.status, 200);
+    assert.equal((await rotated.json()).user.mustChangePassword, false);
+    assert.equal((await adminPage(activated.cookie)).status, 401);
+    const session = await signIn({ login: username, password: newPassword }, email);
+    assert.equal(session.user.id, staff.id);
+    assert.equal((await adminPage(session.cookie)).status, 200);
+    const denied = await request('/admin/moderators', 'POST', {
+      username, email, temporaryPassword, displayName: 'Недоступное действие',
+    }, { cookie: session.cookie });
+    assert.equal(denied.status, 403);
+  });
 });

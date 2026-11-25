@@ -9,8 +9,8 @@ import type { PoolClient } from 'pg';
 import { appOrigin, demoMode, isProduction } from '../config';
 import { DatabaseService, type Queryable } from '../database/database.service';
 import { codesMatch, hashCode, hashPassword, hashToken, passwordMatches, strongAdminPassword } from './auth.crypto';
-import type { CredentialsDto, LoginDto, ProfileDto, RegisterDto } from './auth.dto';
-import { SessionUser, UserRow, sessionUser } from './auth.types';
+import type { CreateModeratorDto, CredentialsDto, LoginDto, ProfileDto, RegisterDto } from './auth.dto';
+import { isStaffRole, sessionUser, type ParticipantRole, type SessionUser, type StaffSession, type UserRow } from './auth.types';
 import { MailService } from './mail.service';
 import { CAPTCHA_TTL, createRegistrationCaptcha, verifyRegistrationCaptcha } from './captcha';
 
@@ -62,6 +62,9 @@ interface NewChallenge {
   purpose: ChallengePurpose;
 }
 
+type StaffAuditAction = 'moderator-created' | 'login' | 'logout' | 'credentials-changed' | 'profile-edited';
+type StaffAuditActor = Pick<UserRow, 'id' | 'username' | 'role'>;
+
 export interface ChallengeResult {
   challengeId: string;
   expiresIn: number;
@@ -75,6 +78,10 @@ export interface SessionResult {
 
 function statusError(status: UserRow['status']): ForbiddenException {
   return new ForbiddenException(status === 'FROZEN' ? 'Профиль временно заморожен.' : 'Профиль заблокирован.');
+}
+
+function canConfirmModeratorEmail(user: UserRow): boolean {
+  return user.role === 'MODERATOR' && user.must_change_password;
 }
 
 function expired(challenge: ChallengeRow): boolean {
@@ -150,7 +157,8 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       'SELECT * FROM users WHERE lower(username) = $1 OR lower(email) = $1', [login],
     );
     const user = rows[0];
-    if (!(await passwordMatches(input.password, user?.password_hash ?? DUMMY_PASSWORD_HASH)) || !user || !user.email_verified_at) {
+    if (!(await passwordMatches(input.password, user?.password_hash ?? DUMMY_PASSWORD_HASH)) || !user ||
+        (!user.email_verified_at && !canConfirmModeratorEmail(user))) {
       throw new UnauthorizedException('Логин, почта или пароль указаны неверно.');
     }
     if (user.status !== 'ACTIVE') throw statusError(user.status);
@@ -187,6 +195,11 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       if (challenge.purpose === 'REGISTER') {
         await this.checkRegistrationCooldown(client, challenge.email);
         if (await this.registeredEmail(client, challenge.email)) pending = { suppressed: true };
+      } else {
+        const valid = await client.query(`
+          SELECT 1 FROM users WHERE id = $1 AND email = $2 AND status = 'ACTIVE' AND credential_version = $3
+        `, [challenge.user_id, challenge.email, challenge.credential_version]);
+        if (!valid.rowCount) throw new BadRequestException(INVALID_CODE);
       }
       await client.query('UPDATE email_challenges SET consumed_at = now() WHERE id = $1', [id]);
       return this.insertChallenge(client, challenge.purpose, challenge.email, challenge.user_id,
@@ -233,9 +246,15 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       if (!user) return { error: challenge.purpose === 'REGISTER' ? 'conflict' : 'missing' } as const;
       if (user.status !== 'ACTIVE') return { error: user.status } as const;
       // A password change invalidates codes issued with the previous credential.
-      if (!user.email_verified_at || user.email !== challenge.email ||
+      if (user.email !== challenge.email ||
           (challenge.purpose === 'LOGIN' && user.credential_version !== challenge.credential_version)) {
         return { error: 'missing' } as const;
+      }
+      if (!user.email_verified_at) {
+        if (challenge.purpose !== 'LOGIN' || !canConfirmModeratorEmail(user)) return { error: 'missing' } as const;
+        user = (await client.query<UserRow>(`
+          UPDATE users SET email_verified_at = now(), updated_at = now() WHERE id = $1 RETURNING *
+        `, [user.id])).rows[0];
       }
       return this.issueSession(client, user);
     });
@@ -270,34 +289,98 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     return user;
   }
 
-  async admin(request: Request): Promise<SessionUser> {
+  async admin(request: Request): Promise<StaffSession<'ADMIN'>> {
     const user = await this.require(request);
     if (user.role !== 'ADMIN') throw new ForbiddenException('Действие доступно администратору.');
-    return user;
+    return { ...user, role: user.role, sessionHash: hashToken(sessionToken(request)!) };
+  }
+
+  async staff(request: Request): Promise<StaffSession> {
+    const user = await this.require(request);
+    if (!isStaffRole(user.role)) throw new ForbiddenException('Действие доступно сотрудникам модерации.');
+    return { ...user, role: user.role, sessionHash: hashToken(sessionToken(request)!) };
+  }
+
+  async participant(request: Request): Promise<SessionUser<ParticipantRole>> {
+    const user = await this.require(request);
+    if (isStaffRole(user.role)) throw new ForbiddenException('Действие доступно покупателям и продавцам.');
+    return { ...user, role: user.role };
+  }
+
+  async createModerator(request: Request, input: CreateModeratorDto): Promise<SessionUser> {
+    const owner = await this.admin(request);
+    if (!strongAdminPassword(input.temporaryPassword, input.username)) {
+      throw new BadRequestException('Выберите длинный непредсказуемый временный пароль, отличный от логина.');
+    }
+    const passwordHash = await hashPassword(input.temporaryPassword);
+    try {
+      return await this.db.transaction(async (client) => {
+        const { rows: [actor] } = await client.query<StaffAuditActor>(`
+          SELECT id, username, role FROM users WHERE id = $1 AND role = 'ADMIN' AND status = 'ACTIVE'
+            AND email_verified_at IS NOT NULL AND NOT must_change_password FOR SHARE
+        `, [owner.id]);
+        if (!actor) throw new UnauthorizedException('Профиль изменился. Войдите снова.');
+        // Check the same session after locking the actor so a concurrent credential change cannot race this write.
+        const session = await client.query(`
+          SELECT 1 FROM auth_sessions WHERE user_id = $1 AND token_hash = $2
+            AND expires_at > clock_timestamp() FOR SHARE
+        `, [owner.id, owner.sessionHash]);
+        if (!session.rowCount) throw new UnauthorizedException('Сеанс завершён. Войдите снова.');
+
+        const { rows: [created] } = await client.query<UserRow>(`
+          INSERT INTO users (username, display_name, email, password_hash, role, must_change_password)
+          VALUES ($1, $2, $3, $4, 'MODERATOR', true) RETURNING *
+        `, [input.username, input.displayName, input.email, passwordHash]);
+        await this.recordStaffAction(client, actor, created.id, 'moderator-created', {
+          role: created.role, emailVerified: false, mustChangePassword: true,
+        });
+        return sessionUser(created);
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new ConflictException('Этот логин или адрес уже используется.');
+      throw error;
+    }
   }
 
   async logout(request: Request): Promise<void> {
     const token = sessionToken(request);
-    if (token) await this.db.query('DELETE FROM auth_sessions WHERE token_hash = $1', [hashToken(token)]);
+    if (!token) return;
+    await this.db.transaction(async (client) => {
+      const { rows: [actor] } = await client.query<StaffAuditActor & { unexpired: boolean }>(`
+        DELETE FROM auth_sessions AS s USING users AS u
+        WHERE s.token_hash = $1 AND s.user_id = u.id
+        RETURNING u.id, u.username, u.role, (s.expires_at > now()) AS unexpired
+      `, [hashToken(token)]);
+      if (actor?.unexpired) await this.recordStaffAction(client, actor, actor.id, 'logout');
+    });
   }
 
   async updateProfile(request: Request, input: ProfileDto): Promise<SessionUser> {
     const owner = await this.require(request);
+    if (owner.role === 'MODERATOR') throw new ForbiddenException('Настройки торгового профиля доступны покупателям и продавцам.');
     if (input.companyName !== undefined && owner.participantType !== 'COMPANY') {
       throw new BadRequestException('Название компании доступно только компаниям.');
     }
-    const { rows } = await this.db.query<UserRow>(`
-      UPDATE users SET
-        display_name = COALESCE($2, display_name),
-        city = COALESCE($3, city),
-        country = COALESCE($4, country),
-        telegram = COALESCE($5, telegram),
-        company_name = COALESCE($6, company_name),
-        updated_at = now()
-      WHERE id = $1 AND status = 'ACTIVE' RETURNING *
-    `, [owner.id, input.displayName, input.city, input.country, input.telegram?.replace(/^@/, ''), input.companyName]);
-    if (!rows[0]) throw new ForbiddenException('Профиль недоступен.');
-    return sessionUser(rows[0]);
+    return this.db.transaction(async (client) => {
+      const { rows: [updated] } = await client.query<UserRow>(`
+        UPDATE users SET
+          display_name = COALESCE($2, display_name),
+          city = COALESCE($3, city),
+          country = COALESCE($4, country),
+          telegram = COALESCE($5, telegram),
+          company_name = COALESCE($6, company_name),
+          updated_at = now()
+        WHERE id = $1 AND status = 'ACTIVE'
+          AND EXISTS (SELECT 1 FROM auth_sessions WHERE token_hash = $7 AND user_id = $1 AND expires_at > now())
+        RETURNING *
+      `, [owner.id, input.displayName, input.city, input.country, input.telegram?.replace(/^@/, ''), input.companyName,
+        hashToken(sessionToken(request)!)]);
+      if (!updated) throw new ForbiddenException('Профиль недоступен.');
+      await this.recordStaffAction(client, updated, updated.id, 'profile-edited', {
+        fields: Object.keys(input).filter((key) => input[key as keyof ProfileDto] !== undefined),
+      });
+      return sessionUser(updated);
+    });
   }
 
   async changeCredentials(request: Request, input: CredentialsDto): Promise<SessionResult> {
@@ -309,7 +392,7 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     if (input.currentPassword === input.newPassword) {
       throw new BadRequestException('Новый пароль должен отличаться от текущего.');
     }
-    if (owner.role === 'ADMIN' && !strongAdminPassword(input.newPassword, input.username ?? owner.username)) {
+    if (isStaffRole(owner.role) && !strongAdminPassword(input.newPassword, input.username ?? owner.username)) {
       throw new BadRequestException('Выберите длинный непредсказуемый пароль, отличный от логина.');
     }
     await this.limit('change-password', owner.id, 10, 900);
@@ -331,13 +414,10 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
         `, [owner.id, passwordHash, input.username, current.password_hash, current.credential_version, hashToken(token)]);
         if (!rows[0]) throw new UnauthorizedException('Профиль изменился. Войдите снова.');
         await client.query('DELETE FROM auth_sessions WHERE user_id = $1', [owner.id]);
-        if (owner.role === 'ADMIN') {
-          await client.query(`
-            INSERT INTO moderation_audit (actor, actor_user_id, entity, entity_id, action, after_data)
-            VALUES ($1, $2::uuid, 'users', $2::text, 'credentials-changed', jsonb_build_object('usernameChanged', $3::boolean))
-          `, [current.username, owner.id, current.username !== rows[0].username]);
-        }
-        return this.issueSession(client, rows[0]);
+        await this.recordStaffAction(client, current, owner.id, 'credentials-changed', {
+          usernameChanged: current.username !== rows[0].username,
+        });
+        return this.issueSession(client, rows[0], false);
       });
     } catch (error) {
       if (isUniqueViolation(error)) throw new ConflictException('Этот логин занят.');
@@ -345,12 +425,22 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     }
   }
 
-  private async issueSession(client: PoolClient, user: UserRow): Promise<SessionResult> {
+  private async recordStaffAction(client: PoolClient, actor: StaffAuditActor, targetId: string,
+    action: StaffAuditAction, after: Record<string, unknown> | null = null): Promise<void> {
+    if (!isStaffRole(actor.role)) return;
+    await client.query(`
+      INSERT INTO moderation_audit (actor, actor_user_id, actor_role, entity, entity_id, action, after_data)
+      VALUES ($1, $2, $3, 'users', $4, $5, $6)
+    `, [actor.username, actor.id, actor.role, targetId, action, after]);
+  }
+
+  private async issueSession(client: PoolClient, user: UserRow, signingIn = true): Promise<SessionResult> {
     const token = randomBytes(32).toString('hex');
     await client.query(`
       INSERT INTO auth_sessions (token_hash, user_id, expires_at)
       VALUES ($1, $2, now() + $3::integer * interval '1 second')
     `, [hashToken(token), user.id, SESSION_TTL]);
+    if (signingIn) await this.recordStaffAction(client, user, user.id, 'login');
     return { user: sessionUser(user), token };
   }
 

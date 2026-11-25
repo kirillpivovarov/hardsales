@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Patch, Post, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { ChallengeDto, CredentialsDto, LoginDto, PasswordDto, ProfileDto, RegisterDto, VerifyDto } from './auth.dto';
+import { ChallengeDto, CreateModeratorDto, CredentialsDto, LoginDto, PasswordDto, ProfileDto, RegisterDto, VerifyDto } from './auth.dto';
 import { AuthService, COOKIE_NAME, SESSION_TTL, SessionResult, sessionCookie } from './auth.service';
 
 function setSession(response: Response, result: SessionResult) {
@@ -71,5 +71,15 @@ export class AuthController {
   @Patch('credentials')
   async changeCredentials(@Body() input: CredentialsDto, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     return setSession(response, await this.auth.changeCredentials(request, input));
+  }
+}
+
+@Controller('admin/moderators')
+export class ModeratorAccountsController {
+  constructor(private readonly auth: AuthService) {}
+
+  @Post()
+  async create(@Req() request: Request, @Body() input: CreateModeratorDto) {
+    return { user: await this.auth.createModerator(request, input) };
   }
 }

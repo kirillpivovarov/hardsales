@@ -69,6 +69,8 @@ def change_status(page, item, button, status, reason):
     dialog = dialog_for(item, button)
     dialog.get_by_label("Новый статус").select_option(value=status)
     dialog.get_by_label("Причина").fill(reason)
+    if status == "BANNED":
+        dialog.get_by_role("checkbox", name="Подтверждаю бессрочную блокировку").check()
     dialog.get_by_role("button", name="Применить статус").click()
     saved(page)
 

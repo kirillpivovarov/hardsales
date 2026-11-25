@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { api, type User } from './api';
+import { api, isStaff, type User } from './api';
 import { useI18n } from './i18n';
 import { CountrySelect } from './CountrySelect';
 import { Button, Field, Notice } from './ui';
@@ -47,8 +47,7 @@ function returnPath(search: URLSearchParams) {
 
 export function authDestination(user: User, search: string | URLSearchParams) {
   if (user.mustChangePassword) return '/account';
-  if (user.role === 'ADMIN') return '/admin';
-  return returnPath(new URLSearchParams(search)) ?? '/catalog';
+  return returnPath(new URLSearchParams(search)) ?? (isStaff(user) ? '/admin' : '/catalog');
 }
 
 export function AuthPage({
@@ -288,6 +287,7 @@ export function AccountPage({ user, onUser }: AccountProps) {
   const [profileFeedback, setProfileFeedback] = useState({ error: '', notice: '', busy: false });
   const [passwordFeedback, setPasswordFeedback] = useState({ error: '', notice: '', busy: false });
   const isAdmin = user.role === 'ADMIN';
+  const staff = isStaff(user);
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -337,7 +337,7 @@ export function AccountPage({ user, onUser }: AccountProps) {
         onUser(result.user);
       }
       setPasswordFeedback({ busy: false, error: '', notice: 'Данные для входа обновлены.' });
-      if (user.mustChangePassword && isAdmin) navigate('/admin', { replace: true });
+      if (user.mustChangePassword && staff) navigate('/admin', { replace: true });
     } catch (cause) {
       setPasswordFeedback({ busy: false, error: cause instanceof Error ? cause.message : 'Не удалось сменить пароль.', notice: '' });
     }
@@ -347,8 +347,8 @@ export function AccountPage({ user, onUser }: AccountProps) {
     <div className="workflow-page container">
       <div className="workflow-intro"><h1>{t('Настройки аккаунта')}</h1></div>
       <div className="workflow-stack workflow-account">
-        {user.mustChangePassword && <Notice>{t('Смените временный пароль администратора, чтобы открыть панель управления.')}</Notice>}
-        {!user.mustChangePassword && !isAdmin && (
+        {user.mustChangePassword && <Notice>{t('Смените временный пароль, чтобы открыть панель управления.')}</Notice>}
+        {!user.mustChangePassword && !staff && (
           <section className="panel workflow-section" aria-labelledby="profile-title">
             <h2 id="profile-title">{t('Профиль')}</h2>
             <form className="form-grid workflow-form" onSubmit={saveProfile} aria-busy={profileFeedback.busy}>
@@ -400,7 +400,7 @@ export function AccountPage({ user, onUser }: AccountProps) {
             </div>
           </form>
         </section>
-        {!user.mustChangePassword && !isAdmin && <nav className="workflow-actions" aria-label={t('Сервисы аккаунта')}>
+        {!user.mustChangePassword && !staff && <nav className="workflow-actions" aria-label={t('Сервисы аккаунта')}>
           <Link className="button button-secondary" to="/my-listings">{t('Мои объявления')}</Link>
           <Link className="button button-secondary" to="/chats">{t('Сообщения')}</Link>
         </nav>}

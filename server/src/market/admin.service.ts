@@ -2,9 +2,9 @@ import {
   BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException,
 } from '@nestjs/common'
 import type { PoolClient } from 'pg'
-import type { SessionUser } from '../auth/auth.types'
+import { isStaffRole, type Role, type StaffSession } from '../auth/auth.types'
 import { isPublicProfileText } from '../contact'
-import { DatabaseService } from '../database/database.service'
+import { DatabaseService, type Queryable } from '../database/database.service'
 import { CatalogService } from './catalog.service'
 import { ListingMediaService, type ListingImageUpload } from './listing-media.service'
 import {
@@ -13,15 +13,38 @@ import {
 } from './market.inputs'
 import { categoryColumns } from './market.queries'
 
-const userColumns = `
-  u.id, u.username, u.display_name AS "displayName", u.email, u.role, u.participant_type AS "participantType",
-  u.company_name AS "companyName", u.city, u.country, u.telegram, u.status,
-  (u.email_verified_at IS NOT NULL) AS "emailVerified", u.created_at AS "createdAt", u.updated_at AS "updatedAt"
-`
+const participantRoles = ['BUYER', 'SELLER'] as const
+const userRoles = [...participantRoles, 'ADMIN', 'MODERATOR'] as const
+const auditRoles = ['ADMIN', 'MODERATOR', 'AGENT'] as const
+const participantRow = "u.role IN ('BUYER', 'SELLER')"
+
+function userColumns(restrictStaffContacts = false) {
+  const contact = (field: 'email' | 'telegram') => restrictStaffContacts
+    ? `CASE WHEN ${participantRow} THEN u.${field} END AS ${field}` : `u.${field}`
+  return `
+    u.id, u.username, u.display_name AS "displayName", ${contact('email')}, u.role, u.participant_type AS "participantType",
+    u.company_name AS "companyName", u.city, u.country, ${contact('telegram')}, u.status,
+    (u.email_verified_at IS NOT NULL) AS "emailVerified", u.created_at AS "createdAt", u.updated_at AS "updatedAt"
+  `
+}
+
 const auditColumns = `
-  a.id::float8 AS id, a.actor, a.actor_user_id AS "actorUserId", a.entity, a.entity_id AS "entityId", a.action, a.reason,
-  a.before_data AS before, a.after_data AS after, a.created_at AS "createdAt"
+  a.id::float8 AS id, a.actor, a.actor_user_id AS "actorUserId", a.actor_role AS "actorRole",
+  a.entity, a.entity_id AS "entityId", a.action, a.reason, a.before_data AS before, a.after_data AS after,
+  a.created_at AS "createdAt"
 `
+const reviewColumns = `
+  r.id, r.chat_id AS "chatId", r.rating, r.comment, r.status, r.created_at AS "createdAt",
+  jsonb_build_object('id', a.id, 'nickname', a.display_name) AS author,
+  jsonb_build_object('id', s.id, 'nickname', s.display_name) AS subject
+`
+const reviewJoins = 'FROM reviews r JOIN users a ON a.id = r.author_id JOIN users s ON s.id = r.subject_id'
+const reportColumns = `
+  r.id, r.chat_id AS "chatId", r.reason, r.scope, r.details, r.status, r.resolution, r.created_at AS "createdAt",
+  jsonb_build_object('id', a.id, 'nickname', a.display_name) AS reporter,
+  jsonb_build_object('id', s.id, 'nickname', s.display_name) AS subject
+`
+const reportJoins = 'FROM reports r JOIN users a ON a.id = r.reporter_id JOIN users s ON s.id = r.subject_id'
 
 const statusTables = {
   users: { choices: accountStatuses, table: 'users' },
@@ -31,7 +54,9 @@ const statusTables = {
 } as const
 type Entity = keyof typeof statusTables
 type AuditData = Record<string, unknown> | null
-type AuditActor = Pick<SessionUser, 'id' | 'username'> | 'agent:moderation'
+type HumanAuditActor = Pick<StaffSession, 'id' | 'username' | 'role'>
+type StaffActor = HumanAuditActor & Pick<StaffSession, 'sessionHash'>
+type AuditActor = HumanAuditActor | 'agent:moderation'
 type StatusAudit = { entity: string; entity_id: string; reason: string; action: string; after_data: { status: string } }
 const editableUserFields = new Set(['displayName', 'city', 'country', 'telegram', 'participantType', 'companyName'])
 
@@ -41,28 +66,53 @@ export class AdminService {
     private readonly db: DatabaseService, private readonly catalog: CatalogService, private readonly media: ListingMediaService,
   ) {}
 
-  users(query: Record<string, unknown>) {
+  users(actor: StaffActor, query: Record<string, unknown>) {
     const params = new Parameters()
     const filters: string[] = []
+    const restrictStaffContacts = actor.role === 'MODERATOR'
     if (query.status) filters.push(`u.status = ${params.add(oneOf(query.status, accountStatuses, 'Статус'))}`)
+    if (query.role) filters.push(`u.role = ${params.add(oneOf(query.role, userRoles, 'Роль'))}`)
     if (query.q) {
       const q = params.add(escapedSearch(query.q))
-      filters.push(`(u.username ILIKE ${q} OR u.display_name ILIKE ${q} OR u.email ILIKE ${q} OR u.company_name ILIKE ${q})`)
+      const searchEmail = restrictStaffContacts ? `(${participantRow} AND u.email ILIKE ${q})` : `u.email ILIKE ${q}`
+      filters.push(`(u.username ILIKE ${q} OR u.display_name ILIKE ${q} OR ${searchEmail} OR u.company_name ILIKE ${q})`)
     }
-    return this.listPage(userColumns, 'FROM users u', filters, params, query, 'u.created_at DESC, u.id')
+    return this.staffTransaction(actor, async (client, currentActor) => {
+      const result = await this.listPage(userColumns(restrictStaffContacts), 'FROM users u', filters, params,
+        query, 'u.created_at DESC, u.id', client)
+      if (result.items.length) {
+        await this.audit(client, currentActor, 'users', 'list', 'profiles-listed', null, null,
+          { page: result.page, count: result.items.length })
+      }
+      return result
+    })
   }
 
-  async editUser(actor: AuditActor, idInput: string, raw: unknown) {
+  async user(actor: StaffActor, idInput: string) {
+    const id = uuid(idInput)
+    return this.staffTransaction(actor, async (client, currentActor) => {
+      const { rows } = await client.query(`SELECT ${userColumns(actor.role === 'MODERATOR')} FROM users u WHERE id = $1`, [id])
+      const user = rows[0]
+      if (!user) throw new NotFoundException('Пользователь не найден')
+      if (user.email || user.telegram) await this.audit(client, currentActor, 'users', id, 'profile-viewed', null, null, null)
+      return user
+    })
+  }
+
+  async editUser(actor: StaffActor, idInput: string, raw: unknown) {
     const id = uuid(idInput)
     const body = object(raw)
     if (Object.keys(body).some(key => !editableUserFields.has(key))) {
       throw new BadRequestException('Запрос содержит поля, недоступные для редактирования профиля')
     }
-    return this.db.transaction(async client => {
-      const { rows } = await client.query(`SELECT ${userColumns} FROM users u WHERE id = $1 FOR UPDATE`, [id])
+    const updated = await this.staffTransaction(actor, async (client, currentActor) => {
+      if (isStaffRole(await this.userRole(client, id))) {
+        await this.audit(client, currentActor, 'users', id, 'edit-denied', 'Профиль сотрудника', null, null)
+        return null
+      }
+      const { rows } = await client.query(`SELECT ${userColumns()} FROM users u WHERE id = $1 FOR UPDATE`, [id])
       const before = rows[0]
       if (!before) throw new NotFoundException('Пользователь не найден')
-      if (before.role === 'ADMIN') throw new ForbiddenException('Данные администратора доступны в личном профиле')
       const next = { ...before, ...body }
       const displayName = str(next.displayName, 'Публичное имя', 2, 80)
       const city = str(next.city, 'Город', 2, 80)
@@ -76,11 +126,11 @@ export class AdminService {
       const result = await client.query(`
           UPDATE users AS u SET display_name = $2, city = $3, country = $4, telegram = $5,
             participant_type = $6, company_name = $7, updated_at = now()
-          WHERE id = $1 RETURNING ${userColumns}
+          WHERE id = $1 RETURNING ${userColumns()}
         `, [id, displayName, city, nation, handle, participantType, companyName])
       const after = result.rows[0]
       // The audit records that a private contact changed without copying the contact.
-      await this.audit(client, actor, 'users', id, 'edited', null, {
+      await this.audit(client, currentActor, 'users', id, 'edited', null, {
         displayName: before.displayName, city: before.city, country: before.country,
         participantType: before.participantType, companyName: before.companyName,
       }, {
@@ -88,16 +138,18 @@ export class AdminService {
       })
       return after
     })
+    if (!updated) throw new ForbiddenException('Данные сотрудника доступны в его личном профиле')
+    return updated
   }
 
-  async editListing(actor: AuditActor, idInput: string, body: unknown, uploads?: ListingImageUpload[]) {
+  async editListing(actor: StaffActor, idInput: string, body: unknown, uploads?: ListingImageUpload[]) {
     const id = uuid(idInput)
     const raw = object(body)
     const images = await this.media.prepare(raw.imageOrder, uploads)
-    return this.db.transaction(async client => {
+    return this.staffTransaction(actor, async (client, currentActor) => {
       const before = await this.catalog.lock(client, id)
       const after = await this.catalog.update(client, before, raw, images)
-      await this.audit(client, actor, 'listings', id, 'edited', null, before, after)
+      await this.audit(client, currentActor, 'listings', id, 'edited', null, before, after)
       return after
     })
   }
@@ -105,39 +157,54 @@ export class AdminService {
   reviews(query: Record<string, unknown>) {
     const params = new Parameters()
     const filters: string[] = []
+    if (query.subjectId) filters.push(`r.subject_id = ${params.add(uuid(query.subjectId))}`)
     if (query.status) filters.push(`r.status = ${params.add(oneOf(query.status, reviewStatuses, 'Статус'))}`)
     if (query.q) {
       const q = params.add(escapedSearch(query.q))
       filters.push(`(r.comment ILIKE ${q} OR a.display_name ILIKE ${q} OR s.display_name ILIKE ${q})`)
     }
-    return this.listPage(`
-      r.id, r.chat_id AS "chatId", r.rating, r.comment, r.status, r.created_at AS "createdAt",
-      jsonb_build_object('id', a.id, 'nickname', a.display_name) AS author,
-      jsonb_build_object('id', s.id, 'nickname', s.display_name) AS subject
-    `, `FROM reviews r JOIN users a ON a.id = r.author_id JOIN users s ON s.id = r.subject_id`,
-    filters, params, query, 'r.created_at DESC, r.id')
+    return this.listPage(reviewColumns, reviewJoins, filters, params, query, 'r.created_at DESC, r.id')
   }
 
-  reports(query: Record<string, unknown>) {
+  async review(idInput: string) {
+    const { rows } = await this.db.query(`SELECT ${reviewColumns} ${reviewJoins} WHERE r.id = $1`, [uuid(idInput)])
+    if (!rows[0]) throw new NotFoundException('Отзыв не найден')
+    return rows[0]
+  }
+
+  reports(actor: StaffActor, query: Record<string, unknown>) {
     const params = new Parameters()
     const filters: string[] = []
+    if (query.subjectId) filters.push(`r.subject_id = ${params.add(uuid(query.subjectId))}`)
     if (query.status) filters.push(`r.status = ${params.add(oneOf(query.status, reportStatuses, 'Статус'))}`)
     if (query.q) {
       const q = params.add(escapedSearch(query.q))
       filters.push(`(r.details ILIKE ${q} OR a.display_name ILIKE ${q} OR s.display_name ILIKE ${q})`)
     }
-    return this.listPage(`
-      r.id, r.chat_id AS "chatId", r.reason, r.scope, r.details, r.status, r.resolution, r.created_at AS "createdAt",
-      jsonb_build_object('id', a.id, 'nickname', a.display_name) AS reporter,
-      jsonb_build_object('id', s.id, 'nickname', s.display_name) AS subject
-    `, `FROM reports r JOIN users a ON a.id = r.reporter_id JOIN users s ON s.id = r.subject_id`,
-    filters, params, query, 'r.created_at DESC, r.id')
+    return this.staffTransaction(actor, async (client, currentActor) => {
+      const result = await this.listPage(reportColumns, reportJoins, filters, params, query, 'r.created_at DESC, r.id', client)
+      if (result.items.length) {
+        await this.audit(client, currentActor, 'reports', 'list', 'reports-listed', null, null,
+          { page: result.page, count: result.items.length })
+      }
+      return result
+    })
   }
 
-  async evidence(actor: AuditActor, idInput: string, query: Record<string, unknown>) {
+  async report(actor: StaffActor, idInput: string) {
+    const id = uuid(idInput)
+    return this.staffTransaction(actor, async (client, currentActor) => {
+      const { rows } = await client.query(`SELECT ${reportColumns} ${reportJoins} WHERE r.id = $1`, [id])
+      if (!rows[0]) throw new NotFoundException('Жалоба не найдена')
+      await this.audit(client, currentActor, 'reports', id, 'report-viewed', null, null, null)
+      return rows[0]
+    })
+  }
+
+  async evidence(actor: StaffActor, idInput: string, query: Record<string, unknown>) {
     const id = uuid(idInput)
     const { page, limit, offset } = pageParams(query, 50)
-    return this.db.transaction(async client => {
+    return this.staffTransaction(actor, async (client, currentActor) => {
       const { rows } = await client.query<{ chat_id: string }>('SELECT chat_id FROM reports WHERE id = $1', [id])
       if (!rows[0]) throw new NotFoundException('Жалоба не найдена')
       const chatId = rows[0].chat_id
@@ -148,12 +215,12 @@ export class AdminService {
         WHERE m.chat_id = $1 ORDER BY m.id DESC LIMIT $2 OFFSET $3
       `, [chatId, limit, offset])
       const count = await client.query<{ total: number }>('SELECT count(*)::int AS total FROM chat_messages WHERE chat_id = $1', [chatId])
-      await this.audit(client, actor, 'reports', id, 'evidence-viewed', null, null, { page })
+      await this.audit(client, currentActor, 'reports', id, 'evidence-viewed', null, null, { page })
       return { items: messages.rows, total: count.rows[0].total, page, limit }
     })
   }
 
-  async status(actor: AuditActor, entity: Entity, idInput: string, raw: unknown, idempotency?: string) {
+  async status(actor: StaffActor | 'agent:moderation', entity: Entity, idInput: string, raw: unknown, idempotency?: string) {
     const id = uuid(idInput)
     const body = object(raw)
     if (Object.keys(body).some(key => key !== 'status' && key !== 'reason')) {
@@ -162,12 +229,13 @@ export class AdminService {
     const { choices, table } = statusTables[entity]
     const status = oneOf(body.status, idempotency ? accountStatuses : choices, 'Статус')
     const reason = str(body.reason, 'Причина', 3, 500)
-    return this.db.transaction(async client => {
-      if (actor === 'agent:moderation' && idempotency) {
+    const result = await this.db.transaction(async client => {
+      const currentActor = actor === 'agent:moderation' ? actor : await this.lockStaff(client, actor)
+      if (currentActor === 'agent:moderation' && idempotency) {
         await client.query('SELECT pg_advisory_xact_lock(32913, hashtext($1))', [idempotency])
         const previous = await client.query<StatusAudit>(`
           SELECT entity, entity_id, reason, action, after_data FROM moderation_audit WHERE actor = $1 AND idempotency_key = $2
-        `, [actor, idempotency])
+        `, [currentActor, idempotency])
         const recorded = previous.rows[0]
         if (recorded) {
           if (recorded.entity !== entity || recorded.entity_id !== id || recorded.reason !== reason || recorded.after_data.status !== status) {
@@ -176,14 +244,30 @@ export class AdminService {
           return { entity, id, status, changed: recorded.action === 'status-changed', replayed: true }
         }
       }
+      if (entity === 'users') {
+        const role = await this.userRole(client, id)
+        const primary = currentActor !== 'agent:moderation' && currentActor.role === 'ADMIN'
+        if (role === 'ADMIN' || (role === 'MODERATOR' && !primary)) {
+          if (currentActor !== 'agent:moderation') {
+            await this.audit(client, currentActor, entity, id, 'status-denied', reason, null,
+              { requestedStatus: status, outcome: 'protected-staff' })
+          }
+          return { error: new ForbiddenException('Недостаточно прав для изменения статуса сотрудника') }
+        }
+      }
       const { rows } = await client.query(`
-        SELECT status${entity === 'users' ? ', role' : ''}${entity === 'reports' ? ', resolution' : ''}
+        SELECT status${entity === 'reports' ? ', resolution' : ''}
         FROM ${table} WHERE id = $1 FOR UPDATE
       `, [id])
       const before = rows[0]
       if (!before) throw new NotFoundException('Запись не найдена')
-      if (before.role === 'ADMIN') throw new ForbiddenException('Администраторы не подлежат этой операции')
-      if (before.status === 'BANNED' && status !== 'BANNED') throw new ConflictException('Бессрочная блокировка не отменяется')
+      if (before.status === 'BANNED' && status !== 'BANNED') {
+        if (currentActor !== 'agent:moderation') {
+          await this.audit(client, currentActor, entity, id, 'status-denied', reason, { status: before.status },
+            { requestedStatus: status, outcome: 'permanent-ban' })
+        }
+        return { error: new ConflictException('Бессрочная блокировка не отменяется') }
+      }
       if (idempotency && before.status === 'ARCHIVED' && status !== 'BANNED') {
         throw new ConflictException('Агент может только заблокировать архивное объявление')
       }
@@ -202,18 +286,18 @@ export class AdminService {
         await client.query(`UPDATE ${table} SET status = $2${extra} WHERE id = $1`, values)
         if (entity === 'users') await client.query('DELETE FROM auth_sessions WHERE user_id = $1', [id])
       }
-      if (changed || idempotency) {
-        await this.audit(client, actor, entity, id, changed ? 'status-changed' : 'status-unchanged', reason,
-          { status: before.status }, { status }, idempotency)
-      }
+      await this.audit(client, currentActor, entity, id, changed ? 'status-changed' : 'status-unchanged', reason,
+        { status: before.status }, { status }, idempotency)
       return { entity, id, status, changed, replayed: false }
     })
+    if (result.error) throw result.error
+    return result
   }
 
-  async saveCategory(actor: AuditActor, idInput: string | null, raw: unknown) {
+  async saveCategory(actor: StaffActor, idInput: string | null, raw: unknown) {
     const id = idInput ? uuid(idInput) : null
     const body = object(raw)
-    return this.db.transaction(async client => {
+    return this.staffTransaction(actor, async (client, currentActor) => {
       // Serializes reparenting to make concurrent category edits cycle-safe.
       await client.query('LOCK TABLE categories IN SHARE ROW EXCLUSIVE MODE')
       const before = id ? await this.getCategory(client, id) : null
@@ -265,7 +349,7 @@ export class AdminService {
         throw error
       }
       const after = await this.getCategory(client, resultId!)
-      await this.audit(client, actor, 'categories', after.id, id ? 'edited' : 'created', null, before, after)
+      await this.audit(client, currentActor, 'categories', after.id, id ? 'edited' : 'created', null, before, after)
       return after
     })
   }
@@ -278,7 +362,7 @@ export class AdminService {
     return rows
   }
 
-  async saveLocale(actor: AuditActor, codeInput: string, raw: unknown) {
+  async saveLocale(actor: StaffActor, codeInput: string, raw: unknown) {
     const code = localeCode(codeInput)
     const body = object(raw)
     const name = str(body.name, 'Название языка', 2, 80)
@@ -293,7 +377,7 @@ export class AdminService {
       }
       return [key, str(value, 'Перевод', 1, 2000)]
     }))
-    return this.db.transaction(async client => {
+    return this.staffTransaction(actor, async (client, currentActor) => {
       await client.query('SELECT pg_advisory_xact_lock(32914, hashtext($1))', [code])
       const { rows: previous } = await client.query('SELECT code, name, active, messages FROM site_locales WHERE code = $1', [code])
       const { rows } = await client.query(`
@@ -302,7 +386,7 @@ export class AdminService {
           messages = EXCLUDED.messages, updated_at = now()
         RETURNING code, name, active, messages, updated_at AS "updatedAt"
       `, [code, name, active, JSON.stringify(messages)])
-      await this.audit(client, actor, 'locales', code, previous[0] ? 'edited' : 'created', null,
+      await this.audit(client, currentActor, 'locales', code, previous[0] ? 'edited' : 'created', null,
         previous[0] ?? null, rows[0])
       return rows[0]
     })
@@ -316,7 +400,7 @@ export class AdminService {
     return rows
   }
 
-  async saveContent(actor: AuditActor, keyInput: string, raw: unknown) {
+  async saveContent(actor: StaffActor, keyInput: string, raw: unknown) {
     const key = slug(keyInput, 'Код страницы')
     const body = object(raw)
     const active = boolean(body.active ?? true, 'Публикация')
@@ -324,7 +408,7 @@ export class AdminService {
       title: str(value.title, 'Заголовок', 2, 140),
       body: str(value.body, 'Текст', 1, 20000),
     }))
-    return this.db.transaction(async client => {
+    return this.staffTransaction(actor, async (client, currentActor) => {
       await client.query('SELECT pg_advisory_xact_lock(32915, hashtext($1))', [key])
       const { rows: previous } = await client.query('SELECT key, translations, active FROM site_content WHERE key = $1', [key])
       const { rows } = await client.query(`
@@ -333,7 +417,7 @@ export class AdminService {
           active = EXCLUDED.active, updated_at = now()
         RETURNING key, translations, active, updated_at AS "updatedAt"
       `, [key, JSON.stringify(translations), active])
-      await this.audit(client, actor, 'content', key, previous[0] ? 'edited' : 'created', null,
+      await this.audit(client, currentActor, 'content', key, previous[0] ? 'edited' : 'created', null,
         previous[0] ?? null, rows[0])
       return rows[0]
     })
@@ -342,11 +426,39 @@ export class AdminService {
   history(query: Record<string, unknown>) {
     const params = new Parameters()
     const filters: string[] = []
+    if (query.actorRole) filters.push(`a.actor_role = ${params.add(oneOf(query.actorRole, auditRoles, 'Роль'))}`)
+    if (query.entityId) filters.push(`a.entity_id = ${params.add(str(query.entityId, 'Идентификатор', 1, 100))}`)
     if (query.q) {
       const q = params.add(escapedSearch(query.q))
       filters.push(`(a.actor ILIKE ${q} OR a.entity ILIKE ${q} OR a.entity_id ILIKE ${q} OR a.reason ILIKE ${q})`)
     }
     return this.listPage(auditColumns, 'FROM moderation_audit a', filters, params, query, 'a.id DESC')
+  }
+
+  private async staffTransaction<T>(actor: StaffActor, operation: (client: PoolClient, current: HumanAuditActor) => Promise<T>) {
+    return this.db.transaction(async client => operation(client, await this.lockStaff(client, actor)))
+  }
+
+  private async lockStaff(client: PoolClient, actor: StaffActor): Promise<HumanAuditActor> {
+    // Use the same user-then-session lock order as freeze and credential rotation.
+    const { rows } = await client.query<HumanAuditActor>(`
+      SELECT id, role, username FROM users WHERE id = $1 AND role IN ('ADMIN', 'MODERATOR')
+        AND status = 'ACTIVE' AND email_verified_at IS NOT NULL AND NOT must_change_password FOR SHARE
+    `, [actor.id])
+    if (!rows[0] || rows[0].role !== actor.role) throw new ForbiddenException('Доступ сотрудника ограничен')
+    const session = await client.query(`
+      SELECT 1 FROM auth_sessions WHERE user_id = $1 AND token_hash = $2
+        AND expires_at > clock_timestamp() FOR SHARE
+    `, [actor.id, actor.sessionHash])
+    if (!session.rows[0]) throw new ForbiddenException('Сеанс сотрудника завершён. Войдите снова.')
+    return rows[0]
+  }
+
+  private async userRole(client: PoolClient, id: string) {
+    // Role is immutable. Check it before taking an exclusive lock on the target row.
+    const { rows } = await client.query<{ role: Role }>('SELECT role FROM users WHERE id = $1', [id])
+    if (!rows[0]) throw new NotFoundException('Пользователь не найден')
+    return rows[0].role
   }
 
   private async getCategory(client: PoolClient, id: string) {
@@ -369,23 +481,24 @@ export class AdminService {
     reason: string | null, before: AuditData, after: AuditData, idempotency?: string) {
     const username = actor === 'agent:moderation' ? actor : actor.username
     const userId = actor === 'agent:moderation' ? null : actor.id
+    const role = actor === 'agent:moderation' ? 'AGENT' : actor.role
     await client.query(`
-      INSERT INTO moderation_audit (actor, actor_user_id, entity, entity_id, action, reason, before_data, after_data, idempotency_key)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-    `, [username, userId, entity, id, action, reason, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null, idempotency ?? null])
+      INSERT INTO moderation_audit (actor, actor_user_id, actor_role, entity, entity_id, action, reason,
+        before_data, after_data, idempotency_key)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `, [username, userId, role, entity, id, action, reason, before ? JSON.stringify(before) : null,
+      after ? JSON.stringify(after) : null, idempotency ?? null])
   }
 
   private async listPage(select: string, from: string, filters: string[], params: Parameters,
-    query: Record<string, unknown>, order: string) {
+    query: Record<string, unknown>, order: string, db: Queryable = this.db) {
     const { page, limit, offset } = pageParams(query)
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
     const countValues = [...params.values]
     const limitParam = params.add(limit)
     const offsetParam = params.add(offset)
-    const [items, count] = await Promise.all([
-      this.db.query(`SELECT ${select} ${from} ${where} ORDER BY ${order} LIMIT ${limitParam} OFFSET ${offsetParam}`, params.values),
-      this.db.query<{ total: number }>(`SELECT count(*)::int AS total ${from} ${where}`, countValues),
-    ])
+    const items = await db.query(`SELECT ${select} ${from} ${where} ORDER BY ${order} LIMIT ${limitParam} OFFSET ${offsetParam}`, params.values)
+    const count = await db.query<{ total: number }>(`SELECT count(*)::int AS total ${from} ${where}`, countValues)
     return { items: items.rows, total: count.rows[0].total, page, limit }
   }
 

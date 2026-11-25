@@ -41,7 +41,7 @@ export class MarketController {
 
   @Get('listings/mine')
   async mine(@Req() request: Request, @Query() query: Record<string, unknown>) {
-    return this.catalog.mine(await this.auth.require(request), query)
+    return this.catalog.mine(await this.auth.participant(request), query)
   }
 
   @Get('listings/:id')
@@ -74,13 +74,13 @@ export class MarketController {
 
   @Delete('listings/:id')
   async archive(@Req() request: Request, @Param('id') id: string) {
-    return this.catalog.archive(await this.auth.require(request), id)
+    return this.catalog.archive(await this.auth.participant(request), id)
   }
 
   @Post('listings/:id/restore')
   @HttpCode(200)
   async restore(@Req() request: Request, @Param('id') id: string) {
-    return this.catalog.archive(await this.auth.require(request), id, true)
+    return this.catalog.archive(await this.auth.participant(request), id, true)
   }
 }
 
@@ -90,47 +90,47 @@ export class ChatsController {
 
   @Get()
   async list(@Req() request: Request, @Query() query: Record<string, unknown>) {
-    return this.chats.list(await this.auth.require(request), query)
+    return this.chats.list(await this.auth.participant(request), query)
   }
 
   @Post()
   async create(@Req() request: Request, @Body() body: unknown) {
-    return this.chats.create(await this.auth.require(request), body)
+    return this.chats.create(await this.auth.participant(request), body)
   }
 
   @Get(':id')
   async detail(@Req() request: Request, @Param('id') id: string) {
-    return this.chats.detail(await this.auth.require(request), id)
+    return this.chats.detail(await this.auth.participant(request), id)
   }
 
   @Get(':id/messages')
   async messages(@Req() request: Request, @Param('id') id: string, @Query() query: Record<string, unknown>) {
-    return this.chats.history(await this.auth.require(request), id, query)
+    return this.chats.history(await this.auth.participant(request), id, query)
   }
 
   @Post(':id/messages')
   async send(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.chats.send(await this.auth.require(request), id, body)
+    return this.chats.send(await this.auth.participant(request), id, body)
   }
 
   @Patch(':id/read')
   @HttpCode(204)
   async read(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    await this.chats.read(await this.auth.require(request), id, body)
+    await this.chats.read(await this.auth.participant(request), id, body)
   }
 
   @Patch(':id/reveal')
   async reveal(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.chats.reveal(await this.auth.require(request), id, body)
+    return this.chats.reveal(await this.auth.participant(request), id, body)
   }
 
   @Post(':id/reviews')
   async review(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.chats.review(await this.auth.require(request), id, body)
+    return this.chats.review(await this.auth.participant(request), id, body)
   }
 
   @Post(':id/reports')
   async report(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    return this.chats.report(await this.auth.require(request), id, body)
+    return this.chats.report(await this.auth.participant(request), id, body)
   }
 }

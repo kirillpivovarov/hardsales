@@ -1,7 +1,7 @@
 import {
   BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, NotFoundException,
 } from '@nestjs/common'
-import type { SessionUser } from '../auth/auth.types'
+import type { ParticipantRole, SessionUser } from '../auth/auth.types'
 import { outsideContact, withContact } from '../contact'
 import { DatabaseService, type Queryable } from '../database/database.service'
 import { integer, object, oneOf, pageParams, str, uuid } from './market.inputs'
@@ -81,7 +81,7 @@ const chatColumns = `
 export class ChatsService {
   constructor(private readonly db: DatabaseService) {}
 
-  async list(user: SessionUser, query: Record<string, unknown>) {
+  async list(user: SessionUser<ParticipantRole>, query: Record<string, unknown>) {
     const { page, limit, offset } = pageParams(query, 30)
     const [rows, count] = await Promise.all([
       this.db.query(`
@@ -96,12 +96,11 @@ export class ChatsService {
     return { items: rows.rows, total: count.rows[0].total, page, limit }
   }
 
-  async detail(user: SessionUser, idInput: string) {
+  async detail(user: SessionUser<ParticipantRole>, idInput: string) {
     return this.show(this.db, user.id, uuid(idInput))
   }
 
-  async create(user: SessionUser, raw: unknown) {
-    if (user.role === 'ADMIN') throw new ForbiddenException('Чаты доступны участникам рынка')
+  async create(user: SessionUser<ParticipantRole>, raw: unknown) {
     const listingId = uuid(object(raw).listingId, 'Объявление')
     return this.db.transaction(async client => {
       const { rows } = await client.query<{ id: string; owner_id: string; counterparty: string; actor_type: string }>(`
@@ -128,7 +127,7 @@ export class ChatsService {
     })
   }
 
-  async history(user: SessionUser, idInput: string, query: Record<string, unknown>) {
+  async history(user: SessionUser<ParticipantRole>, idInput: string, query: Record<string, unknown>) {
     const id = uuid(idInput)
     await this.context(this.db, user.id, id)
     const limit = query.limit === undefined ? 100 : integer(query.limit, 'Размер истории', 1, 100)
@@ -145,7 +144,7 @@ export class ChatsService {
     return rows
   }
 
-  async send(user: SessionUser, idInput: string, raw: unknown) {
+  async send(user: SessionUser<ParticipantRole>, idInput: string, raw: unknown) {
     const id = uuid(idInput)
     const body = str(object(raw).body, 'Сообщение', 1, 4000)
     return this.db.transaction(async client => {
@@ -167,7 +166,7 @@ export class ChatsService {
     })
   }
 
-  async read(user: SessionUser, idInput: string, raw: unknown) {
+  async read(user: SessionUser<ParticipantRole>, idInput: string, raw: unknown) {
     const id = uuid(idInput)
     const body = raw === undefined ? {} : object(raw)
     const messageId = body.messageId === undefined ? null : integer(body.messageId, 'Сообщение', 1, Number.MAX_SAFE_INTEGER)
@@ -182,7 +181,7 @@ export class ChatsService {
     if (!rowCount) throw new NotFoundException('Чат не найден')
   }
 
-  async reveal(user: SessionUser, idInput: string, raw: unknown) {
+  async reveal(user: SessionUser<ParticipantRole>, idInput: string, raw: unknown) {
     const id = uuid(idInput)
     const body = object(raw)
     const action = oneOf(body.action, ['REQUEST', 'ACCEPT', 'DECLINE'], 'Действие')
@@ -233,7 +232,7 @@ export class ChatsService {
     })
   }
 
-  async review(user: SessionUser, idInput: string, raw: unknown) {
+  async review(user: SessionUser<ParticipantRole>, idInput: string, raw: unknown) {
     const id = uuid(idInput)
     const body = object(raw)
     const rating = integer(body.rating, 'Оценка', 1, 5)
@@ -257,7 +256,7 @@ export class ChatsService {
     })
   }
 
-  async report(user: SessionUser, idInput: string, raw: unknown) {
+  async report(user: SessionUser<ParticipantRole>, idInput: string, raw: unknown) {
     const id = uuid(idInput)
     const body = object(raw)
     const reason = oneOf(body.reason, ['FRAUD', 'ABUSE', 'OTHER'], 'Причина')

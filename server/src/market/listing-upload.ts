@@ -1,12 +1,12 @@
 import {
-  BadRequestException, ForbiddenException, Injectable, PayloadTooLargeException, ServiceUnavailableException,
+  BadRequestException, Injectable, PayloadTooLargeException, ServiceUnavailableException,
 } from '@nestjs/common'
 import type { CallHandler, CanActivate, ExecutionContext, NestInterceptor } from '@nestjs/common'
 import { FilesInterceptor } from '@nestjs/platform-express'
 import type { Request } from 'express'
 import { defer, finalize } from 'rxjs'
 import { AuthService } from '../auth/auth.service'
-import type { SessionUser } from '../auth/auth.types'
+import type { ParticipantRole, SessionUser, StaffSession } from '../auth/auth.types'
 import { CatalogService } from './catalog.service'
 import { MAX_LISTING_IMAGE_BYTES, MAX_LISTING_IMAGES, type ListingImageUpload } from './listing-media.service'
 import { object } from './market.inputs'
@@ -15,7 +15,8 @@ const MAX_MANIFEST_BYTES = 64 * 1024
 const MAX_REQUEST_BYTES = MAX_LISTING_IMAGE_BYTES * MAX_LISTING_IMAGES + 512 * 1024
 const MAX_CONCURRENT_UPLOADS = 2
 
-export type ListingMutationRequest = Request<{ id?: string }> & { listingEditor: SessionUser }
+export type ListingMutationRequest = Request<{ id?: string }> & { listingEditor: SessionUser<ParticipantRole> }
+export type StaffListingMutationRequest = Request<{ id?: string }> & { listingEditor: StaffSession }
 
 // Guards run before the interceptor buffers the multipart body.
 @Injectable()
@@ -24,8 +25,7 @@ export class ListingMemberGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext) {
     const request = context.switchToHttp().getRequest<ListingMutationRequest>()
-    const user = await this.auth.require(request)
-    if (user.role === 'ADMIN') throw new ForbiddenException('Используйте административный раздел объявлений.')
+    const user = await this.auth.participant(request)
     if (request.params.id && request.is('multipart/form-data')) {
       await this.catalog.assertEditableBy(user, request.params.id)
     }
@@ -35,12 +35,12 @@ export class ListingMemberGuard implements CanActivate {
 }
 
 @Injectable()
-export class ListingAdminGuard implements CanActivate {
+export class ListingStaffGuard implements CanActivate {
   constructor(private readonly auth: AuthService) {}
 
   async canActivate(context: ExecutionContext) {
-    const request = context.switchToHttp().getRequest<ListingMutationRequest>()
-    request.listingEditor = await this.auth.admin(request)
+    const request = context.switchToHttp().getRequest<StaffListingMutationRequest>()
+    request.listingEditor = await this.auth.staff(request)
     return true
   }
 }

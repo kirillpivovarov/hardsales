@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { PoolClient } from 'pg'
-import type { SessionUser } from '../auth/auth.types'
+import { isStaffRole, type ParticipantRole, type SessionUser } from '../auth/auth.types'
 import { DatabaseService, type Queryable } from '../database/database.service'
 import { ListingMediaService, type ListingImage, type ListingImageData, type ListingImageUpdate, type ListingImageUpload } from './listing-media.service'
 import {
@@ -52,7 +52,7 @@ export class CatalogService {
     if (!user || !user.emailVerified || user.status !== 'ACTIVE' || user.mustChangePassword) {
       return { items: [], total: 0, page: paging.page, limit: paging.limit, locked: true }
     }
-    const allowed = user.role === 'ADMIN' ? null : this.oppositeKind(user)
+    const allowed = isStaffRole(user.role) ? null : this.oppositeKind(user)
     const requestedKind = query.kind ? oneOf(query.kind, kinds, 'Вид объявления') : null
     if (allowed && requestedKind && requestedKind !== allowed) {
       return { items: [], total: 0, page: paging.page, limit: paging.limit, locked: false }
@@ -139,7 +139,7 @@ export class CatalogService {
     }
   }
 
-  async mine(user: SessionUser, query: Record<string, unknown>) {
+  async mine(user: SessionUser<ParticipantRole>, query: Record<string, unknown>) {
     const params = new Parameters()
     const filters = [`l.owner_id = ${params.add(user.id)}`]
     const search = this.managementFilters(query, params, filters)
@@ -176,7 +176,7 @@ export class CatalogService {
     return rows[0]
   }
 
-  async assertEditableBy(user: SessionUser, idInput: string) {
+  async assertEditableBy(user: SessionUser<ParticipantRole>, idInput: string) {
     const { rows } = await this.db.query<Pick<ListingRow, 'ownerId' | 'status'>>(`
       SELECT owner_id AS "ownerId", status FROM listings WHERE id = $1
     `, [uuid(idInput)])
@@ -189,8 +189,7 @@ export class CatalogService {
     return this.found(rows[0])
   }
 
-  async create(user: SessionUser, body: unknown, uploads?: ListingImageUpload[]) {
-    if (user.role === 'ADMIN') throw new ForbiddenException('Администратор не публикует объявления')
+  async create(user: SessionUser<ParticipantRole>, body: unknown, uploads?: ListingImageUpload[]) {
     const kind = user.role === 'SELLER' ? 'SELL' : 'BUY'
     const raw = object(body)
     if (raw.kind && raw.kind !== kind) throw new ForbiddenException('Вид объявления зависит от роли')
@@ -211,7 +210,7 @@ export class CatalogService {
     })
   }
 
-  async change(user: SessionUser, idInput: string, body: unknown, uploads?: ListingImageUpload[]) {
+  async change(user: SessionUser<ParticipantRole>, idInput: string, body: unknown, uploads?: ListingImageUpload[]) {
     const id = uuid(idInput)
     const raw = object(body)
     const images = await this.media.prepare(raw.imageOrder, uploads)
@@ -233,7 +232,7 @@ export class CatalogService {
     return this.show(client, existing.id)
   }
 
-  async archive(user: SessionUser, idInput: string, restore = false) {
+  async archive(user: SessionUser<ParticipantRole>, idInput: string, restore = false) {
     const id = uuid(idInput)
     return this.db.transaction(async client => {
       const existing = await this.lock(client, id)
@@ -271,7 +270,7 @@ export class CatalogService {
   }
 
   private detailParams(user: SessionUser, idInput: string) {
-    return [uuid(idInput), user.role === 'ADMIN', user.id, this.oppositeKind(user)]
+    return [uuid(idInput), isStaffRole(user.role), user.id, this.oppositeKind(user)]
   }
 
   private assertOwnership(existing: Pick<ListingRow, 'ownerId' | 'status'>, user: SessionUser) {

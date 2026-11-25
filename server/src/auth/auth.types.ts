@@ -1,6 +1,12 @@
-export type Role = 'BUYER' | 'SELLER' | 'ADMIN';
+export type ParticipantRole = 'BUYER' | 'SELLER';
+export type StaffRole = 'ADMIN' | 'MODERATOR';
+export type Role = ParticipantRole | StaffRole;
 export type ParticipantType = 'INDIVIDUAL' | 'COMPANY';
 export type UserStatus = 'ACTIVE' | 'FROZEN' | 'BANNED';
+
+export function isStaffRole(role: Role): role is StaffRole {
+  return role === 'ADMIN' || role === 'MODERATOR';
+}
 
 export interface UserRow {
   id: string;
@@ -20,12 +26,12 @@ export interface UserRow {
   credential_version: number;
 }
 
-export interface SessionUser {
+export interface SessionUser<R extends Role = Role> {
   id: string;
   username: string;
   displayName: string;
   email: string;
-  role: Role;
+  role: R;
   participantType: ParticipantType | null;
   companyName: string | null;
   city: string | null;
@@ -35,6 +41,9 @@ export interface SessionUser {
   emailVerified: boolean;
   mustChangePassword: boolean;
 }
+
+/** Server-side authorization context; never return this through a public response. */
+export type StaffSession<R extends StaffRole = StaffRole> = SessionUser<R> & { sessionHash: string };
 
 export function sessionUser(row: UserRow): SessionUser {
   return {
