@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api } from './api'
 import { useExchange } from './Exchange'
 import { useI18n } from './i18n'
-import { DocumentDownload, documentKinds, documentStatuses, useTrustData, type TrustDocument } from './Trust'
+import { DocumentDownload, documentKinds, documentStatuses, useTrustData, verificationLevels, type TrustDocument } from './Trust'
 import { Button, Field, Notice, Spinner } from './ui'
 
 type Participant = {
@@ -20,11 +20,12 @@ type DealReview = {
 type DayCode = { id: string; participantName: string; listingTitle?: string; code: string; spotCheck: boolean; result?: string; expiresAt: string }
 type Queue = { participants: Participant[]; documents: TrustDocument[]; principals: Principal[]; dealsToVerify: DealReview[]; dayCodes: DayCode[] }
 type Corridor = { modelId: string; modelName?: string; basis: string; minUsd: string; maxUsd: string }
-const levels = ['не проверен', 'проверен документами', 'проверен сделкой']
 const chainNames: Record<string, string> = {
-  dayCode: 'Фото с кодом дня за 24 часа', principal: 'Подтверждение принципала', document: 'Документ на имя стороны',
+  dayCode: 'Фото с кодом дня', principal: 'Подтверждение полномочий', document: 'Документ на имя участника',
 }
-const chainStatuses: Record<string, string> = { PASSED: 'Пройден', FAILED: 'Не пройден', WAITING: 'Ждём', NOT_NEEDED: 'Не нужно' }
+const chainStatuses: Record<string, string> = {
+  PASSED: 'Подтверждено', FAILED: 'Не подтверждено', WAITING: 'Ожидается подтверждение', NOT_NEEDED: 'Не требуется',
+}
 const archiveStatuses: Record<string, string> = { APPROVED: 'Принят', REJECTED: 'Отклонён', PENDING: 'На проверке' }
 
 type Mutation = { path: string; method?: string; body?: unknown }
@@ -81,7 +82,7 @@ export function VerificationAdmin({ isAdmin = false }: { isAdmin?: boolean }) {
         {result.data.participants.length === 0 && <p className="muted">{t('Нет участников для проверки.')}</p>}
         <ul className="trust-item-list">{result.data.participants.map(participant => <li key={participant.id}>
           <details>
-            <summary><strong>{participant.displayName}</strong> · {participant.username} · {t(levels[participant.level] ?? levels[0])}</summary>
+            <summary><strong>{participant.displayName}</strong> · {participant.username} · {t(verificationLevels[participant.level] ?? verificationLevels[0])}</summary>
             <ParticipantForm participant={participant} onSaved={afterSave} isAdmin={isAdmin} />
           </details>
         </li>)}</ul>
@@ -93,12 +94,12 @@ export function VerificationAdmin({ isAdmin = false }: { isAdmin?: boolean }) {
           <p><strong>{t(documentKinds[document.kind] ?? document.kind)}</strong> · {document.participantName}</p>
           {document.listingTitle && document.listingId && <p><Link to={'/listings/' + document.listingId}>{document.listingTitle}</Link></p>}
           <DocumentDownload document={document} />
-          {document.dayCodeOk != null && <p>{t(document.dayCodeOk ? 'Код дня принят сервером.' : 'Код дня не найден или истёк.')}</p>}
+          {document.dayCodeOk != null && <p>{t(document.dayCodeOk ? 'Код дня действителен.' : 'Код дня не найден или истёк.')}</p>}
           <details><summary>{t('Решение по документу')}</summary><DocumentReview document={document} onSaved={afterSave} /></details>
         </li>)}</ul>
       </section>
       <section>
-        <h3>{t('Сделки к проверке')}</h3>
+        <h3>{t('Сделки на проверке')}</h3>
         {result.data.dealsToVerify.length === 0 && <p className="muted">{t('Нет сделок на проверке.')}</p>}
         <ul className="trust-item-list">{result.data.dealsToVerify.map(deal => <li key={deal.id}>
           <Link to={'/admin?section=exchange&part=disclosures&id=' + deal.disclosureId}>{deal.disclosureNumber}</Link>
@@ -113,7 +114,7 @@ export function VerificationAdmin({ isAdmin = false }: { isAdmin?: boolean }) {
         {result.data.principals.length === 0 && <p className="muted">{t('Принципалы не добавлены.')}</p>}
         <ul className="trust-item-list">{result.data.principals.map(principal => <li key={principal.id}>
           <strong>{principal.name}</strong>{principal.company && ` · ${principal.company}`} · {principal.participantName}
-          <p>{t(principal.confirmedAt ? 'Подтверждён' : principal.deniedAt ? 'Не подтвердил' : 'Ожидается подтверждение')}</p>
+          <p>{t(principal.confirmedAt ? 'Полномочия подтверждены' : principal.deniedAt ? 'В подтверждении отказано' : 'Ожидается подтверждение')}</p>
         </li>)}</ul>
       </section>
       <section>
@@ -135,14 +136,14 @@ function ParticipantForm({ participant, onSaved, isAdmin }: { participant: Parti
   const [action, setAction] = useState('verify')
   const [listing, setListing] = useState('')
   const options: Record<string, string> = {
-    verify: 'Подтвердить уровень', 'verification-reject': 'Отказать', restrict: 'Без права публиковать',
-    'day-codes': 'Выдать код дня', penalties: 'Штраф', 'link-group': 'Связанные аккаунты',
-    ...(isAdmin && participant.actualitySuspendedAt ? { 'actuality/resume': 'Снять ограничение актуальности' } : {}),
+    verify: 'Подтвердить проверку документов', 'verification-reject': 'Отклонить документы', restrict: 'Ограничить публикацию',
+    'day-codes': 'Выдать код дня', penalties: 'Назначить штраф', 'link-group': 'Указать связанные аккаунты',
+    ...(isAdmin && participant.actualitySuspendedAt ? { 'actuality/resume': 'Разрешить подтверждение актуальности' } : {}),
   }
   const outstanding = Object.values(participant.chain).filter(value => value === 'FAILED' || value === 'WAITING').length
   return <div className="workflow-stack">
     <ul className="trust-item-list">{Object.entries(participant.chain).map(([key, value]) => <li key={key}>{t(chainNames[key] ?? key)} · {t(chainStatuses[value] ?? value)}</li>)}</ul>
-    {outstanding >= 2 && <Notice>{t('Цепочка: не пройдены как минимум два теста.')}</Notice>}
+    {outstanding >= 2 && <Notice>{t('Два или более условия ещё не подтверждены.')}</Notice>}
     {participant.publishBanAt && <Notice>{t('Публикация закрыта до проверки документов.')}</Notice>}
     {participant.actualitySuspendedAt && <Notice>{t('Действует ограничение после пропусков вопросов об актуальности.')}</Notice>}
     <DecisionForm onSaved={onSaved} label={options[action]} save={form => {
@@ -243,7 +244,7 @@ export function PriceCorridorsAdmin() {
       body: { minUsd: Number(form.get('min')), maxUsd: Number(form.get('max')) },
     })}>
       <Field label={t('Код модели')}><input name="modelId" required defaultValue={target?.modelId} placeholder="hgx-h100-8" maxLength={48} /></Field>
-      <Field label={t('Базис')}><select name="basis" defaultValue={target?.basis}>
+      <Field label={t('Условия поставки')}><select name="basis" defaultValue={target?.basis}>
         {Object.entries(bases).map(([code, text]) => <option key={code} value={code}>{t(text)}</option>)}
       </select></Field>
       <Field label={t('Минимум, USD')}><input name="min" type="number" min="0.01" step="0.01" required defaultValue={target?.minUsd} /></Field>

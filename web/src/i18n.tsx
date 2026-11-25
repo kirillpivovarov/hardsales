@@ -10,6 +10,24 @@ interface Locale {
 }
 
 const russian: Locale = { code: 'ru', name: 'Русский', active: true, messages: {} };
+const previousExchangeLabels: Record<string, string> = {
+  'Участник не проверен': 'не проверен',
+  'Документы проверены': 'проверен документами',
+  'Сделка подтверждена': 'проверен сделкой',
+  'Рейтинг участника': 'Рейтинг по делам',
+  'Рейтинг объявления · {score}/100': 'Рейтинг · {score}/100',
+  'Условия согласованы': 'Договорились',
+  'Сделка не состоялась': 'Сорвалось',
+  'Сделка исполнена': 'Исполнено',
+  'Полномочия подтверждены по корпоративной почте': 'подтверждён компанией по почте',
+  'Полномочия подтверждены': 'принципал подтверждён',
+  'Корпоративный адрес подтверждён': 'почта компании подтверждена',
+  'Вознаграждение подтверждено принципалом': 'открытые агентские, подтверждено принципалом',
+  'Размер вознаграждения указан': 'открытые агентские',
+  'Ответы об актуальности': 'Дисциплина подтверждений',
+  'Скорость ответа на совпадения': 'Скорость ответа на совпадение',
+  'Срок работы на площадке': 'Давность на площадке',
+};
 type Translate = (source: string, replacements?: Record<string, string | number>) => string;
 const I18nContext = createContext<{
   locale: string;
@@ -37,7 +55,9 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     setPreference(value);
   }, []);
   const t: Translate = useCallback((source, replacements) => {
-    const translation = Object.hasOwn(current.messages, source) ? current.messages[source] : source;
+    const previous = current.code !== 'ru' && Object.hasOwn(previousExchangeLabels, source) ? previousExchangeLabels[source] : undefined;
+    const translation = Object.hasOwn(current.messages, source) ? current.messages[source]
+      : previous && Object.hasOwn(current.messages, previous) ? current.messages[previous] : source;
     return translation.replace(/\{(\w+)\}/g, (match, key: string) => String(replacements?.[key] ?? match));
   }, [current]);
   const context = useMemo(() => ({ locale: current.code, locales, setLocale, reloadLocales, t }), [current.code, locales, setLocale, reloadLocales, t]);

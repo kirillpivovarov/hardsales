@@ -7,7 +7,10 @@ import { Button, Field, Notice, Spinner } from './ui'
 import { DocumentBox, useTrustData } from './Trust'
 
 const labels = {
-  NEGOTIATING: 'Идут переговоры', AGREED: 'Договорились', FAILED: 'Сорвалось', EXECUTED: 'Исполнено',
+  NEGOTIATING: 'Идут переговоры', AGREED: 'Условия согласованы', FAILED: 'Сделка не состоялась', EXECUTED: 'Сделка исполнена',
+} as const
+const actions = {
+  NEGOTIATING: 'Продолжить переговоры', AGREED: 'Указать условия', FAILED: 'Сообщить, что сделка не состоялась', EXECUTED: 'Подтвердить исполнение',
 } as const
 const reasons = ['Цена', 'Оплата', 'Сроки', 'Товар', 'Документы', 'Контрагент пропал', 'Другое']
 type DealStatus = keyof typeof labels
@@ -24,6 +27,14 @@ type Deal = {
 
 function dealTitle(deal: Deal) {
   return deal.sellTitle || deal.buyTitle || deal.disclosureNumber
+}
+
+function dealStatusLabel(deal: Deal) {
+  return deal.status === 'AGREED' && deal.amountMismatch ? 'Условия расходятся' : labels[deal.status]
+}
+
+function reasonLabel(reason: string) {
+  return reason === 'Контрагент пропал' ? 'Контрагент не отвечает' : reason
 }
 
 export function DealsPage() {
@@ -50,7 +61,7 @@ function DealList() {
       {result.data.items.map(deal => <li key={deal.id}>
         <div className="trust-heading">
           <Link className="text-link" to={'/deals/' + deal.id}>{dealTitle(deal)}</Link>
-          <span className="trust-tag">{t(labels[deal.status])}</span>
+          <span className="trust-tag">{t(dealStatusLabel(deal))}</span>
         </div>
         <p className="muted">{deal.disclosureNumber} · {new Date(deal.updatedAt).toLocaleDateString(locale)}</p>
       </li>)}
@@ -75,8 +86,8 @@ function DealDetails({ id }: { id: string }) {
     {error && <Notice tone="error">{t(error)}</Notice>}
     {deal && <>
       <section className="panel workflow-section">
-        <div className="trust-heading"><h2>{dealTitle(deal)}</h2><span className="trust-tag">{t(labels[deal.status])}</span></div>
-        <p><Link className="text-link" to={'/disclosures/' + deal.disclosureId}>{t('Раскрытие')} {deal.disclosureNumber}</Link></p>
+        <div className="trust-heading"><h2>{dealTitle(deal)}</h2><span className="trust-tag">{t(dealStatusLabel(deal))}</span></div>
+        <p><Link className="text-link" to={'/disclosures/' + deal.disclosureId}>{t('Запись об обмене контактами')} {deal.disclosureNumber}</Link></p>
         <ul className="trust-item-list">
           <li>{t('Условия продавца')} · {deal.sellerAgreed ? format(deal.sellerAgreed) : t('Ещё не указаны')}
             {deal.sellerExecutedAt && <p>{t('Продавец подтвердил исполнение.')}</p>}</li>
@@ -84,9 +95,9 @@ function DealDetails({ id }: { id: string }) {
             {deal.buyerExecutedAt && <p>{t('Покупатель подтвердил исполнение.')}</p>}</li>
         </ul>
         {deal.amountMismatch && <Notice>{t('Сумма, валюта или количество у сторон расходятся. Модератор увидит расхождение при проверке.')}</Notice>}
-        {deal.failedReason && <p>{t('Причина')} · {t(deal.failedReason)}</p>}
-        {deal.adminVerifiedAt && <Notice tone="success">{t('Сделка засчитана в рейтинг.')}</Notice>}
-        {deal.adminRejectedAt && <Notice>{t('Сделка не засчитана.')} {deal.adminNote}</Notice>}
+        {deal.failedReason && <p>{t('Причина')} · {t(reasonLabel(deal.failedReason))}</p>}
+        {deal.adminVerifiedAt && <Notice tone="success">{t('Модератор подтвердил сделку.')}</Notice>}
+        {deal.adminRejectedAt && <Notice>{t('Модератор не подтвердил сделку.')} {deal.adminNote}</Notice>}
         {(deal.status === 'NEGOTIATING' || deal.status === 'AGREED') && <DealStatusForm deal={deal}
           initial={search.get('status') ?? (search.get('action') === 'agree' ? 'AGREED' : null)}
           onSaved={() => setVersion(value => value + 1)} />}
@@ -98,11 +109,12 @@ function DealDetails({ id }: { id: string }) {
       {Boolean(deal.events?.length) && <section className="panel workflow-section">
         <h2>{t('История сделки')}</h2>
         <ul className="trust-item-list">{deal.events?.map(event => <li key={event.id}>
-          <strong>{event.type === 'DEAL_VERIFIED' ? t(event.data.approved ? 'Сделка засчитана' : 'Сделка не засчитана')
-            : event.data.status ? t(labels[event.data.status]) : t('Статус изменён')}</strong>
+          <strong>{event.type === 'DEAL_VERIFIED' ? t(event.data.approved ? 'Сделка подтверждена модератором' : 'Модератор не подтвердил сделку')
+            : event.data.status ? t(event.data.status === 'AGREED' ? 'Условия указаны'
+              : event.data.status === 'EXECUTED' ? 'Исполнение подтверждено одной из сторон' : labels[event.data.status]) : t('Статус изменён')}</strong>
           <p className="muted">{t(event.actorUserId === deal.sellerId ? 'Продавец' : event.actorUserId === deal.buyerId ? 'Покупатель' : 'Модератор')}
             {' · '}{new Date(event.createdAt).toLocaleString(locale)}</p>
-          {event.data.reason && <p>{t(event.data.reason)}</p>}
+          {event.data.reason && <p>{t(reasonLabel(event.data.reason))}</p>}
         </li>)}</ul>
       </section>}
     </>}
@@ -132,7 +144,7 @@ function DealStatusForm({ deal, initial, onSaved }: { deal: Deal; initial: strin
   }
   return <form className="form-grid" onSubmit={save} aria-busy={busy}>
     <Field label={t('Статус сделки')}><select value={status} onChange={event => setStatus(event.target.value as DealStatus)}>
-      {options.map(option => <option key={option} value={option}>{t(labels[option])}</option>)}
+      {options.map(option => <option key={option} value={option}>{t(actions[option])}</option>)}
     </select></Field>
     {status === 'AGREED' && <>
       <Field label={t('Сумма')}><input type="number" name="amount" min="0.01" step="0.01" required /></Field>
@@ -140,11 +152,11 @@ function DealStatusForm({ deal, initial, onSaved }: { deal: Deal; initial: strin
       <Field label={t('Валюта')}><select name="currency">{['RUB', 'USD', 'EUR', 'CNY', 'KZT', 'AED'].map(currency => <option key={currency}>{currency}</option>)}</select></Field>
     </>}
     {status === 'FAILED' && <Field label={t('Причина')}><select name="reason" required>
-      <option value="">{t('Выберите причину')}</option>{reasons.map(reason => <option value={reason} key={reason}>{t(reason)}</option>)}
+      <option value="">{t('Выберите причину')}</option>{reasons.map(reason => <option value={reason} key={reason}>{t(reasonLabel(reason))}</option>)}
     </select></Field>}
     <div className="workflow-span">
       {error && <Notice tone="error">{t(error)}</Notice>}
-      <Button type="submit" disabled={busy}>{t('Отправить статус')}</Button>
+      <Button type="submit" disabled={busy}>{t('Сохранить статус')}</Button>
     </div>
   </form>
 }

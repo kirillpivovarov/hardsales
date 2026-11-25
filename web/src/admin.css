@@ -200,6 +200,10 @@
   font-size: .85rem;
 }
 
+.context-moderation-target {
+  overflow-wrap: anywhere;
+}
+
 .admin-dialog .context-moderation-options {
   justify-content: start;
 }

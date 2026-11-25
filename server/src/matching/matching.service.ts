@@ -294,7 +294,7 @@ export class MatchingService implements OnModuleInit {
           CASE WHEN other.representation = 'AGENT' THEN 'агент' WHEN other.kind = 'SELL' THEN 'продавец' ELSE 'покупатель' END,
           ', рейтинг ', coalesce(CASE WHEN m.seller_id = $1 THEN (${publicProfile('buyer')}) ->> 'rating'
             ELSE (${publicProfile('seller')}) ->> 'rating' END, 'пока нет'),
-          CASE WHEN m.type = 'PARTIAL' THEN '. Не сошлось: ' || coalesce((
+          CASE WHEN m.type = 'PARTIAL' THEN '. Различия в условиях — ' || coalesce((
             SELECT string_agg(x->>'text', ' ') FROM jsonb_array_elements(m.mismatches) x), '') ELSE '' END) AS line
       ${matchJoins}
       JOIN listings mine ON mine.id = CASE WHEN m.seller_id = $1 THEN s.id ELSE b.id END

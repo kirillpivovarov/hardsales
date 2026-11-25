@@ -11,7 +11,7 @@ import { DisclosureDetailPage, DisclosuresPage } from './Disclosures';
 import { PrincipalAnswerPage, RepresentationAccount, RepresentationAction } from './Representation';
 import { PaymentsPage, TrustAccount } from './Trust';
 import { DealsPage } from './Deals';
-import { AdminPage, ContextModeration } from './AdminPage';
+import { AdminPage } from './AdminPage';
 import { AccountPage, AuthPage, authDestination } from './Auth';
 import { CatalogPage } from './Catalog';
 import { ChatPage } from './ChatPage';
@@ -105,14 +105,12 @@ function Header({ user, onLogout, notificationRevision }: {
   </header>;
 }
 
-function Footer({ user }: { user: User | null }) {
-  const { t, locale, locales } = useI18n();
+function Footer() {
+  const { t } = useI18n();
   return <footer className="site-footer"><div className="container footer-inner">
     <Brand /><p>{t('Площадка для закупки и продажи серверного оборудования')}</p>
     <nav aria-label={t('Документы')}>
       <Link to="/info/rules">{t('Правила')}</Link><Link to="/info/privacy">{t('Конфиденциальность')}</Link>
-      <ContextModeration user={user} target={{ type: 'locale', id: locale, title: locales.find(item => item.code === locale)?.name ?? locale }}
-        label={t('Редактировать язык интерфейса')} />
     </nav>
   </div></footer>;
 }
@@ -126,7 +124,6 @@ const fallbackContent: Record<string, { title: string; body: string }> = {
 function InfoPage({ user, onUser }: { user: User | null; onUser: (user: User) => void }) {
   const { key = 'about' } = useParams();
   const { t, locale } = useI18n();
-  const [revision, setRevision] = useState(0);
   const [contentState, setContentState] = useState<{ path: string; items?: Content[]; failed?: boolean }>();
   const staff = isStaff(user) && !user?.mustChangePassword;
   const path = staff ? '/admin/content' : '/content';
@@ -138,18 +135,14 @@ function InfoPage({ user, onUser }: { user: User | null; onUser: (user: User) =>
       if (!controller.signal.aborted) setContentState({ path, failed: true });
     });
     return () => controller.abort();
-  }, [path, revision]);
+  }, [path]);
   const { items, failed } = contentState?.path === path ? contentState : {};
   if (!items && !failed) return <div className="container content-page"><Spinner /></div>;
   const record = items?.find(item => item.key === key && (item.active || staff));
   const fallback = failed && Object.hasOwn(fallbackContent, key) ? fallbackContent[key] : undefined;
   const content = record?.translations[locale] ?? record?.translations.ru ?? fallback;
   return <div className="container content-page">
-    {record && staff && <div className="contextual-actions">
-      <ContextModeration user={user} target={{ type: 'content', id: record.key, title: content?.title ?? key }} label={t('Редактировать страницу')}
-        onSaved={() => setRevision(value => value + 1)} />
-      {!record.active && <span className="contextual-status">{t('Страница скрыта')}</span>}
-    </div>}
+    {record && staff && !record.active && <p className="contextual-status">{t('Страница скрыта')}</p>}
     {!content ? <Notice>{t('Страница не найдена.')}</Notice> : <article className="panel detail-panel"><h1>{t(content.title)}</h1>
       {content.body.split(/\n\s*\n/).map((paragraph,i) => <p key={i} className="preserve-text">{t(paragraph)}</p>)}</article>}
     {key === 'rules' && content && <RulesAcceptance user={user} onUser={onUser} />}
@@ -249,6 +242,6 @@ function AppRoutes() {
         <Route path="*" element={<div className="container workflow-page"><h1>{t('Страница не найдена')}</h1><Link to="/catalog" className="button button-primary">{t('К каталогу')}</Link></div>} />
       </Routes>
     </main>
-    <Footer user={user} />
+    <Footer />
   </>;
 }

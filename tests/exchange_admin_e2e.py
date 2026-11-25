@@ -40,6 +40,12 @@ def navigation(page):
     return page.get_by_role('navigation', name='Управление биржей', exact=True)
 
 
+def check_sections(page, expected):
+    links = navigation(page).get_by_role('link')
+    expect(links).to_have_count(len(expected))
+    assert set(links.all_text_contents()) == set(expected)
+
+
 def check_layout(page):
     widths = page.evaluate('({ viewport: innerWidth, document: document.documentElement.scrollWidth })')
     assert widths['document'] <= widths['viewport'], (page.url, widths)
@@ -201,7 +207,7 @@ def demo_sign_in(browser, base_path):
         complete_otp(tablet, 'testmod@example.test', test_incorrect=True)
         expect(tablet).to_have_url(BASE + base_path)
         assert api(moderator, 'auth/me')['user']['role'] == 'MODERATOR'
-        assert set(navigation(tablet).get_by_role('link').all_text_contents()) == set(COMMON)
+        check_sections(tablet, COMMON)
         check_layout(tablet)
 
         mobile = agent.new_page()
@@ -239,7 +245,7 @@ def run(browser):
         collect_errors(page, errors)
     desktop.goto(BASE + base_path)
     expect(heading(desktop, 'Закрытая биржа')).to_be_visible()
-    assert set(navigation(desktop).get_by_role('link').all_text_contents()) == set(COMMON + ADMIN_ONLY)
+    check_sections(desktop, COMMON + ADMIN_ONLY)
     invite_id = invites(desktop, admin)
     original_trust = settings(desktop, admin)
     try:
@@ -259,7 +265,7 @@ def run(browser):
 
         tablet.goto(BASE + base_path + '&part=invites')
         expect(heading(tablet, 'Модели оборудования')).to_be_visible()
-        assert set(navigation(tablet).get_by_role('link').all_text_contents()) == set(COMMON)
+        check_sections(tablet, COMMON)
         shared_sections(tablet, administrator=False)
         for part in ['settings', 'matching', 'rates', 'corridors', 'onboarding']:
             tablet.goto(BASE + base_path + '&part=' + part + '&userId=' + participant_user['id'])

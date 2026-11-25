@@ -53,9 +53,9 @@ function FeeFields({ fee }: { fee?: Fee }) {
   const [kind, setKind] = useState(fee?.kind || 'PERCENT');
   return <fieldset className="exchange-representation">
     <legend>{t('Вознаграждение агента')}</legend>
-    <Field label={t('Показ вознаграждения в объявлении')}>
+    <Field label={t('Вознаграждение в объявлении')}>
       <select name="agentFeeDisclosed" value={String(disclosed)} onChange={event => setDisclosed(event.target.value === 'true')}>
-        <option value="false">{t('Не раскрываю')}</option><option value="true">{t('Раскрываю')}</option>
+        <option value="false">{t('Не показывать')}</option><option value="true">{t('Показывать')}</option>
       </select>
     </Field>
     {disclosed && <div className="form-grid">
@@ -64,7 +64,7 @@ function FeeFields({ fee }: { fee?: Fee }) {
       </select></Field>
       <Field label={t('Размер вознаграждения')}><input type="number" name="agentFeeValue" min="0.01"
         max={kind === 'PERCENT' ? 100 : 9999999999.99} step="0.01" defaultValue={fee?.value ?? ''} required /></Field>
-      <Field label={t('Кто платит')}><select name="agentFeePayer" defaultValue={fee?.payer || 'SELLER'}>
+      <Field label={t('Плательщик')}><select name="agentFeePayer" defaultValue={fee?.payer || 'SELLER'}>
         <option value="SELLER">{t('Продавец')}</option><option value="BUYER">{t('Покупатель')}</option><option value="BOTH">{t('Обе стороны')}</option>
       </select></Field>
     </div>}
@@ -112,11 +112,11 @@ export function ListingRepresentationFields({ user, listing }: { user?: User | n
     </select></Field> : <input type="hidden" name="representation" value={role} />}
     {role === 'AGENT' && <>
       {principalError ? <Notice tone="error">{t(principalError)}</Notice> : !principals ? <Spinner /> : principals.length ?
-        <Field label={t('От чьего имени объявление')} hint={t('Имя и компания принципала доступны вам и модератору. Контрагент видит только метку подтверждения.')}>
+        <Field label={t('От чьего имени публикуется объявление')} hint={t('Имя и компания принципала доступны вам и модератору. Контрагент видит статус подтверждения полномочий.')}>
           <select name="principalId" defaultValue={assigned ?? (principals.length === 1 ? principals[0].id : '')} required>
             <option value="">{t('Выберите принципала')}</option>
             {principals.map(principal => <option key={principal.id} value={principal.id}>
-              {[principal.name, principal.company].filter(Boolean).join(', ')} ({t(principal.confirmed ? 'подтверждён' : 'не подтверждён')})
+              {[principal.name, principal.company].filter(Boolean).join(', ')} ({t(principal.confirmed ? 'полномочия подтверждены' : 'полномочия не подтверждены')})
             </option>)}
           </select>
         </Field> :
@@ -132,12 +132,12 @@ function letterMessage(letter: Letter | null | undefined, locale: string) {
 
 function PrincipalStatus({ principal }: { principal: Principal }) {
   const { t, locale } = useI18n();
-  const status = principal.confirmedVia === 'EMAIL' ? 'Подтверждён компанией по почте'
-    : principal.confirmedVia === 'PLATFORM' ? 'Подтверждён на площадке'
-    : principal.confirmedVia === 'ADMIN' ? 'Подтверждён модератором'
-    : principal.emailAck ? 'Ответ с общей почты. Проверяет модератор'
-    : principal.deniedAt ? 'Компания не подтвердила' : principal.lastLetter?.deliveryStatus === 'FAILED' ? 'Письмо не доставлено'
-    : principal.requestedAt && principal.lastLetter?.status === 'SENT' ? 'Запрос отправлен' : 'Не подтверждён';
+  const status = principal.confirmedVia === 'EMAIL' ? 'Полномочия подтверждены по корпоративной почте'
+    : principal.confirmedVia === 'PLATFORM' ? 'Полномочия подтверждены на площадке'
+    : principal.confirmedVia === 'ADMIN' ? 'Полномочия подтверждены модератором'
+    : principal.emailAck ? 'Ответ получен с публичного почтового сервиса. Ожидается проверка модератора'
+    : principal.deniedAt ? 'Компания не подтвердила полномочия' : principal.lastLetter?.deliveryStatus === 'FAILED' ? 'Письмо не доставлено'
+    : principal.requestedAt && principal.lastLetter?.status === 'SENT' ? 'Запрос отправлен' : 'Полномочия не подтверждены';
   const sent = letterMessage(principal.lastLetter, locale);
   return <>
     <p>{t(status)}{principal.confirmedAt ? ' · ' + new Date(principal.confirmedAt).toLocaleDateString(locale) : ''}</p>
@@ -204,7 +204,7 @@ export function RepresentationAccount({ user }: { user: User }) {
   if (loadError) return <Notice tone="error">{t(loadError)}</Notice>;
   if (!state?.enabled) return null;
   const sent = letterMessage(state.companyEmailLetter, locale);
-  const scope = state.companyEmailDomainKind === 'PUBLIC' ? 'Подтверждена, общий домен' : 'Подтверждена';
+  const scope = state.companyEmailDomainKind === 'PUBLIC' ? 'Адрес подтверждён. Используется публичный почтовый сервис' : 'Корпоративный адрес подтверждён';
   return <div className="exchange-representation">
     <section className="panel workflow-section exchange-representation" id="company-email">
       <h2>{t('Почта компании')}</h2>
@@ -228,8 +228,8 @@ export function RepresentationAccount({ user }: { user: User }) {
         <Button type="submit" disabled={pending}>{t('Сохранить роль')}</Button>
       </form>
       {agent && <>
-        <h3>{t('Принципалы и открытые агентские')}</h3>
-        <p className="muted">{t('Имя и компанию принципала видит только модератор. При публикации выберите, от чьего имени размещено объявление.')}</p>
+        <h3>{t('Принципалы и вознаграждение агента')}</h3>
+        <p className="muted">{t('Имя и компания принципала доступны вам и модератору. При публикации выберите, от чьего имени размещаете объявление.')}</p>
         <ul className="exchange-records">{principals.map(principal => <li key={principal.id} className="panel exchange-record">
           <strong>{'PR-' + principal.number} · {principal.name}{principal.company ? ' · ' + principal.company : ''}</strong>
           <PrincipalStatus principal={principal} />
@@ -262,8 +262,8 @@ export function RepresentationAccount({ user }: { user: User }) {
         <form className="exchange-representation" onSubmit={event => submit(event, '/me/agent-fee', 'PUT', feeFromForm)}>
           <FeeFields fee={state.agentFee} />
           {state.agentFeeConfirmedAt && <p>{t('Вознаграждение подтверждено принципалом.')}</p>}
-          {state.agentFeePrincipalSays && <p>{t('По словам принципала: {value}', { value: state.agentFeePrincipalSays })}</p>}
-          <p className="muted">{t('Смена цифры снимает подтверждение принципала.')}</p>
+          {state.agentFeePrincipalSays && <p>{t('Размер вознаграждения по данным принципала — {value}', { value: state.agentFeePrincipalSays })}</p>}
+          <p className="muted">{t('После изменения вознаграждения подтвердите его у принципала повторно.')}</p>
           <div className="exchange-actions"><Button type="submit" disabled={pending}>{t('Сохранить вознаграждение')}</Button></div>
         </form>
       </>}

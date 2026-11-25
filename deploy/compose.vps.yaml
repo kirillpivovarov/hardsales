@@ -1,0 +1,89 @@
+name: hwforai-prod
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-bookworm}
+    restart: unless-stopped
+    env_file:
+      - path: postgres.env
+        format: raw
+    environment:
+      POSTGRES_DB: hwforai
+      POSTGRES_USER: postgres
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/10-init-db.sql:ro
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "hwforai"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  app:
+    image: hwforai-app:${HWFORAI_RELEASE:?Укажите полный SHA релиза maxv}
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: app.env
+        format: raw
+    environment:
+      NODE_ENV: production
+      DEMO_MODE: 'false'
+      APP_ORIGIN: https://${HWFORAI_DOMAIN:?Укажите домен}
+      TRUST_PROXY_HOPS: '1'
+      MAIL_TRANSPORT: smtp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      database: {}
+      frontend:
+        gw_priority: 1
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/v1/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.10-alpine}
+    restart: unless-stopped
+    environment:
+      HWFORAI_DOMAIN: ${HWFORAI_DOMAIN:?Укажите домен}
+      ACME_EMAIL: ${ACME_EMAIL:?Укажите почту для ACME}
+      NO_PROXY: app,localhost,127.0.0.1
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - frontend
+    logging: *logging
+
+networks:
+  frontend:
+  database:
+    internal: true
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

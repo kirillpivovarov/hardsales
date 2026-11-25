@@ -68,7 +68,7 @@ export class TrustService implements OnApplicationBootstrap {
     if (!creating || limit === null) return
     const used = await this.listingUse(client, userId)
     if (used >= limit) {
-      throw new ConflictException(`Лимит объявлений для уровня «${levelNames[user.verification_level]}»: ${limit}`)
+      throw new ConflictException(`Достигнут лимит объявлений — ${limit}.`)
     }
   }
 

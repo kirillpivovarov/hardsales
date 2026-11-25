@@ -217,7 +217,7 @@ function AuthForm({
             <>
               {(requiresInvite || invitationFromLink) && (
                 <div className="workflow-span">
-                  <Field label={t('Код приглашения')} hint={t('Код выдаёт модератор площадки. Формат: XXXX-XXXX')}>
+                  <Field label={t('Код приглашения')} hint={t('Код выдаёт администратор площадки. Формат XXXX-XXXX.')}>
                     <input name="inviteCode" autoComplete="off" autoCapitalize="characters" inputMode="text"
                       spellCheck={false} defaultValue={draft?.inviteCode ?? invitationFromLink ?? ''}
                       minLength={4} maxLength={20} required={requiresInvite} />

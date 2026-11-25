@@ -95,12 +95,12 @@ export function representationLabels() {
       'tone', CASE WHEN l.representation = 'DIRECT' THEN 'ink' ELSE 'gray' END)) ||
     CASE WHEN l.representation = 'AGENT' AND ${verifiedPrincipal} THEN jsonb_build_array(
       jsonb_build_object('id', 'principal', 'text',
-        CASE WHEN ${emailPrincipal} THEN 'подтверждён компанией по почте' ELSE 'принципал подтверждён' END, 'tone', 'blue'))
+        CASE WHEN ${emailPrincipal} THEN 'Полномочия подтверждены по корпоративной почте' ELSE 'Полномочия подтверждены' END, 'tone', 'blue'))
       ELSE '[]'::jsonb END ||
     CASE WHEN u.company_email_confirmed_at IS NOT NULL AND u.company_email_domain_kind = 'CORPORATE' THEN jsonb_build_array(
-      jsonb_build_object('id', 'email', 'text', 'почта компании подтверждена', 'tone', 'blue')) ELSE '[]'::jsonb END ||
+      jsonb_build_object('id', 'email', 'text', 'Корпоративный адрес подтверждён', 'tone', 'blue')) ELSE '[]'::jsonb END ||
     CASE WHEN ${feeVisible} THEN jsonb_build_array(jsonb_build_object('id', 'fee', 'text',
-      CASE WHEN ${feeConfirmed} THEN 'открытые агентские, подтверждено принципалом' ELSE 'открытые агентские' END,
+      CASE WHEN ${feeConfirmed} THEN 'Вознаграждение подтверждено принципалом' ELSE 'Размер вознаграждения указан' END,
       'tone', CASE WHEN ${feeConfirmed} THEN 'blue' ELSE 'gray' END)) ELSE '[]'::jsonb END
     ELSE '[]'::jsonb END`
 }

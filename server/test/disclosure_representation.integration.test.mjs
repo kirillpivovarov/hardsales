@@ -109,8 +109,10 @@ test('disclosure journal, company confirmation and principal privacy', {
     }
     await emailAction(privateAddress, 'CONFIRMED');
     const publicDetail = (await call('/listings/' + listing.id, { cookie: buyer.cookie })).data;
-    assert.ok(publicDetail.labels.find(label => label.id === 'principal'));
-    assert.ok(publicDetail.labels.find(label => label.id === 'fee' && label.tone === 'blue'));
+    assert.equal(publicDetail.labels.find(label => label.id === 'principal')?.text, 'Полномочия подтверждены по корпоративной почте');
+    assert.deepEqual(publicDetail.labels.find(label => label.id === 'fee'), {
+      id: 'fee', text: 'Вознаграждение подтверждено принципалом', tone: 'blue',
+    });
     assert.equal(Object.hasOwn(publicDetail, 'principal'), false);
     await emailAction('desk-' + suffix + '@gmail.com', 'ACKNOWLEDGED');
     const queue = (await call('/admin/principals?status=PUBLIC_ACK', { cookie: admin.cookie })).data;

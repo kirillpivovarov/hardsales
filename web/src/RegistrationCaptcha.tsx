@@ -45,10 +45,15 @@ export default function RegistrationCaptcha({ onToken }: { onToken: (token: stri
       onToken(state === 'verified' ? payload : undefined);
     }
     widget.addEventListener('statechange', onStateChange);
-    void widget.configure({
-      formatError: () => t(messages.error),
+    let active = true;
+    // ALTCHA exposes its methods after its asynchronous connectedCallback creates the widget.
+    void customElements.whenDefined('altcha-widget').then(() => {
+      if (active && widget.isConnected) return widget.configure?.({ formatError: () => t(messages.error) });
     });
-    return () => widget.removeEventListener('statechange', onStateChange);
+    return () => {
+      active = false;
+      widget.removeEventListener('statechange', onStateChange);
+    };
   }, [language, onToken, t]);
 
   return <altcha-widget ref={ref} challenge="/api/v1/auth/captcha" language={language} workers={1} />;

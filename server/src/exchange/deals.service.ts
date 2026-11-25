@@ -10,7 +10,6 @@ import { ExchangeJobs } from './jobs'
 import { ExchangeNotifications } from './notifications'
 import { PlatformSettings } from './platform-settings'
 import { lockTrustStaff } from './trust-access'
-import { levelNames } from './trust-score'
 import { TrustService } from './trust.service'
 
 const statuses = ['NEGOTIATING', 'AGREED', 'FAILED', 'EXECUTED'] as const
@@ -127,7 +126,7 @@ export class DealsService implements OnApplicationBootstrap {
             status = $3, amount_mismatch = $4, updated_at = now() WHERE id = $1
         `, [id, JSON.stringify(agreement), result, mismatch])
         await this.notify.notify(client, partner, {
-          kind: 'deal.agreed', title: 'Контрагент отметил «Договорились»',
+          kind: 'deal.agreed', title: 'Контрагент указал условия сделки',
           body: `${agreement.amount} ${agreement.currency}, ${agreement.quantity} шт. Подтвердите условия со своей стороны.`,
           payload: { dealId: id }, actions: [{ label: 'Открыть сделку', href: '/deals/' + id }],
         })
@@ -143,7 +142,7 @@ export class DealsService implements OnApplicationBootstrap {
           })
         }
       } else if (status === 'EXECUTED') {
-        if (deal.status !== 'AGREED') throw new ConflictException('Сначала обе стороны подтверждают «Договорились»')
+        if (deal.status !== 'AGREED') throw new ConflictException('Сначала обе стороны должны указать условия сделки')
         if (seller ? deal.seller_executed_at : deal.buyer_executed_at) return this.read(client, id, userId)
         result = (seller ? deal.buyer_executed_at : deal.seller_executed_at) ? 'EXECUTED' : 'AGREED'
         await client.query(`
@@ -190,10 +189,10 @@ export class DealsService implements OnApplicationBootstrap {
         WHERE id = ANY($1::uuid[]) AND verification_level >= 1 AND status <> 'BANNED'
       `, [participantIds])
       for (const userId of participantIds) {
-        const rating = await this.trust.refresh(client, userId)
+        await this.trust.refresh(client, userId)
         if (approve) await this.notify.notify(client, userId, {
-          kind: 'deal.verified', title: 'Сделка засчитана',
-          body: `Модератор проверил сделку. Ваш уровень: «${levelNames[rating?.level ?? 0]}».`,
+          kind: 'deal.verified', title: 'Сделка подтверждена',
+          body: 'Модератор подтвердил исполнение сделки. Уровень проверки указан в вашем профиле.',
           payload: { dealId: id }, actions: [{ label: 'Открыть сделку', href: '/deals/' + id }],
         })
       }
@@ -237,14 +236,14 @@ export class DealsService implements OnApplicationBootstrap {
       for (const day of [3, 7, 14]) {
         if (deal.elapsed < day || current.followups[day]) continue
         for (const user of [deal.seller_id, deal.buyer_id]) {
-          const title = current.status === 'AGREED' ? 'Поставка исполнена?' : 'Как идёт сделка?'
+          const title = current.status === 'AGREED' ? 'Исполнена ли сделка?' : 'Уточните статус сделки'
           await this.notify.notify(client, user, {
-            kind: 'deal.followup', title, body: `Раскрытие R-${deal.number.padStart(6, '0')}, ${day} дней после раскрытия. ${title}`,
+            kind: 'deal.followup', title, body: `После обмена контактами R-${deal.number.padStart(6, '0')} прошло ${day} дней. Если статус изменился, обновите его в карточке сделки.`,
             payload: { dealId: deal.id, day }, actions: [
-              ...(current.status === 'AGREED' ? [{ label: 'Исполнено', href: '/deals/' + deal.id + '?status=EXECUTED' }]
-                : [{ label: 'Договорились', href: '/deals/' + deal.id + '?status=AGREED' }]),
+              ...(current.status === 'AGREED' ? [{ label: 'Подтвердить исполнение', href: '/deals/' + deal.id + '?status=EXECUTED' }]
+                : [{ label: 'Указать условия', href: '/deals/' + deal.id + '?status=AGREED' }]),
               { label: 'Идут переговоры', href: '/deals/' + deal.id + '?status=NEGOTIATING' },
-              { label: 'Сорвалось', href: '/deals/' + deal.id + '?status=FAILED' },
+              { label: 'Сделка не состоялась', href: '/deals/' + deal.id + '?status=FAILED' },
             ],
             dedupeKey: `deal-followup:${deal.id}:${day}`, channels: ['EMAIL'],
           })

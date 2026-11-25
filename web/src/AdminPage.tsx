@@ -853,50 +853,69 @@ function EditorFields({ editor, close, saved }: { editor: Editor } & EditorActio
   }
 }
 
-export type ContextModerationTarget = { type: 'listing' | 'user' | 'category' | 'content' | 'locale'; id: string; title: string }
+type ContextModerationTarget = { type: 'listing' | 'user'; id: string; title: string }
 
-type ContextModerationProps = {
+export function ListingModeration({ user, listing, owner, onSaved }: {
   user: User | null
-  target: ContextModerationTarget
-  label?: string
-  accessibleLabel?: string
-  onSaved?: (result?: unknown) => void
-}
-
-export function ContextModeration({ user, target, label, accessibleLabel, onSaved }: ContextModerationProps) {
-  const { t, reloadLocales } = useI18n()
+  listing: { id: string; title: string }
+  owner?: { id: string; title: string }
+  onSaved: () => void
+}) {
+  const { t } = useI18n()
   const [open, setOpen] = useState(false)
+  const [choice, setChoice] = useState<ContextModerationTarget['type']>()
   const [saved, setSaved] = useState(false)
+  const chooser = useRef<HTMLButtonElement>(null)
+  const targetHeading = useRef<HTMLHeadingElement>(null)
+  const selected = choice === 'listing' ? listing : choice === 'user' ? owner : undefined
+
+  useEffect(() => {
+    if (open) (choice ? targetHeading.current : chooser.current)?.focus()
+  }, [open, choice])
+
   if (!isStaff(user) || !user?.emailVerified || user.mustChangePassword || user.status !== 'ACTIVE') return null
 
+  const close = () => { setOpen(false); setChoice(undefined) }
   return <div className="context-moderation">
-    <Button variant="secondary" aria-haspopup="dialog" aria-label={accessibleLabel ?? label ?? t('Модерировать {name}', { name: target.title })}
-      onClick={() => { setSaved(false); setOpen(true) }}>{label ?? t('Модерировать')}</Button>
+    <Button variant="secondary" aria-haspopup="dialog" onClick={() => { setSaved(false); setOpen(true) }}>
+      {t('Действия модерации')}
+    </Button>
     {saved && <span className="context-moderation-feedback" role="status">{t('Изменения сохранены.')}</span>}
-    {open && <AdminDialog title={t('Модерация · {name}', { name: target.title })} onClose={() => setOpen(false)}>
-      <ContextModerationFields key={target.type + target.id} target={target} close={() => setOpen(false)} saved={result => {
-        setOpen(false)
-        setSaved(true)
-        if (target.type === 'locale') reloadLocales()
-        onSaved?.(result)
-      }} />
+    {open && <AdminDialog title={t('Действия модерации')} onClose={close}>
+      {choice && selected ? <>
+        <Button variant="ghost" onClick={() => setChoice(undefined)}>{t('К списку действий')}</Button>
+        <h3 ref={targetHeading} tabIndex={-1} className="context-moderation-target">{selected.title}</h3>
+        <ContextModerationFields key={choice + selected.id} target={{ ...selected, type: choice }}
+          onStepChange={() => targetHeading.current?.focus()} close={close} saved={() => {
+          close()
+          setSaved(true)
+          onSaved()
+        }} />
+      </> : <div className="admin-actions context-moderation-options">
+        <button ref={chooser} type="button" className="button button-secondary" onClick={() => setChoice('listing')}>
+          {t('Модерировать объявление')}
+        </button>
+        {owner && <Button variant="secondary" onClick={() => setChoice('user')}>{t('Модерировать профиль')}</Button>}
+      </div>}
     </AdminDialog>}
   </div>
 }
 
-function ContextModerationFields({ target, close, saved }: { target: ContextModerationTarget } & EditorActions) {
+function ContextModerationFields({ target, close, saved, onStepChange }: {
+  target: ContextModerationTarget; onStepChange: () => void
+} & EditorActions) {
   const { t } = useI18n()
   const [operation, setOperation] = useState<'edit' | 'status' | 'reviews' | 'reports'>()
   const [retry, setRetry] = useState(0)
   const listing = useAdminData<ListingRow>(target.type === 'listing' ? '/admin/listings/' + target.id : null, retry)
   const profile = useAdminData<UserRow>(target.type === 'user' ? '/admin/users/' + target.id : null, retry)
-  const categories = useAdminData<CategoryRow[]>(target.type === 'category' ? '/admin/categories' : null, retry)
-  const pages = useAdminData<ContentRow[]>(target.type === 'content' ? '/admin/content' : null, retry)
-  const needsLocales = target.type === 'locale' || target.type === 'content' || target.type === 'category'
-  const locales = useAdminData<LocaleRow[]>(needsLocales ? '/admin/locales' : null, retry)
+  function chooseOperation(next: typeof operation) {
+    setOperation(next)
+    onStepChange()
+  }
 
-  if (listing.loading || profile.loading || categories.loading || pages.loading || locales.loading) return <Spinner />
-  const error = listing.error ?? profile.error ?? categories.error ?? pages.error ?? locales.error
+  if (listing.loading || profile.loading) return <Spinner />
+  const error = listing.error ?? profile.error
   if (error) return <Notice tone="error">{error} <Button variant="ghost" onClick={() => setRetry(current => current + 1)}>{t('Повторить')}</Button></Notice>
 
   let available: { editor: Editor; status: string; name: string; tab: 'listings' | 'users' } | undefined
@@ -908,16 +927,16 @@ function ContextModerationFields({ target, close, saved }: { target: ContextMode
   }
   if (available) {
     if (operation === 'reviews' || operation === 'reports') {
-      return <RelatedModeration tab={operation} subjectId={target.id} back={() => setOperation(undefined)} saved={saved} />
+      return <RelatedModeration tab={operation} subjectId={target.id} back={() => chooseOperation(undefined)} saved={saved} />
     }
     if (!operation) return <>
       <p className="muted">{available.name !== target.title && <>{available.name} · </>}{t('Текущий статус: {status}', { status: statusLabel(t, available.status) })}</p>
       <div className="admin-actions context-moderation-options">
-        <Button variant="secondary" onClick={() => setOperation('edit')}>{t('Редактировать')}</Button>
-        {available.status !== 'BANNED' && <Button variant="secondary" onClick={() => setOperation('status')}>{t('Изменить статус')}</Button>}
+        <Button variant="secondary" onClick={() => chooseOperation('edit')}>{t('Редактировать')}</Button>
+        {available.status !== 'BANNED' && <Button variant="secondary" onClick={() => chooseOperation('status')}>{t('Изменить статус')}</Button>}
         {target.type === 'user' && <>
-          <Button variant="secondary" onClick={() => setOperation('reviews')}>{t('Отзывы о профиле')}</Button>
-          <Button variant="secondary" onClick={() => setOperation('reports')}>{t('Жалобы на профиль')}</Button>
+          <Button variant="secondary" onClick={() => chooseOperation('reviews')}>{t('Отзывы о профиле')}</Button>
+          <Button variant="secondary" onClick={() => chooseOperation('reports')}>{t('Жалобы на профиль')}</Button>
         </>}
       </div>
     </>
@@ -927,20 +946,7 @@ function ContextModerationFields({ target, close, saved }: { target: ContextMode
     return <EditorFields editor={editor} close={close} saved={saved} />
   }
 
-  let editor: Editor | undefined
-  if (target.type === 'category' && categories.data && locales.data) {
-    const row = categories.data.find(item => item.id === target.id)
-    if (row) editor = { type: 'category', row, categories: categories.data, locales: locales.data }
-  }
-  if (target.type === 'content' && pages.data && locales.data) {
-    const row = pages.data.find(item => item.key === target.id)
-    if (row) editor = { type: 'content', row, locales: locales.data }
-  }
-  if (target.type === 'locale' && locales.data) {
-    const row = locales.data.find(item => item.code === target.id)
-    if (row) editor = { type: 'locale', row }
-  }
-  return editor ? <EditorFields editor={editor} close={close} saved={saved} /> : <Notice>{t('Запись недоступна для редактирования.')}</Notice>
+  return <Notice>{t('Запись недоступна для редактирования.')}</Notice>
 }
 
 function RelatedModeration({ tab, subjectId, back, saved }: {

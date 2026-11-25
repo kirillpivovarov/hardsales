@@ -13,7 +13,7 @@ import { ExchangeNotifications } from './notifications'
 import { PlatformSettings } from './platform-settings'
 import { lockTrustStaff } from './trust-access'
 import { documentFile, type DocumentUpload } from './trust-files'
-import { levelNames, listingLimit } from './trust-score'
+import { listingLimit } from './trust-score'
 import { TrustService } from './trust.service'
 
 const companyKinds = ['COMPANY_CARD', 'SIGNATORY', 'MANDATE', 'PRINCIPAL_LETTER'] as const
@@ -241,12 +241,12 @@ export class VerificationService implements OnApplicationBootstrap {
       const level = rating?.level ?? user.level
       await auditExchange(client, actor, 'users', id, 'verification-' + action,
         { level: user.level }, { level, restricted: action === 'restrict' }, note ?? undefined)
-      const title = action === 'verify' ? 'Уровень проверки подтверждён' : action === 'restrict' ? 'Публикация приостановлена' : 'Проверка отклонена'
+      const title = action === 'verify' ? 'Документы проверены' : action === 'restrict' ? 'Публикация приостановлена' : 'Проверка документов не пройдена'
       const body = action === 'verify'
-        ? `Модератор проверил документы. Ваш уровень: «${levelNames[level]}». Лимит объявлений: ${listingLimit(level, rating?.total ?? null) ?? 'без ограничения'}`
+        ? `Модератор завершил проверку документов. Лимит объявлений — ${listingLimit(level, rating?.total ?? null) ?? 'без ограничения'}.`
         : action === 'restrict'
-          ? `Модератор закрыл право публиковать: ${note}. Чтобы вернуть доступ, пройдите проверку документов.`
-          : `Модератор отклонил проверку документов: ${note}`
+          ? `Модератор ограничил публикацию объявлений. Чтобы вернуть доступ, пройдите проверку документов. Причина — ${note}.`
+          : `Модератор не подтвердил документы. Причина — ${note}.`
       await this.notify.notify(client, id, { kind: 'verification.' + action, title, body, payload: { level }, channels: ['EMAIL'] })
       return (await client.query(`SELECT ${userColumns} FROM users u WHERE id = $1`, [id])).rows[0]
     })

@@ -100,11 +100,11 @@ function MatchCard({ match, busy, onChat, onDecline }: {
     <TrustBadges listing={{ trust }} />
     {match.side === 'BUY' && <PaymentRisk listing={{ kind: listing.kind, paymentTerms: listing.paymentTerms, trust }} />}
     {match.mismatches.length > 0 && <div className="match-explanation">
-      <h3>{t('Не сошлось')}</h3>
+      <h3>{t('Различия в условиях')}</h3>
       <ul>{match.mismatches.map(item => <li key={item.key}>{t(item.text)}</li>)}</ul>
     </div>}
     {match.gap && <div className="match-explanation">
-      <h3>{t('Как закрыть разрыв')}</h3>
+      <h3>{t('Варианты согласования оплаты')}</h3>
       <ul>{match.gap.rows.map(row => <li key={row.id}>{t(row.tool)} · {t(partnerLabels[row.partner] ?? row.partner)}</li>)}</ul>
     </div>}
     {(match.voidReason || match.declineReason) && <Notice>{t(match.voidReason ?? match.declineReason!)}</Notice>}

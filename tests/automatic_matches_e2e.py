@@ -91,7 +91,7 @@ def main():
         expect(phone.get_by_role("heading", name="Совпадение", exact=True)).to_be_visible()
         expect(phone.get_by_text("Частичное совпадение", exact=True)).to_be_visible()
         if features["feature_trust_rating"] and partial["counterpart"]["trust"]["ownerLevel"] < 2:
-            expect(phone.get_by_text("100 % предоплата рекомендуется", exact=False)).to_be_visible()
+            expect(phone.get_by_text("Перед полной предоплатой проверьте", exact=False)).to_be_visible()
         check_width(phone)
         phone.get_by_role("button", name="Не подходит", exact=True).click()
         dialog = phone.get_by_role("dialog", name="Отклонить совпадение")

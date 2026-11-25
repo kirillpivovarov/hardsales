@@ -6,6 +6,12 @@ import { useI18n } from './i18n'
 import { Button, Field, Notice, Spinner } from './ui'
 import './trust.css'
 
+export const verificationLevels = ['Участник не проверен', 'Документы проверены', 'Сделка подтверждена'] as const
+const ratingFactorLabels: Record<string, string> = {
+  discipline: 'Ответы об актуальности', speed: 'Скорость ответа на совпадения',
+  direct: 'Представительство', fees: 'Вознаграждение агента', tenure: 'Срок работы на площадке',
+}
+
 export type ListingTrust = {
   score: number | null
   ownerScore: number | null
@@ -61,7 +67,7 @@ export function PaymentTerms({ selected = [] }: { selected?: readonly string[] }
       <label className="checkbox-label"><input name="paymentTerms" type="checkbox" value={term.code}
         defaultChecked={selected.includes(term.code)} />{t(term.label_ru)}</label>
       <details>
-        <summary>{t('Когда уместно и какие риски')}</summary>
+        <summary>{t('Применение и риски')}</summary>
         <p>{t(term.when_ru)}</p>
         <p>{t('Риск продавца')} · {t(term.seller_risk_ru)}</p>
         <p>{t('Риск покупателя')} · {t(term.buyer_risk_ru)}</p>
@@ -87,11 +93,11 @@ export function PaymentsPage() {
           <p><strong>{t('Когда уместно')}</strong> · {t(term.when_ru)}</p>
           <p><strong>{t('Риск продавца')}</strong> · {t(term.seller_risk_ru)}</p>
           <p><strong>{t('Риск покупателя')}</strong> · {t(term.buyer_risk_ru)}</p>
-          <p className="muted">{t(term.hint_ru)}</p>
+          <p className="muted">{t(term.code === 'PREPAY_100' ? 'Учитывайте подтверждённые сделки продавца перед полной предоплатой.' : term.hint_ru)}</p>
         </article>)}</div>
       </section>
       <section className="panel workflow-section">
-        <h2>{t('Что закрывает разрыв по оплате')}</h2>
+        <h2>{t('Как согласовать условия оплаты')}</h2>
         <div className="trust-card-grid">{[...result.data.rules, result.data.fallback].map(rule => <article className="trust-card" key={rule.id}>
           <h3>{t(rule.seller_wants_ru)} / {t(rule.buyer_wants_ru)}</h3>
           <p>{t(rule.tool_ru)}</p>
@@ -108,12 +114,13 @@ export function TrustBadges({ listing }: { listing: ListingFields }) {
   const { features } = useExchange()
   const trust = listing.trust
   if (!features.feature_trust_rating || !trust) return null
-  return <ul className="trust-badges" aria-label={t('Рейтинг по делам')}>
-    {trust.score != null && <li className="trust-tag">{t('Рейтинг · {score}/100', { score: trust.score })}</li>}
-    <li className={'trust-tag trust-level-' + trust.ownerLevel}>{t(trust.ownerLevelName)}{trust.ownerLevel === 2 && ` · ${trust.ownerDeals}`}</li>
+  return <ul className="trust-badges" aria-label={t('Рейтинг и подтверждения')}>
+    {trust.score != null && <li className="trust-tag">{t('Рейтинг объявления · {score}/100', { score: trust.score })}</li>}
+    <li className={'trust-tag trust-level-' + trust.ownerLevel}>{t(verificationLevels[trust.ownerLevel] ?? verificationLevels[0])}
+      {trust.ownerLevel === 2 && ` · ${t('Сделок: {count}', { count: trust.ownerDeals })}`}</li>
     {trust.reliable && <li className="trust-tag trust-level-2">{t('Надёжный участник')}</li>}
     {trust.proof && <li className="trust-tag trust-level-1">{t(trust.proof === 'STOCK' ? 'Наличие подтверждено' : 'Средства подтверждены')}</li>}
-    {trust.corridor && <li className="trust-tag trust-warning">{t('Цена вне коридора')}</li>}
+    {trust.corridor && <li className="trust-tag trust-warning">{t('Цена вне ориентировочного диапазона')}</li>}
   </ul>
 }
 
@@ -122,12 +129,12 @@ export function PaymentRisk({ listing }: { listing: ListingFields }) {
   const { features } = useExchange()
   if (!features.feature_trust_rating || listing.kind !== 'SELL' || listing.paymentTerms?.length !== 1 ||
     listing.paymentTerms[0] !== 'PREPAY_100' || (listing.trust?.ownerLevel ?? 0) >= 2) return null
-  return <Notice>{t('100 % предоплата рекомендуется только при уровне «проверен сделкой» у продавца.')}</Notice>
+  return <Notice>{t('Перед полной предоплатой проверьте, есть ли у продавца подтверждённые сделки, или согласуйте другой способ оплаты.')}</Notice>
 }
 
 export const documentKinds: Record<string, string> = {
   COMPANY_CARD: 'Карточка компании', SIGNATORY: 'Документ о полномочиях подписанта',
-  MANDATE: 'Агентский мандат', PRINCIPAL_LETTER: 'Письмо принципала',
+  MANDATE: 'Документ о полномочиях агента', PRINCIPAL_LETTER: 'Письмо принципала',
   SERIAL_PHOTO: 'Фото серийного номера', WAREHOUSE_CERT: 'Складская справка', INVOICE: 'Накладная',
   WAREHOUSE_VIDEO: 'Видео со склада', LC_LETTER: 'Письмо об аккредитиве', FUNDS_PROOF: 'Подтверждение средств',
   BANK_LETTER: 'Письмо банка', DEAL_DOC: 'Документ по сделке', OTHER: 'Другой документ',
@@ -241,26 +248,23 @@ export function TrustAccount() {
     {loading && <Spinner />}
     {value && <>
       <section className="panel workflow-section">
-        <div className="trust-heading"><h2>{t('Рейтинг по делам')}</h2><strong>{value.total}/100</strong></div>
+        <div className="trust-heading"><h2>{t('Рейтинг участника')}</h2><strong>{value.total}/100</strong></div>
         {value.reliable && <p className="trust-tag trust-level-2">{t('Надёжный участник')}</p>}
         <ul className="trust-item-list">
           {value.factors.map(entry => <li key={entry.id}>
-            <div className="trust-heading"><strong>{t(entry.name)}</strong><span>{entry.value} / {entry.max}</span></div>
-            <p>{t(entry.detail)}</p>{entry.hint && <small className="muted">{t(entry.hint)} (+{new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(entry.max - entry.value)})</small>}
+            <div className="trust-heading"><strong>{t(ratingFactorLabels[entry.id] ?? entry.name)}</strong><span>{entry.value} / {entry.max}</span></div>
+            <p>{t(entry.id === 'level' ? verificationLevels[value.level] ?? verificationLevels[0] : entry.detail)}</p>
+            {entry.hint && <small className="muted">{t(entry.hint)} (+{new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(entry.max - entry.value)})</small>}
           </li>)}
           {value.penalties.map(penalty => <li key={penalty.id}>−{penalty.points} · {penalty.reason}</li>)}
         </ul>
       </section>
       <section className="panel workflow-section">
         <h2>{t('Уровень проверки')}</h2>
-        <ol className="trust-badges">
-          {['не проверен', 'проверен документами', 'проверен сделкой'].map((name, step) => <li key={name} className={'trust-tag trust-level-' + step} aria-current={step === value.level ? 'step' : undefined}>
-            {t(name)}{step === value.level && ` · ${t('текущий')}`}
-          </li>)}
-        </ol>
+        <p><span className={'trust-tag trust-level-' + value.level}>{t(verificationLevels[value.level] ?? verificationLevels[0])}</span></p>
         <p>{t('Активных и скрытых объявлений: {used}', { used: value.listingsUsed })} · {value.listingLimit === null ? t('без ограничения') : t('лимит {limit}', { limit: value.listingLimit })}</p>
         {value.publishBanAt && <Notice tone="error">{t('Публикация закрыта до проверки документов.')} {value.publishBanNote}</Notice>}
-        {value.verificationRejectedAt && <Notice>{t('Проверка отклонена.')} {value.verificationNote}</Notice>}
+        {value.verificationRejectedAt && <Notice>{t('Проверка документов не пройдена.')} {value.verificationNote}</Notice>}
         {value.dayCodes.length > 0 && <ul className="trust-item-list">
           {value.dayCodes.map(code => <li key={code.id}>
             <strong>{t('Код дня')} · <code>{code.code}</code></strong> <span className="muted">{t('Действует до {date}', { date: new Date(code.expiresAt).toLocaleString(locale) })}</span>

@@ -1,27 +1,11 @@
-.contextual-card {
-  min-width: 0;
-  display: grid;
-  grid-template-rows: 1fr auto;
-  gap: .4rem;
-}
-
-.contextual-card-actions,
 .contextual-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: .45rem .65rem;
-}
-
-.contextual-actions {
   margin-block-start: .85rem;
 }
 
-.content-page > .contextual-actions {
-  margin-block: 0 .95rem;
-}
-
-.contextual-card-actions .button,
 .contextual-actions .button {
   min-height: 2.75rem;
   max-width: 100%;

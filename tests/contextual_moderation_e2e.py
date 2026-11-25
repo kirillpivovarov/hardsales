@@ -1,4 +1,4 @@
-"""Exercise staff moderation from storefront pages on a disposable demo database."""
+"""Exercise card moderation and centralized staff editors on a disposable demo database."""
 
 import os
 from datetime import date, timedelta
@@ -67,6 +67,12 @@ def dialog_for(page, action):
     return dialog
 
 
+def moderation_dialog(page, action):
+    dialog = dialog_for(page, 'Действия модерации')
+    button(dialog, action).click()
+    return page.get_by_role('dialog')
+
+
 def expect_stayed(page, url):
     expect(page.get_by_role('dialog')).not_to_be_visible()
     expect(page).to_have_url(url)
@@ -74,7 +80,7 @@ def expect_stayed(page, url):
 
 
 def set_listing_status(page, url, status):
-    dialog = dialog_for(page, 'Модерировать объявление')
+    dialog = moderation_dialog(page, 'Модерировать объявление')
     button(dialog, 'Изменить статус').click()
     dialog.get_by_label('Новый статус').select_option(status)
     dialog.get_by_label('Причина').fill(f'Контекстная проверка {TAG}')
@@ -112,51 +118,61 @@ def run(browser):
     filters = {'category': slug, 'q': TAG, 'sort': 'newest'}
     catalog = BASE + '/catalog?' + urlencode(filters) + '#catalog'
     desktop.goto(catalog)
-    trigger_name = f'Модерировать объявление {offer}'
+    expect(button(desktop, f'Модерировать объявление {offer}')).to_have_count(0)
+    desktop.get_by_role('heading', name=offer, exact=True).click()
+    detail_url = f'{BASE}/listings/{offer_id}'
+    trigger_name = 'Действия модерации'
     trigger = button(desktop, trigger_name)
     trigger.scroll_into_view_if_needed()
     scroll = desktop.evaluate('window.scrollY')
     dialog_for(desktop, trigger_name).press('Escape')
-    expect_stayed(desktop, catalog)
+    expect_stayed(desktop, detail_url)
     expect(trigger).to_be_focused()
     assert abs(desktop.evaluate('window.scrollY') - scroll) < 5
 
-    dialog = dialog_for(desktop, trigger_name)
+    dialog = moderation_dialog(desktop, 'Модерировать объявление')
     button(dialog, 'Редактировать').click()
     edited_offer = offer + ' уточнено'
     dialog.locator('input[name=title]').fill(edited_offer)
     button(dialog, 'Сохранить изменения').click()
-    expect_stayed(desktop, catalog)
+    expect_stayed(desktop, detail_url)
     expect(desktop.get_by_role('heading', name=edited_offer, exact=True)).to_be_visible()
 
-    dialog = dialog_for(desktop, f'Редактировать категорию {category_name}')
-    next_slug = slug + '-new'
-    dialog.locator('input[name=slug]').fill(next_slug)
-    button(dialog, 'Сохранить').click()
-    filters['category'] = next_slug
-    expect_stayed(desktop, BASE + '/catalog?' + urlencode(filters) + '#catalog')
+    desktop.get_by_role('link', name='К каталогу', exact=True).click()
+    expect(desktop).to_have_url(catalog)
     expect(desktop.get_by_role('heading', name=edited_offer, exact=True)).to_be_visible()
-    print('PASS desktop admin contextual edits, category filter, scroll and keyboard focus', flush=True)
+    desktop.get_by_role('link', name='Управление категориями', exact=True).click()
+    category_url = BASE + '/admin?section=categories'
+    expect(desktop).to_have_url(category_url)
+    button(desktop.get_by_role('row').filter(has_text=category_name), 'Редактировать').click()
+    dialog = desktop.get_by_role('dialog')
+    edited_category = category_name + ' обновлена'
+    dialog.locator('input[name=name]').fill(edited_category)
+    button(dialog, 'Сохранить').click()
+    expect_stayed(desktop, category_url)
+    expect(desktop.get_by_role('row').filter(has_text=edited_category)).to_be_visible()
+    desktop.goto(catalog)
+    expect(desktop.get_by_role('combobox', name='Категория', exact=True).locator(f'option[value="{slug}"]')).to_have_text(edited_category)
+    print('PASS desktop listing edit, catalog return, centralized category edit and keyboard focus', flush=True)
 
     mobile = moderator.new_page()
     mobile.on('pageerror', lambda error: errors.append(str(error)))
     mobile.goto(f'{BASE}/catalog?kind=BUY&q={TAG}')
     expect(mobile.get_by_role('heading', name=bid, exact=True)).to_be_visible()
-    detail_url = f'{BASE}/listings/{offer_id}'
     mobile.goto(detail_url)
     set_listing_status(mobile, detail_url, 'FROZEN')
     expect(mobile.get_by_text('Заморожено', exact=True)).to_be_visible()
     assert buyer.request.get(f'{BASE}/api/v1/listings/{offer_id}').status == 404
     set_listing_status(mobile, detail_url, 'ACTIVE')
     expect(mobile.get_by_text('Заморожено', exact=True)).to_have_count(0)
-    dialog = dialog_for(mobile, 'Модерировать профиль')
+    dialog = moderation_dialog(mobile, 'Модерировать профиль')
     button(dialog, 'Редактировать').click()
     city = f'Тестовый город {TAG}'
     dialog.get_by_label('Город').fill(city)
     button(dialog, 'Сохранить').click()
     expect_stayed(mobile, detail_url)
     expect(mobile.locator('.profile-inline').get_by_text(city, exact=False)).to_be_visible()
-    dialog = dialog_for(mobile, 'Модерировать профиль')
+    dialog = moderation_dialog(mobile, 'Модерировать профиль')
     button(dialog, 'Отзывы о профиле').click()
     expect(dialog.get_by_text(review, exact=False)).to_be_visible()
     button(dialog, 'К действиям профиля').click()
@@ -168,14 +184,23 @@ def run(browser):
 
     info_url = BASE + '/info/rules'
     mobile.goto(info_url)
-    dialog = dialog_for(mobile, 'Редактировать страницу')
+    expect(button(mobile, 'Редактировать страницу')).to_have_count(0)
+    expect(button(mobile, 'Редактировать язык интерфейса')).to_have_count(0)
+    content_url = BASE + '/admin?section=content'
+    mobile.goto(content_url)
+    button(mobile.get_by_role('row').filter(has_text='/info/rules'), 'Редактировать').click()
+    dialog = mobile.get_by_role('dialog')
     new_title = f'Правила площадки {TAG}'
     dialog.locator('input[name="title.ru"]').fill(new_title)
     button(dialog, 'Сохранить').click()
-    expect_stayed(mobile, info_url)
+    expect_stayed(mobile, content_url)
+    locales_url = BASE + '/admin?section=locales'
+    mobile.goto(locales_url)
+    button(mobile.get_by_role('row').filter(has_text='Русский'), 'Редактировать').click()
+    mobile.keyboard.press('Escape')
+    expect_stayed(mobile, locales_url)
+    mobile.goto(info_url)
     expect(mobile.get_by_role('heading', name=new_title, exact=True)).to_be_visible()
-    dialog_for(mobile, 'Редактировать язык интерфейса').press('Escape')
-    expect_stayed(mobile, info_url)
     guest_page = guest.new_page()
     guest_page.goto(info_url)
     expect(guest_page.get_by_role('heading', name=new_title, exact=True)).to_be_visible()
@@ -183,10 +208,9 @@ def run(browser):
     buyer_page = buyer.new_page()
     buyer_page.goto(detail_url)
     expect(buyer_page.get_by_role('heading', name=edited_offer, exact=True)).to_be_visible()
-    expect(button(buyer_page, 'Модерировать объявление')).to_have_count(0)
-    expect(button(buyer_page, 'Модерировать профиль')).to_have_count(0)
+    expect(button(buyer_page, 'Действия модерации')).to_have_count(0)
     assert not errors, errors
-    print('PASS in-place content and locale dialogs, staff-only controls and ordinary visibility', flush=True)
+    print('PASS centralized content and locale editors, staff-only controls and public reading', flush=True)
 
 
 if __name__ == '__main__':

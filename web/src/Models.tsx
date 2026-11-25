@@ -66,13 +66,13 @@ function modelPath(category: string, q = '') {
   return `/models?${query}`;
 }
 
-function ModelPicker({ families, value, id, onChange }: {
-  families: ModelFamily[]; value: string; id?: string; onChange: (value: string, model?: HardwareModel) => void;
+function ModelPicker({ families, value, id, emptyLabel = 'Без модели', onChange }: {
+  families: ModelFamily[]; value: string; id?: string; emptyLabel?: string; onChange: (value: string, model?: HardwareModel) => void;
 }) {
   const { t, locale } = useI18n();
   const find = (id: string) => families.flatMap(group => group.models).find(model => model.id === id);
   return <select id={id} value={value} onChange={event => onChange(event.target.value, find(event.target.value))}>
-    <option value="">{t('Без модели')}</option>
+    <option value="">{t(emptyLabel)}</option>
     {value && !find(value) && <option value={value}>{value}</option>}
     {families.map(family => <optgroup key={family.key} label={t(family.label)}>
       {family.models.map(model => <option key={model.id} value={model.id}>
@@ -192,7 +192,7 @@ export function CatalogModelFilter({ categorySlug, modelId, withAnalogs, onChang
   const families = (models.data?.families ?? []).map(group => ({ ...group, models: group.models.filter(model => model.status === 'ACTIVE') })).filter(group => group.models.length);
   return <div className="model-fields">
     <Field label={t('Поиск модели')}><input type="search" maxLength={200} value={filter} onChange={event => setFilter(event.target.value)} /></Field>
-    <Field label={t('Модель')}><ModelPicker value={modelId} families={families} onChange={id => onChange(id, Boolean(id) && withAnalogs)} /></Field>
+    <Field label={t('Модель')}><ModelPicker value={modelId} families={families} emptyLabel="Все модели" onChange={id => onChange(id, Boolean(id) && withAnalogs)} /></Field>
     <label className="checkbox-label"><input type="checkbox" checked={withAnalogs} disabled={!modelId}
       onChange={event => onChange(modelId, event.target.checked)} />{t('С аналогами')}</label>
   </div>;

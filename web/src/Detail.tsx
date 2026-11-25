@@ -6,7 +6,7 @@ import { ActualityBadges } from './ActualityWidgets';
 import { ListingExchangeBadges } from './ListingExchangeBadges';
 import { ListingProof, PaymentRisk } from './Trust';
 import { useExchange } from './Exchange';
-import { ContextModeration } from './AdminPage';
+import { ListingModeration } from './AdminPage';
 import { ListingVisual } from './Catalog';
 import { StartChatButton } from './ChatPage';
 import { useI18n } from './i18n';
@@ -17,6 +17,7 @@ import { Icon, Notice, Spinner } from './ui';
 
 const nonPublicStatus: Record<string, string> = {
   ARCHIVED: 'В архиве',
+  HIDDEN: 'Скрыто',
   FROZEN: 'Заморожено',
   BANNED: 'Заблокировано',
 };
@@ -27,7 +28,6 @@ export function ListingDetail({ user }: { user: User | null }) {
   const returnTo: unknown = useLocation().state?.returnTo;
   const { t, locale } = useI18n();
   const [revision, setRevision] = useState(0);
-  const [updatedCatalogPath, setUpdatedCatalogPath] = useState<{ source: string; path: string }>();
   const [listingState, setListingState] = useState<{ source: string; listing?: Listing; error?: string }>();
   const [categoryState, setCategoryState] = useState<{ path: string; categories: Category[] }>();
   const authenticated = Boolean(user?.emailVerified && !user.mustChangePassword);
@@ -63,19 +63,7 @@ export function ListingDetail({ user }: { user: User | null }) {
     setRevision(value => value + 1);
   }
   const returnPath = typeof returnTo === 'string' ? returnTo.split(/[?#]/, 1)[0] : '';
-  const catalogPath = updatedCatalogPath?.source === source ? updatedCatalogPath.path
-    : typeof returnTo === 'string' && (returnPath === '/' || returnPath === '/catalog') ? returnTo : '/catalog';
-
-  function categorySaved(previousSlug: string, result?: unknown) {
-    if (result && typeof result === 'object' && 'slug' in result && typeof result.slug === 'string' && result.slug !== previousSlug) {
-      const target = new URL(catalogPath, window.location.origin);
-      if (target.searchParams.get('category') === previousSlug) {
-        target.searchParams.set('category', result.slug);
-        setUpdatedCatalogPath({ source, path: target.pathname + target.search + target.hash });
-      }
-    }
-    reloadAfterModeration();
-  }
+  const catalogPath = typeof returnTo === 'string' && (returnPath === '/' || returnPath === '/catalog') ? returnTo : '/catalog';
   const back = <Link className="back-link" to={catalogPath}><Icon name="chevron-left" size={16} /> {t('К каталогу')}</Link>;
   if (user?.mustChangePassword) return <div className="container detail-page">{back}<div className="panel locked-panel">
     <span className="lock-icon"><Icon name="lock-keyhole" size={25} /></span>
@@ -121,10 +109,8 @@ export function ListingDetail({ user }: { user: User | null }) {
       <h1>{listing.title}</h1>
       <ListingExchangeBadges listing={listing} /><ActualityBadges listing={listing} />
       {staff && <div className="contextual-actions">
-        <ContextModeration user={user} target={{ type: 'listing', id: listing.id, title: listing.title }}
-          label={t('Модерировать объявление')} onSaved={reloadAfterModeration} />
-        {category && <ContextModeration user={user} target={{ type: 'category', id: category.id, title: categoryName(category, locale) }}
-          label={t('Редактировать категорию')} onSaved={result => categorySaved(category.slug, result)} />}
+        <ListingModeration user={user} listing={{ id: listing.id, title: listing.title }}
+          owner={listing.owner.id ? { id: listing.owner.id, title: ownerName } : undefined} onSaved={reloadAfterModeration} />
         {Object.hasOwn(nonPublicStatus, listing.status) && <span className="contextual-status">{t(nonPublicStatus[listing.status])}</span>}
       </div>}
     </div>
@@ -150,8 +136,6 @@ export function ListingDetail({ user }: { user: User | null }) {
         </div></div>
         <div className="reputation"><Icon name="star" size={16} /> {listing.owner.ratingCount > 0 && listing.owner.rating != null ?
           <span>{new Intl.NumberFormat(locale, {maximumFractionDigits:1}).format(listing.owner.rating)} · {t('Оценок: {count}', {count:listing.owner.ratingCount})}</span> : <span>{t('Пока без оценок')}</span>}</div>
-        {staff && listing.owner.id && <ContextModeration user={user} target={{ type: 'user', id: listing.owner.id, title: ownerName }}
-          label={t('Модерировать профиль')} onSaved={reloadAfterModeration} />}
         {myListing && ['ACTIVE','ARCHIVED'].includes(listing.status) && <Link className="button button-secondary" to={`/listings/${listing.id}/edit`}>{t('Редактировать')}</Link>}
         {compatible && listing.status === 'ACTIVE' && (companyOnly
           ? <p className="muted">{t('Автор принимает обращения только от компаний.')}</p>

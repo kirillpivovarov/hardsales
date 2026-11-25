@@ -147,16 +147,21 @@ input[type=checkbox], input[type=radio] { width: 17px; min-height: 17px; flex: n
 .category-tile:hover, .category-tile.selected { border-color: #84974d; background: #282f20; }
 .category-icon { width: 38px; height: 38px; display: grid; place-items: center; color: var(--accent); background: #333c22; border-radius: 8px; flex: none; }
 .catalog { scroll-margin-top: 18px; }
-.catalog-heading { margin-bottom: 19px; }
+.catalog-heading { margin-bottom: 19px; flex-wrap: wrap; }
+.catalog-heading :is(h1, h2), .catalog-heading-actions { min-width: 0; overflow-wrap: anywhere; }
+.catalog-heading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 16px; }
 .count-meta { color: var(--muted); font-family: var(--mono); font-size: 13px; }
-.catalog-layout { display: grid; grid-template-columns: 234px minmax(0,1fr); align-items: start; gap: 23px; }
+.catalog-layout { display: grid; grid-template-columns: clamp(234px, 24vw, 268px) minmax(0,1fr); align-items: start; gap: 23px; }
 .catalog-main { min-width: 0; }
-.filters { padding: 17px 15px 14px; display: grid; gap: 13px; background: var(--surface); }
+.filters { min-width: 0; padding: 17px 15px 14px; display: grid; grid-template-columns: minmax(0,1fr); gap: 13px; background: var(--surface); }
 .filters-heading { display: flex; justify-content: space-between; align-items: center; gap: 7px; }
 .filters-heading strong { display: flex; align-items: center; gap: 8px; }
 .filters-heading strong svg { color: var(--accent); }
 .filters-heading .text-link { font-size: 13px; }
-.filters select, .filters input { font-size: 14px; min-height: 40px; }
+.filters .field { grid-template-columns: minmax(0,1fr); }
+.filters label { overflow-wrap: anywhere; }
+.filters select, .filters input { max-width: 100%; font-size: 14px; min-height: 40px; }
+.filters .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .more-filters { min-width: 0; border-top: 1px solid var(--line); padding-top: 10px; }
 .more-filters summary { display: flex; justify-content: space-between; font-size: 14px; font-weight: 750; color: var(--muted); list-style: none; padding: 5px 0; }
 .more-filters summary::-webkit-details-marker { display: none; }
@@ -166,7 +171,10 @@ input[type=checkbox], input[type=radio] { width: 17px; min-height: 17px; flex: n
 .checkbox-label { display: flex; align-items: flex-start; gap: 8px; font-size: 14px; }
 .checkbox-label input { min-height: 17px; }
 .mobile-filters.button { display: none; }
-.catalog-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 13px; margin-bottom: 13px; }
+.catalog-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 13px; margin-bottom: 13px; }
+.catalog-sort, .catalog-toolbar .segmented { min-width: 0; max-width: 100%; }
+.catalog-toolbar .segmented { flex-wrap: wrap; }
+.catalog-toolbar .segmented :is(button, a) { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .catalog-sort select { padding-block: 8px; font-size: 14px; background-color: var(--surface); }
 .segmented { display: inline-flex; align-items: stretch; gap: 4px; padding: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
 .segmented :is(button, a) { min-height: 35px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 6px 14px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); white-space: nowrap; font-size: 14px; font-weight: 800; }
@@ -290,7 +298,8 @@ input[type=checkbox], input[type=radio] { width: 17px; min-height: 17px; flex: n
   .category-tile { min-height: 65px; flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px; font-size: 13px; }
   .category-icon { width: 29px; height: 29px; border-radius: 6px; }
   .category-icon svg { width: 19px; height: 19px; }
-  .catalog-toolbar { gap: 6px; flex-wrap: wrap; }
+  .filters.filters-open { grid-template-columns: minmax(0,1fr); }
+  .catalog-toolbar { gap: 6px; }
   .segmented { gap: 2px; }
   .segmented :is(button, a) { padding-inline: 8px; font-size: 13px; }
   .catalog-sort select { font-size: 13px; padding-left: 7px; }
