@@ -1,9 +1,11 @@
 import { lazy, Suspense, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { api, isStaff, type User } from './api';
+import { api, ApiError, isStaff, type User } from './api';
 import { useI18n } from './i18n';
 import { CountrySelect } from './CountrySelect';
 import { Button, Field, Notice } from './ui';
+import { ConsentChoices } from './Consent';
+import { TelegramProfile } from './Telegram';
 import './workflows.css';
 
 const RegistrationCaptcha = lazy(() => import('./RegistrationCaptcha'));
@@ -50,6 +52,10 @@ function returnPath(search: URLSearchParams) {
 
 export function authDestination(user: User, search: string | URLSearchParams) {
   if (user.mustChangePassword) return '/account';
+  if (user.pdConsentRequired) {
+    const next = returnPath(new URLSearchParams(search));
+    return next ? '/consent?next=' + encodeURIComponent(next) : '/consent';
+  }
   if (user.onboardingState === 'REQUIRED') return '/onboarding';
   return returnPath(new URLSearchParams(search)) ?? (isStaff(user) ? '/admin' : '/catalog');
 }
@@ -58,22 +64,31 @@ export function AuthPage({
   mode,
   onUser,
   registrationMode = 'OPEN',
+  pdPolicyVersion,
+  pdRegistrationAvailable = true,
 }: {
   mode: 'login' | 'register';
   onUser: (user: User) => void;
   registrationMode?: 'OPEN' | 'INVITE';
+  pdPolicyVersion?: string;
+  pdRegistrationAvailable?: boolean;
 }) {
-  return <AuthForm key={mode} mode={mode} onUser={onUser} registrationMode={registrationMode} />;
+  return <AuthForm key={mode} mode={mode} onUser={onUser} registrationMode={registrationMode}
+    pdPolicyVersion={pdPolicyVersion} pdRegistrationAvailable={pdRegistrationAvailable} />;
 }
 
 function AuthForm({
   mode,
   onUser,
   registrationMode,
+  pdPolicyVersion,
+  pdRegistrationAvailable,
 }: {
   mode: 'login' | 'register';
   onUser: (user: User) => void;
   registrationMode: 'OPEN' | 'INVITE';
+  pdPolicyVersion?: string;
+  pdRegistrationAvailable: boolean;
 }) {
   const { t } = useI18n();
   const navigate = useNavigate();
@@ -89,6 +104,7 @@ function AuthForm({
   const [draft, setDraft] = useState<RegistrationDraft>();
   const [captchaToken, setCaptchaToken] = useState<string>();
   const [captchaAttempt, setCaptchaAttempt] = useState(0);
+  const [pdConsent, setPdConsent] = useState(false);
   const isRegistering = mode === 'register';
   const invitationFromLink = search.get('invite');
   const requiresInvite = registrationMode === 'INVITE';
@@ -112,7 +128,7 @@ function AuthForm({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || (isRegistering && !challenge && !captchaToken)) return;
+    if (busy || (isRegistering && !challenge && (!captchaToken || !pdConsent || !pdPolicyVersion || !pdRegistrationAvailable))) return;
     setError('');
     setNotice('');
     const form = new FormData(event.currentTarget);
@@ -141,7 +157,10 @@ function AuthForm({
         };
         const result = await api<Challenge>('/auth/register', {
           method: 'POST',
-          body: { ...fields, password: passwordOf(form), captchaToken },
+          body: {
+            ...fields, password: passwordOf(form), captchaToken, pdConsent, pdPolicyVersion,
+            infoEmailConsent: form.has('infoEmailConsent'),
+          },
         });
         setDraft(fields);
         storeChallenge(result);
@@ -260,13 +279,18 @@ function AuthForm({
               <Field label={t('Пароль')} hint={t('Не менее 12 символов.')}>
                 <input name="password" type="password" autoComplete="new-password" minLength={12} maxLength={128} required />
               </Field>
+              <ConsentChoices accepted={pdConsent} onAccept={setPdConsent} />
               <div className="workflow-span">
                 <Suspense fallback={<p role="status">{t('Загружаем проверку CAPTCHA…')}</p>}>
                   <RegistrationCaptcha key={captchaAttempt} onToken={setCaptchaToken} />
                 </Suspense>
               </div>
               {error && <div className="workflow-span"><Notice tone="error">{t(error)}</Notice></div>}
-              <div className="workflow-span"><Button type="submit" disabled={busy || !captchaToken}>{t('Получить код')}</Button></div>
+              {!pdRegistrationAvailable && <div className="workflow-span"><Notice>{t('Регистрация временно недоступна: политика обработки данных ещё не опубликована')}</Notice></div>}
+              <div className="workflow-span workflow-stack">
+                <Button type="submit" disabled={busy || !captchaToken || !pdConsent || !pdPolicyVersion || !pdRegistrationAvailable}>{t('Получить код')}</Button>
+                <p className="muted">{t('Без согласия на обработку данных регистрация невозможна.')}</p>
+              </div>
             </>
           ) : (
             <>
@@ -306,13 +330,16 @@ export function AccountPage({ user, onUser, onboardingAvailable = false, childre
   const { t } = useI18n();
   const navigate = useNavigate();
   const [profileFeedback, setProfileFeedback] = useState({ error: '', notice: '', busy: false });
+  const [profileFieldError, setProfileFieldError] = useState<ApiError>();
   const [passwordFeedback, setPasswordFeedback] = useState({ error: '', notice: '', busy: false });
   const isAdmin = user.role === 'ADMIN';
   const staff = isStaff(user);
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const element = event.currentTarget;
+    const form = new FormData(element);
+    setProfileFieldError(undefined);
     setProfileFeedback({ busy: true, error: '', notice: '' });
     try {
       const result = await api<{ user: User }>('/auth/profile', {
@@ -329,7 +356,14 @@ export function AccountPage({ user, onUser, onboardingAvailable = false, childre
       onUser(result.user);
       setProfileFeedback({ busy: false, error: '', notice: 'Профиль обновлён.' });
     } catch (cause) {
-      setProfileFeedback({ busy: false, error: cause instanceof Error ? cause.message : 'Не удалось обновить профиль.', notice: '' });
+      if (cause instanceof ApiError && cause.code === 'CONTACT_IN_FIELD' && cause.field) {
+        setProfileFieldError(cause);
+        const field = element.elements.namedItem(cause.field);
+        if (field instanceof HTMLElement) field.focus();
+        setProfileFeedback({ busy: false, error: '', notice: '' });
+      } else {
+        setProfileFeedback({ busy: false, error: cause instanceof Error ? cause.message : 'Не удалось обновить профиль.', notice: '' });
+      }
     }
   }
 
@@ -374,15 +408,17 @@ export function AccountPage({ user, onUser, onboardingAvailable = false, childre
           <section className="panel workflow-section" aria-labelledby="profile-title">
             <h2 id="profile-title">{t('Профиль')}</h2>
             <form className="form-grid workflow-form" onSubmit={saveProfile} aria-busy={profileFeedback.busy}>
-              <Field label={t('Отображаемое имя')}>
-                <input name="displayName" defaultValue={user.displayName} minLength={2} maxLength={80} required />
+              <Field label={t('Отображаемое имя')} hint={profileFieldError?.field === 'displayName' &&
+                <span role="alert" className="field-error">{t(profileFieldError.message)}</span>}>
+                <input name="displayName" aria-invalid={profileFieldError?.field === 'displayName'} defaultValue={user.displayName} minLength={2} maxLength={80} required />
               </Field>
               <Field label={t('Электронная почта')}>
                 <input type="email" readOnly value={user.email} />
               </Field>
               <CountrySelect label={t('Страна')} name="country" autoComplete="country" defaultValue={user.country} required />
-              <Field label={t('Город')}>
-                <input name="city" autoComplete="address-level2" defaultValue={user.city} minLength={2} maxLength={80} required />
+              <Field label={t('Город')} hint={profileFieldError?.field === 'city' &&
+                <span role="alert" className="field-error">{t(profileFieldError.message)}</span>}>
+                <input name="city" aria-invalid={profileFieldError?.field === 'city'} autoComplete="address-level2" defaultValue={user.city} minLength={2} maxLength={80} required />
               </Field>
               {user.participantType === 'COMPANY' && (
                 <Field label={t('Название компании')}>
@@ -392,6 +428,7 @@ export function AccountPage({ user, onUser, onboardingAvailable = false, childre
               <Field label={t('Имя пользователя в Telegram')} hint={t('Контакт открывается в чате по взаимному согласию. После смены имени пользователя нужно обменяться контактами заново.')}>
                 <input name="telegram" defaultValue={user.telegram ?? ''} pattern={telegramRules} minLength={5} maxLength={33} required />
               </Field>
+              <TelegramProfile />
               <label className="workflow-span workflow-checkbox">
                 <input type="checkbox" name="notifyEmail" defaultChecked={user.notifyEmail ?? true} />
                 {t('Получать уведомления по электронной почте')}

@@ -10,7 +10,7 @@ type ExchangeJob = {
   name: string;
   lock: number;
   slot?: (clock: ExchangeClock) => string | null;
-  run: (client: PoolClient, clock: ExchangeClock) => Promise<JobResult>;
+  run: (client: PoolClient, clock: ExchangeClock, slot?: string) => Promise<JobResult>;
   enabled?: () => Promise<boolean>;
   maxAttempts?: number;
   minRetryMs?: number;
@@ -37,6 +37,11 @@ export class ExchangeJobs implements OnApplicationBootstrap, OnApplicationShutdo
       await client.query("DELETE FROM job_runs WHERE started_at < now() - interval '90 days'");
       await client.query("DELETE FROM action_tokens WHERE expires_at < now() - interval '30 days'");
       await client.query("DELETE FROM exchange_email_outbox WHERE status <> 'PENDING' AND created_at < now() - interval '90 days'");
+      await client.query("UPDATE data_requests SET export_content=NULL WHERE export_content IS NOT NULL AND export_expires_at <= now()");
+      await client.query('DELETE FROM telegram_dialogs WHERE expires_at <= now()');
+      await client.query("DELETE FROM telegram_updates WHERE received_at < now()-interval '7 days'");
+      await client.query("DELETE FROM telegram_delivery_recipient_limits WHERE sent_at < now()-interval '24 hours'");
+      await client.query("DELETE FROM telegram_delivery_rate_window WHERE sent_at < now()-interval '1 hour'");
     } });
     const tick = () => {
       if (this.closed || this.ticking) return;
@@ -126,7 +131,7 @@ export class ExchangeJobs implements OnApplicationBootstrap, OnApplicationShutdo
       await client.query('SAVEPOINT exchange_job');
       let result: Exclude<JobResult, void> = {};
       try {
-        result = (await job.run(client, clock)) ?? {};
+        result = (await job.run(client, clock, slot)) ?? {};
       } catch {
         await client.query('ROLLBACK TO SAVEPOINT exchange_job');
         result = { jobStatus: 'FAILED' };
@@ -140,7 +145,7 @@ export class ExchangeJobs implements OnApplicationBootstrap, OnApplicationShutdo
           retry_at=CASE WHEN $2='FAILED' THEN now()+$4::float8*interval '1 millisecond' END
         WHERE id=$1
       `, [entry.id, status, JSON.stringify(stats), Math.max(retry, job.minRetryMs ?? 60_000)]);
-      return { jobRunId: entry.id, status };
+      return { jobRunId: entry.id, status, ...stats };
     });
   }
 }

@@ -51,7 +51,7 @@
 }
 ```
 
-Первая позиция задаёт обложку. Пустой массив удаляет все фото. Обновление полей без `imageOrder` сохраняет фотографии. Для перестановки и удаления без новых файлов достаточно JSON. Некорректный файл или ссылка на чужое фото приводит к отклонению всего изменения. Превышение размера возвращает `413`, занятый обработчик может вернуть `503`. Поле карточки `images` возвращает упорядоченные `{id, url, width, height}`.
+Первая позиция задаёт обложку. Пустой массив удаляет все фото. Обновление полей без `imageOrder` сохраняет фотографии. Для перестановки и удаления без новых файлов достаточно JSON. При включённой защите контактов для новых фото требуется `data.imageContactAcknowledged: true`. Отсутствие подтверждения возвращает `400 PHOTO_CONTACT_CONFIRMATION_REQUIRED`. Некорректный файл или ссылка на чужое фото приводит к отклонению всего изменения. Превышение размера возвращает `413`, занятый обработчик может вернуть `503`. Поле карточки `images` возвращает упорядоченные `{id, url, width, height}`.
 
 ### Чаты и отзывы
 
@@ -60,7 +60,7 @@
 | `POST /chats`, `GET /chats` | Открывает диалог по `{listingId}` или возвращает диалоги участника. |
 | `GET /chats/:id` | Состояние диалога, партнёр и доступные действия. `telegram` содержит контакты при действующем согласии, `telegramChanged` содержит признаки изменения `mine` и `partner` после прежнего обмена. |
 | `GET /chats/:id/messages` | Порция истории по исключающей границе `before` или `after` и `limit` от 1 до 100. |
-| `POST /chats/:id/messages` | `{body}`. Возвращает сообщение и признак предупреждения при обнаружении контакта. |
+| `POST /chats/:id/messages` | `{body}`. При включённой защите контакты до согласия возвращают `422 CONTACT_BLOCKED` с `kinds`. Нейтральное сообщение сохраняется. При выключенной защите действует предупреждение. |
 | `PATCH /chats/:id/read` | `{messageId}` для маркера чтения. |
 | `PATCH /chats/:id/reveal` | `{action: "REQUEST"}` создаёт запрос на уровне пары. Для `ACCEPT` и `DECLINE` получатель передаёт `requestId` из поля `revealRequestId`. |
 | `POST /chats/:id/reviews` | `{rating, comment}` с оценкой от 1 до 5. |
@@ -83,7 +83,7 @@
 | `PATCH /admin/:entity/:id/status` | Изменение статуса профиля, объявления, отзыва или жалобы. Тело `{status, reason}`. |
 | `POST /admin/categories`, `PATCH /admin/categories/:id` | Создание и обновление категории. |
 | `PUT /admin/content/:key`, `PUT /admin/locales/:code` | Запись страницы или локали. |
-| `GET /admin/audit?actorRole=MODERATOR` | Журнал с фильтром по роли `ADMIN`, `MODERATOR` или `AGENT`. |
+| `GET /admin/audit?actorRole=MODERATOR` | Журнал с фильтром по роли `ADMIN`, `MODERATOR`, `AGENT`, `BUYER` или `SELLER`. |
 
 Для CLI и MCP есть выделенный HTTP-маршрут модерации `users` и `listings`. Установите `MODERATION_AGENT_TOKEN` длиной от 32 символов и передавайте его только интеграции. Для новой операции укажите уникальный `Idempotency-Key` длиной 8–128 символов из латинских букв, цифр, точки, дефиса или подчёркивания.
 
@@ -112,5 +112,14 @@ curl --fail-with-body --request PATCH \
 | Синхронизация | `GET /admin/catalog-sync/items`, `GET /admin/catalog-sync/sources`, `POST /admin/catalog-sync/run` |
 | Совпадения | `GET /matches`, `GET /matches/counts`, `GET /matches/:id`, `POST /matches/:id/chat`, `POST /matches/:id/decline`, `GET /admin/matches` |
 | Проверка и сделки | `GET /me/trust`, `GET\|POST /documents`, `GET /documents/:id/file`, `GET /payment-terms`, `GET /deals`, `GET /deals/:id`, `POST /deals/:id/status`, `GET /admin/verification` |
+| Контакты | Ошибка `400 CONTACT_IN_FIELD` с `field` и `kinds` в защищённых полях. `GET /admin/contact-blocks?userId=&from=&to=&page=` показывает блокировки администратору. |
+| Telegram | `GET /me/telegram`, `POST /me/telegram/link`, `DELETE /me/telegram`, `POST /telegram/webhook`, `GET /admin/telegram`, `POST /admin/telegram/users/:id/unlink`. Вебхук требует `X-Telegram-Bot-Api-Secret-Token`. |
+| Ручной запрос актуальности | `POST /admin/actuality/ask-now`, `POST /admin/actuality/remind-now`. Доступны администратору в деморежиме. |
+| Персональные данные | `POST /auth/consent`, `GET\|POST /me/data-requests`, `GET /me/data-requests/:id/export`, `GET /admin/data-requests`, `POST /admin/data-requests/:id/export\|delete\|reject`, `GET /admin/users/:id/consents`. |
+| Показатели пробы | `GET /admin/pilot-metrics?from=&to=`, `GET /admin/pilot-metrics.csv?from=&to=`. Агрегаты доступны модератору и администратору. `GET /admin/pilot-accounts` и изменение ориентиров доступны администратору. |
+| Дубли лотов | `GET /listings/:id/lot-members`, `GET /me/lot-requests`, `POST /me/lot-requests/:id`, `POST /listings/:id/duplicate-appeal`. Сотрудники используют `GET /admin/lot-groups`, `GET /admin/lot-groups/:id` и действия `principal-requests`, `shared-principal`, `resolve`, `dissolve`, `members/:listingId/restore` через `POST` под выбранной группой. |
+| Ручное сведение | `GET /admin/near-misses`, `POST /admin/near-misses/propose`, `POST\|DELETE /admin/near-misses/dismiss`. Доступны модератору и администратору. В совпадениях `source` содержит `SYSTEM` или `OPERATOR`. |
 
 Маршруты настройки и управления сотрудниками требуют сессии администратора. Ручная проверка в рамках полномочий сотрудника фиксируется в журнале. Код приглашения передаётся как `inviteCode` при регистрации. Для публичного каталога доступны фильтры `model`, `withAnalogs`, `representation`, `principalConfirmed`, `showAll` и сортировка `trust`. Служебные поля, контакты и файлы возвращаются по правам конкретного участника.
+
+Регистрация передаёт `pdConsent: true`, `pdPolicyVersion` из `GET /auth/me` и необязательное `infoEmailConsent`. При смене политики запись от имени участника возвращает `403 PD_CONSENT_REQUIRED`, пока он не примет текущую версию. Чтение и запросы по своим данным доступны. Архив выгрузки возвращается владельцу в формате gzip в течение семи дней.

@@ -7,6 +7,7 @@ import { ActualityBadges } from './ActualityWidgets';
 import { useExchange } from './Exchange';
 import { CatalogModelFilter } from './Models';
 import { ListingExchangeBadges } from './ListingExchangeBadges';
+import { LotAlternatives } from './LotGroups';
 import { useI18n } from './i18n';
 import { ListingPhoto } from './ListingImages';
 import { CountrySelect } from './CountrySelect';
@@ -303,7 +304,7 @@ function ListingCard({ listing, category, returnTo }: { listing: Listing; catego
   const place = listing.kind === 'SELL' && listing.originScope === 'ANY' ? t('Любая страна')
     : [listing.stockCity, listing.originCountry ? countryName(listing.originCountry, locale) : listing.destinationCountry ? countryName(listing.destinationCountry, locale) : listing.owner.city].filter(Boolean).join(', ');
   const price = listing.price == null ? t('По договорённости') : (listing.kind === 'BUY' ? t('До {price}', { price: formatMoney(listing.price, listing.currency, locale) }) : formatMoney(listing.price, listing.currency, locale));
-  return <Link className="listing-card" to={`/listings/${listing.id}`} state={{ returnTo }}>
+  const card = <Link className="listing-card" to={`/listings/${listing.id}`} state={{ returnTo }}>
     <ListingVisual listing={listing} category={category} />
     <div className="listing-card-body">
       <span className="listing-kicker">{listing.kind === 'BUY' ? t('Заявка на закупку') : listing.availability ? t(terms[listing.availability] ?? listing.availability) : t('Предложение')}</span>
@@ -315,4 +316,7 @@ function ListingCard({ listing, category, returnTo }: { listing: Listing; catego
       </div>
     </div>
   </Link>;
+  return listing.lotGroup ? <div className="lot-catalog-card">{card}
+    <LotAlternatives key={listing.lotGroup.id} listing={listing} returnTo={returnTo} />
+  </div> : card;
 }

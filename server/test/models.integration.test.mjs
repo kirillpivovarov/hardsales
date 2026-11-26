@@ -65,6 +65,9 @@ test('model aliases, private proposals and moderated PCI import', { skip: !local
 
     assert.equal((await models.suggest({ q: 'Н200 SXM' })).items[0].id, 'h200-sxm');
     assert.equal((await models.suggest({ q: 'H 200 NVL' })).items[0].id, 'h200-nvl');
+    const serverMatches = await models.browse(member, { category: 'servers', q: 'Н-200' });
+    const serverIds = serverMatches.families.flatMap(group => group.models.map(model => model.id));
+    assert.ok(['hgx-h200-8', 'hgx-h200-4', 'dgx-h200'].every(id => serverIds.includes(id)), serverIds);
     assert.ok((await models.analogs(member, 'hgx-h200-8')).group.some(model => model.id === 'dgx-h200'));
     const { model: proposed } = await models.proposal(member, { name: 'HGX QA NVL16', category: 'servers' });
     assert.equal(proposed.status, 'PENDING');

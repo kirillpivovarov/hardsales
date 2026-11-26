@@ -4,6 +4,7 @@ import {
 import type { PoolClient } from 'pg'
 import { isStaffRole, type Role, type StaffSession } from '../auth/auth.types'
 import { isPublicProfileText } from '../contact'
+import { ContactGuardService, hiddenContactMessage } from '../contact-guard/contact-guard.service'
 import { DatabaseService, type Queryable } from '../database/database.service'
 import { assertCompanyAlias } from '../exchange/disclosure-names'
 import { representationEnabled } from '../exchange/representation.rules'
@@ -18,7 +19,7 @@ import { actualityRequestedSql, categoryColumns } from './market.queries'
 
 const participantRoles = ['BUYER', 'SELLER'] as const
 const userRoles = [...participantRoles, 'ADMIN', 'MODERATOR'] as const
-const auditRoles = ['ADMIN', 'MODERATOR', 'AGENT'] as const
+const auditRoles = ['ADMIN', 'MODERATOR', 'AGENT', 'BUYER', 'SELLER'] as const
 const participantRow = "u.role IN ('BUYER', 'SELLER')"
 
 function userColumns(restrictStaffContacts = false) {
@@ -46,11 +47,11 @@ const reviewColumns = `
 `
 const reviewJoins = 'FROM reviews r JOIN users a ON a.id = r.author_id JOIN users s ON s.id = r.subject_id'
 const reportColumns = `
-  r.id, r.chat_id AS "chatId", r.reason, r.scope, r.details, r.status, r.resolution, r.created_at AS "createdAt",
-  jsonb_build_object('id', a.id, 'nickname', a.display_name) AS reporter,
+  r.id, r.chat_id AS "chatId", r.listing_id AS "listingId", r.reason, r.scope, r.details, r.status, r.resolution, r.created_at AS "createdAt",
+  CASE WHEN a.id IS NULL THEN NULL ELSE jsonb_build_object('id', a.id, 'nickname', a.display_name) END AS reporter,
   jsonb_build_object('id', s.id, 'nickname', s.display_name) AS subject
 `
-const reportJoins = 'FROM reports r JOIN users a ON a.id = r.reporter_id JOIN users s ON s.id = r.subject_id'
+const reportJoins = 'FROM reports r LEFT JOIN users a ON a.id = r.reporter_id JOIN users s ON s.id = r.subject_id'
 
 const statusTables = {
   users: { choices: accountStatuses, table: 'users' },
@@ -71,6 +72,7 @@ export class AdminService {
   constructor(
     private readonly db: DatabaseService, private readonly catalog: CatalogService, private readonly media: ListingMediaService,
     private readonly trust: TrustService,
+    private readonly contactGuard: ContactGuardService,
   ) {}
 
   users(actor: StaffActor, query: Record<string, unknown>) {
@@ -112,6 +114,7 @@ export class AdminService {
     if (Object.keys(body).some(key => !editableUserFields.has(key))) {
       throw new BadRequestException('Запрос содержит поля, недоступные для редактирования профиля')
     }
+    await this.contactGuard.assertFields(undefined, 'PROFILE', { displayName: body.displayName, city: body.city })
     const updated = await this.staffTransaction(actor, async (client, currentActor) => {
       if (isStaffRole(await this.userRole(client, id))) {
         await this.audit(client, currentActor, 'users', id, 'edit-denied', 'Профиль сотрудника', null, null)
@@ -216,15 +219,17 @@ export class AdminService {
     const id = uuid(idInput)
     const { page, limit, offset } = pageParams(query, 50)
     return this.staffTransaction(actor, async (client, currentActor) => {
-      const { rows } = await client.query<{ chat_id: string }>('SELECT chat_id FROM reports WHERE id = $1', [id])
+      const { rows } = await client.query<{ chat_id: string | null }>('SELECT chat_id FROM reports WHERE id = $1', [id])
       if (!rows[0]) throw new NotFoundException('Жалоба не найдена')
       const chatId = rows[0].chat_id
+      const hide = actor.role !== 'ADMIN' && await this.contactGuard.enabled(client)
       const messages = await client.query(`
-        SELECT m.id::float8 AS id, m.body, m.sender_id AS "senderId", u.display_name AS "nickname",
+        SELECT m.id::float8 AS id, CASE WHEN $4 AND m.hidden_for_peer THEN $5 ELSE m.body END AS body,
+          m.sender_id AS "senderId", u.display_name AS "nickname",
           m.contact_warning AS "contactWarning", m.created_at AS "createdAt"
         FROM chat_messages m JOIN users u ON u.id = m.sender_id
         WHERE m.chat_id = $1 ORDER BY m.id DESC LIMIT $2 OFFSET $3
-      `, [chatId, limit, offset])
+      `, [chatId, limit, offset, hide, hiddenContactMessage])
       const count = await client.query<{ total: number }>('SELECT count(*)::int AS total FROM chat_messages WHERE chat_id = $1', [chatId])
       await this.audit(client, currentActor, 'reports', id, 'evidence-viewed', null, null, { page })
       return { items: messages.rows, total: count.rows[0].total, page, limit }
@@ -268,11 +273,15 @@ export class AdminService {
       }
       const listingOwner = entity === 'listings' ? await this.catalog.lockListingOwner(client, id) : undefined
       const { rows } = await client.query(`
-        SELECT status${entity === 'reports' ? ', resolution, reason AS report_reason, subject_id' : ''}
+        SELECT status${entity === 'reports' ? ', resolution, reason AS report_reason, subject_id' :
+          entity === 'listings' ? ', duplicate_of' : ''}
         FROM ${table} WHERE id = $1 FOR UPDATE
       `, [id])
       const before = rows[0]
       if (!before) throw new NotFoundException('Запись не найдена')
+      if (entity === 'listings' && status === 'ACTIVE' && before.duplicate_of) {
+        throw new ConflictException('Верните объявление через раздел «Дубли лотов».')
+      }
       if (before.status === 'BANNED' && status !== 'BANNED') {
         if (currentActor !== 'agent:moderation') {
           await this.audit(client, currentActor, entity, id, 'status-denied', reason, { status: before.status },

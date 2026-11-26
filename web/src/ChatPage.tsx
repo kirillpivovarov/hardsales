@@ -25,7 +25,7 @@ type Chat = {
     id: string;
     nickname: string;
     country: string;
-    city: string;
+    city: string | null;
     accountType: string;
     rating: number | null;
     ratingCount: number;
@@ -38,6 +38,7 @@ type Chat = {
   revealRequestedBy: string | null;
   revealRequestId: string | null;
   disclosureRulesRequired?: boolean;
+  contactsAllowed?: boolean;
   disclosureRulesVersion?: string | null;
   disclosure?: { id: string; number: string; kind: 'FIRST' | 'REPEAT' } | null;
   telegramChanged: { mine: boolean; partner: boolean } | null;
@@ -60,6 +61,8 @@ const MESSAGE_MAX_LENGTH = 4000;
 const REVIEW_MAX_LENGTH = 1000;
 const REPORT_MAX_LENGTH = 4000;
 const CONTACT_WARNING = 'Рекомендуем общаться по Telegram, раскрытому в чате. При мошенничестве мы можем заблокировать профиль. За общение по другим контактам отвечают собеседники. Жалобы на такую переписку не рассматриваем.';
+const CONTACT_POLICY = 'Телефоны, почта, ссылки и ники мессенджеров до взаимного согласия не отправляются.';
+const MOVE_NOTICE = 'Предложите обмен контактами в чате, чтобы площадка зафиксировала согласие обеих сторон.';
 
 function mergeMessages(previous: ChatMessage[], additions: ChatMessage[]) {
   const byId = new Map(previous.map((message) => [message.id, message]));
@@ -234,11 +237,14 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [actionError, setActionError] = useState('');
+  const [blocked, setBlocked] = useState<ApiError>();
+  const [fieldError, setFieldError] = useState<ApiError>();
   const [banner, setBanner] = useState('');
   const [pending, setPending] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const inboxChange = useRef(onInboxChange);
   const cursor = useRef<number | undefined>(undefined);
+  const contactPolicy = useRef<boolean | undefined>(undefined);
   const markedRead = useRef(0);
   const latestIncoming = useRef(0);
   const scroll = useRef<HTMLDivElement>(null);
@@ -272,15 +278,20 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
         const previousCursor = cursor.current;
         const query = new URLSearchParams({ limit: String(MESSAGE_PAGE_SIZE) });
         if (previousCursor !== undefined) query.set('after', String(previousCursor));
-        const [nextChat, nextMessages] = await Promise.all([
+        const [nextChat, recentMessages] = await Promise.all([
           api<Chat>(chatPath, { signal: controller.signal }),
           api<ChatMessage[]>(`${chatPath}/messages?${query}`, { signal: controller.signal }),
         ]);
+        const policyChanged = contactPolicy.current !== undefined && contactPolicy.current !== nextChat.disclosureRulesRequired;
+        const nextMessages = policyChanged
+          ? await api<ChatMessage[]>(`${chatPath}/messages?limit=${MESSAGE_PAGE_SIZE}`, { signal: controller.signal })
+          : recentMessages;
         if (controller.signal.aborted) return;
-        if (previousCursor === undefined) setOlderAvailable(nextMessages.length === MESSAGE_PAGE_SIZE);
+        contactPolicy.current = nextChat.disclosureRulesRequired;
+        if (policyChanged || previousCursor === undefined) setOlderAvailable(nextMessages.length === MESSAGE_PAGE_SIZE);
         cursor.current = nextMessages.at(-1)?.id ?? previousCursor ?? 0;
-        if (nextMessages.length) {
-          setMessages((previous) => mergeMessages(previous, nextMessages));
+        if (nextMessages.length || policyChanged) {
+          setMessages((previous) => policyChanged ? nextMessages : mergeMessages(previous, nextMessages));
           nextMessages.forEach((message) => {
             if (message.senderId !== userId) latestIncoming.current = Math.max(latestIncoming.current, message.id);
           });
@@ -333,11 +344,14 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
   async function action(work: () => Promise<void>) {
     setPending(true);
     setActionError('');
+    setFieldError(undefined);
     setBanner('');
     try {
       await work();
     } catch (cause) {
-      setActionError(errorMessage(cause, t));
+      if (cause instanceof ApiError && cause.code === 'CONTACT_BLOCKED') setBlocked(cause);
+      else if (cause instanceof ApiError && cause.code === 'CONTACT_IN_FIELD') setFieldError(cause);
+      else setActionError(errorMessage(cause, t));
     } finally {
       setRefresh((value) => value + 1);
       setPending(false);
@@ -348,6 +362,7 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
     event.preventDefault();
     const body = messageBody.trim();
     if (!body || pending) return;
+    setBlocked(undefined);
     void action(async () => {
       const sent = await api<ChatMessage>(`/chats/${id}/messages`, { method: 'POST', body: { body } });
       follow.current = true;
@@ -373,6 +388,7 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
   </section>;
 
   const isActive = chat.status === 'ACTIVE';
+  const guarded = chat.disclosureRulesRequired && chat.contactsAllowed === false;
   const currentTelegram = loadError ? null : chat.telegram;
   const mayReview = isActive && !chat.hasReview && (chat.canReview ?? (messages.some((message) => message.senderId === userId) && messages.some((message) => message.senderId !== userId)));
   const partnersPlace = [chat.partner.city, countryName(chat.partner.country, locale)].filter(Boolean).join(', ');
@@ -397,28 +413,30 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
         {chat.listing.status === 'ACTIVE' ? <Link to={`/listings/${chat.listing.id}`}>{chat.listing.title}</Link> : <span className="muted">{chat.listing.title}</span>}
       </div>
       <div className="chat-actions">
-        {mayReview && <Button variant="ghost" disabled={pending} aria-expanded={form === 'review'} onClick={() => { setActionError(''); setForm(form === 'review' ? null : 'review'); }}>{t('Оставить отзыв')}</Button>}
-        {!chat.hasReport && <Button variant="ghost" disabled={pending} aria-expanded={form === 'report'} onClick={() => { setActionError(''); setForm(form === 'report' ? null : 'report'); }}>{t('Пожаловаться')}</Button>}
+        {mayReview && <Button variant="ghost" disabled={pending} aria-expanded={form === 'review'} onClick={() => { setActionError(''); setFieldError(undefined); setForm(form === 'review' ? null : 'review'); }}>{t('Оставить отзыв')}</Button>}
+        {!chat.hasReport && <Button variant="ghost" disabled={pending} aria-expanded={form === 'report'} onClick={() => { setActionError(''); setFieldError(undefined); setForm(form === 'report' ? null : 'report'); }}>{t('Пожаловаться')}</Button>}
       </div>
     </header>
 
     <div className="chat-notices">
       {isActive && ['HIDDEN', 'ARCHIVED'].includes(chat.listing.status) && <Notice>{t('Объявление больше не показывается в каталоге. Вы можете продолжить переписку.')}</Notice>}
       {chat.telegramChanged && <TelegramChangeNotice change={chat.telegramChanged} />}
-      {!loadError && <TelegramPanel chat={chat} userId={userId} pending={pending} reveal={reveal} />}
+      {!loadError && <div id="chat-telegram" tabIndex={-1}><TelegramPanel chat={chat} userId={userId} pending={pending} reveal={reveal} /></div>}
       {!isActive && <Notice>{t('Переписка ограничена. Новые сообщения и обмен Telegram недоступны.')}</Notice>}
       {banner && <Notice tone="success">{banner}</Notice>}
       {loadError && <Notice tone="error">{loadError}</Notice>}
       {actionError && <Notice tone="error">{actionError}</Notice>}
     </div>
 
-    {form === 'review' && mayReview && <ReviewForm pending={pending} close={() => setForm(null)} submit={(rating, comment) => void action(async () => {
+    {form === 'review' && mayReview && <ReviewForm pending={pending} error={fieldError?.field === 'comment' ? t(fieldError.message) : undefined}
+      close={() => setForm(null)} submit={(rating, comment) => void action(async () => {
       await api(`/chats/${id}/reviews`, { method: 'POST', body: { rating, comment } });
       setChat((previous) => previous && { ...previous, hasReview: true });
       setForm(null);
       setBanner(t('Отзыв отправлен.'));
     })} />}
-    {form === 'report' && !chat.hasReport && <ReportForm pending={pending} close={() => setForm(null)} allowTelegram={chat.canReportTelegram ?? Boolean(currentTelegram)} submit={(reason, scope, details) => void action(async () => {
+    {form === 'report' && !chat.hasReport && <ReportForm pending={pending} error={fieldError?.field === 'details' ? t(fieldError.message) : undefined}
+      close={() => setForm(null)} allowTelegram={chat.canReportTelegram ?? Boolean(currentTelegram)} submit={(reason, scope, details) => void action(async () => {
       await api(`/chats/${id}/reports`, { method: 'POST', body: { reason, scope, details } });
       setChat((previous) => previous && { ...previous, hasReport: true });
       setForm(null);
@@ -440,17 +458,29 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
               <p>{message.body}</p>
               <time dateTime={message.createdAt} title={messageTime(message.createdAt, locale, true)}>{messageTime(message.createdAt, locale)}</time>
             </div>
-            {message.contactWarning && <p className="chat-contact-warning"><Icon name="triangle-alert" size={17} /> <span>{t(CONTACT_WARNING)}</span></p>}
+            {message.contactWarning && <p className="chat-contact-warning"><Icon name="triangle-alert" size={17} /> <span>{t(chat.disclosureRulesRequired ? MOVE_NOTICE : CONTACT_WARNING)}</span></p>}
           </li>;
         })}
       </ol>
     </div>
 
     {isActive && <form className="chat-composer" onSubmit={send}>
-      {hasUnverifiedContact(messageBody, currentTelegram) && <div className="chat-composer-warning"><Notice>{t(CONTACT_WARNING)}</Notice></div>}
+      {guarded && <p id="chat-contact-policy" className="chat-composer-warning muted">{t(CONTACT_POLICY)}</p>}
+      {!chat.disclosureRulesRequired && hasUnverifiedContact(messageBody, currentTelegram) && <div className="chat-composer-warning"><Notice>{t(CONTACT_WARNING)}</Notice></div>}
       <label className="chat-sr-only" htmlFor="chat-message-input">{t('Сообщение')}</label>
-      <textarea id="chat-message-input" placeholder={t('Напишите сообщение…')} rows={2} value={messageBody} maxLength={MESSAGE_MAX_LENGTH} onChange={(event) => setMessageBody(event.target.value)} />
+      <textarea id="chat-message-input" placeholder={t('Напишите сообщение…')} rows={2} value={messageBody} maxLength={MESSAGE_MAX_LENGTH}
+        aria-describedby={guarded ? (blocked ? 'chat-contact-policy chat-contact-error' : 'chat-contact-policy') : undefined}
+        aria-invalid={guarded && Boolean(blocked)} onChange={event => { setMessageBody(event.target.value); setBlocked(undefined); }} />
       <Button type="submit" disabled={pending || !messageBody.trim()}><Icon name="send" size={17} /> {t('Отправить')}</Button>
+      {guarded && blocked && <div id="chat-contact-error" className="chat-composer-warning"><Notice tone="error">
+        <p>{t(blocked.message)}</p>
+        {blocked.warning && <p>{t('За последние сутки площадка остановила несколько попыток передать контакты.')}</p>}
+        {!loadError && <a href="#chat-telegram" className="text-link" onClick={event => {
+          event.preventDefault();
+          const panel = document.getElementById('chat-telegram');
+          (panel?.querySelector('input') ?? panel)?.focus();
+        }}>{t('Предложить обмен')}</a>}
+      </Notice></div>}
     </form>}
   </section>;
 }
@@ -518,7 +548,7 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
   </div>;
 }
 
-function ReviewForm({ pending, close, submit }: { pending: boolean; close: () => void; submit: (rating: number, comment?: string) => void }) {
+function ReviewForm({ pending, close, submit, error }: { pending: boolean; close: () => void; submit: (rating: number, comment?: string) => void; error?: string }) {
   const { t } = useI18n();
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState('');
@@ -535,8 +565,8 @@ function ReviewForm({ pending, close, submit }: { pending: boolean; close: () =>
         <span aria-hidden="true">{star <= rating ? '★' : '☆'}</span>
       </label>)}
     </fieldset>
-    <Field label={t('Комментарий (необязательно)')}>
-      <textarea rows={3} maxLength={REVIEW_MAX_LENGTH} value={comment} onChange={(event) => setComment(event.target.value)} />
+    <Field label={t('Комментарий (необязательно)')} hint={error && <span role="alert" className="field-error">{error}</span>}>
+      <textarea aria-invalid={Boolean(error)} rows={3} maxLength={REVIEW_MAX_LENGTH} value={comment} onChange={(event) => setComment(event.target.value)} />
     </Field>
     <div className="chat-form-actions">
       <Button type="button" variant="ghost" disabled={pending} onClick={close}>{t('Отмена')}</Button>
@@ -545,7 +575,7 @@ function ReviewForm({ pending, close, submit }: { pending: boolean; close: () =>
   </form>;
 }
 
-function ReportForm({ pending, close, allowTelegram, submit }: { pending: boolean; close: () => void; allowTelegram: boolean; submit: (reason: ReportReason, scope: ReportScope, details: string) => void }) {
+function ReportForm({ pending, close, allowTelegram, submit, error }: { pending: boolean; close: () => void; allowTelegram: boolean; submit: (reason: ReportReason, scope: ReportScope, details: string) => void; error?: string }) {
   const { t } = useI18n();
   const [reason, setReason] = useState<ReportReason | ''>('');
   const [scope, setScope] = useState<ReportScope>('ON_PLATFORM');
@@ -573,8 +603,8 @@ function ReportForm({ pending, close, allowTelegram, submit }: { pending: boolea
         </select>
       </Field>}
     </div>
-    <Field label={t('Что произошло')} hint={t('Не менее 10 символов')}>
-      <textarea rows={3} required minLength={10} maxLength={REPORT_MAX_LENGTH} value={details} onChange={(event) => setDetails(event.target.value)} />
+    <Field label={t('Что произошло')} hint={error ? <span role="alert" className="field-error">{error}</span> : t('Не менее 10 символов')}>
+      <textarea aria-invalid={Boolean(error)} rows={3} required minLength={10} maxLength={REPORT_MAX_LENGTH} value={details} onChange={(event) => setDetails(event.target.value)} />
     </Field>
     <div className="chat-form-actions">
       <Button type="button" variant="ghost" onClick={close} disabled={pending}>{t('Отмена')}</Button>

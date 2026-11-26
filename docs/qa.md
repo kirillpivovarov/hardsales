@@ -124,6 +124,46 @@ HWFORAI_TRUST_QA_URL=http://127.0.0.1:3100 python tests/trust_e2e.py
 
 `tests/exchange_dialogs_e2e.py` проверяет отзыв приглашения и работу с ценовыми ориентирами на настольном экране, просмотр записей раскрытия и подтверждение полномочий на телефоне. Используйте отдельный демостенд с начальным паролем администратора для каждого сценария, который меняет его.
 
+### Защита контактов, согласия и показатели
+
+Каждому серверному сценарию выделите свой одноразовый стенд или чистую базу. `QA_API` заканчивается на `/api/v1`, `QA_ORIGIN` — адрес сайта, `QA_DATABASE_URL` — строка подключения к тестовой базе. Тест Telegram запускает собственное приложение с имитацией Bot API на loopback. Для него нужен отдельный SMTP Mailpit и чистая база.
+
+```sh
+node --test server/test/contact-guard.test.mjs
+HWFORAI_CONTACT_TEST_URL="$QA_API" HWFORAI_CONTACT_TEST_DATABASE_URL="$QA_DATABASE_URL" \
+  node --test server/test/contact-guard.integration.test.mjs
+HWFORAI_PRIVACY_TEST_URL="$QA_API" DATABASE_URL="$QA_DATABASE_URL" MAILPIT_URL="$QA_MAILPIT" \
+  node --test server/test/privacy.integration.test.mjs
+HWFORAI_TELEGRAM_TEST_DATABASE_URL="$QA_DATABASE_URL" \
+  node --test server/test/telegram.integration.test.mjs
+HWFORAI_PILOT_TEST_DATABASE_URL="$QA_DATABASE_URL" \
+  node --test server/test/pilot.integration.test.mjs
+HWFORAI_LOTS_TEST_DATABASE_URL="$QA_DATABASE_URL" \
+  node --test server/test/lots.integration.test.mjs
+```
+
+Для браузерных сценариев используйте отдельные демостенды с Mailpit и стандартными учётными записями. Для проверок оператора и групп лотов подготовьте демо-функции закрытой биржи.
+
+```sh
+export HWFORAI_URL="$QA_ORIGIN" HWFORAI_TEST_URL="$QA_ORIGIN" HWFORAI_QA_BASE="$QA_ORIGIN"
+export HWFORAI_QA_MAILPIT_URL="$QA_MAILPIT"
+python tests/contact_guard_e2e.py
+python tests/privacy_e2e.py
+python tests/telegram_ui_e2e.py
+python tests/pilot_metrics_e2e.py
+python tests/operator_matching_e2e.py
+python tests/v2_workflow_e2e.py
+```
+
+Для групп лотов соберите сервер командой `npm --prefix server run build` и запустите локальный демостенд на отдельной базе с именем `hwforai_lots_ui_…` или `maxv_baseline_…`. Укажите ту же базу и адрес стенда. Тест создаёт временные сеансы, включает группировку и проверяет каталог, решение модератора и оспаривание дубля.
+
+```sh
+HWFORAI_URL="$QA_ORIGIN" HWFORAI_LOTS_TEST_DATABASE_URL="$QA_DATABASE_URL" \
+  python tests/lots_ui_e2e.py
+```
+
+На рабочем тестовом стенде `production.integration.test.mjs` проверяет блокировку регистрации до публикации тестовой политики, затем выставляет тестовую версию `1.0`. После него прогоните `tests/production_e2e.py` на той же базе и с параметрами созданного тестового модератора `HWFORAI_PRODUCTION_MODERATOR_USERNAME` и `HWFORAI_PRODUCTION_MODERATOR_PASSWORD`. Задайте эти параметры перед серверным тестом, чтобы браузер мог войти той же учётной записью.
+
 Браузерная матрица включает гостя, покупателя, прямого продавца, участника в режиме агента, администратора и модератора на мобильной, планшетной и настольной ширине. При изменении схемы проверяйте чистую базу и обновление копии предыдущей версии. Сверяйте данные и контрольные суммы уже опубликованных миграций.
 
 ### Каталог и модерация

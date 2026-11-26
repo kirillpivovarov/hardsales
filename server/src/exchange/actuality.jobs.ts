@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg'
 import { ExchangeActions } from './actions'
 import { ActualityService } from './actuality.service'
 import { ExchangeJobs } from './jobs'
-import { ExchangeNotifications } from './notifications'
+import { ExchangeNotifications, type NotificationAction } from './notifications'
 import { TrustService } from './trust.service'
 
 const sweepLimit = 500
@@ -28,7 +28,6 @@ type Due = {
   hidden_at: Date | null
   hidden_reason: string | null
 }
-type Action = { label: string; token?: string; href?: string; action: string }
 
 @Injectable()
 export class ActualityJobs implements OnModuleInit {
@@ -45,17 +44,17 @@ export class ActualityJobs implements OnModuleInit {
     })
     this.jobs.register({
       name: 'actuality.ask', lock: 10, enabled: () => this.actuality.enabled(), slot: clock => clock.hour >= 10 ? clock.day : null,
-      run: (client, clock) => this.ask(client, clock),
+      run: (client, clock, slot) => this.ask(client, clock, slot?.startsWith('manual:')),
     })
     this.jobs.register({
       name: 'actuality.remind', lock: 10, enabled: () => this.actuality.enabled(), slot: clock => clock.hour >= 16 ? clock.day : null,
-      run: (client, clock) => this.remind(client, clock),
+      run: (client, clock, slot) => this.remind(client, clock, slot?.startsWith('manual:')),
     })
   }
 
-  async ask(client: PoolClient, clock: Clock) {
+  async ask(client: PoolClient, clock: Clock, manual = false) {
     if (!await this.actuality.enabled(client)) return { jobStatus: 'SKIPPED' as const, reason: 'disabled' }
-    if (clock.hour >= 22) return { jobStatus: 'SKIPPED' as const, reason: 'late' }
+    if (!manual && clock.hour >= 22) return { jobStatus: 'SKIPPED' as const, reason: 'late' }
     const { rows: owners } = await client.query<{ id: string }>(`
       SELECT DISTINCT u.id FROM users u JOIN listings l ON l.owner_id = u.id
       WHERE u.status = 'ACTIVE' AND u.email_verified_at IS NOT NULL AND u.actuality_suspended_at IS NULL
@@ -86,25 +85,27 @@ export class ActualityJobs implements OnModuleInit {
         RETURNING l.id, l.title, l.kind, l.quantity, l.price, l.currency, l.asked_at, l.expires_at
       `, [ownerId, clock.day, clock.now])
       if (!rows.length) continue
-      await this.notifyQuestions(client, ownerId, rows, clock, false)
+      await this.notifyQuestions(client, ownerId, rows, clock, 'ask', manual)
       asked += rows.length
       notified++
     }
     return { asked, notified }
   }
 
-  async remind(client: PoolClient, clock: Clock) {
+  async remind(client: PoolClient, clock: Clock, manual = false) {
     if (!await this.actuality.enabled(client)) return { jobStatus: 'SKIPPED' as const, reason: 'disabled' }
-    const { rows: [asked] } = await client.query(`
-      SELECT 1 FROM job_runs WHERE job = 'actuality.ask' AND slot = $1 AND status = 'DONE'
-    `, [clock.day])
-    if (!asked) return { jobStatus: 'SKIPPED' as const, reason: 'no-ask' }
+    if (!manual) {
+      const { rows: [asked] } = await client.query(`
+        SELECT 1 FROM job_runs WHERE job = 'actuality.ask' AND slot = $1 AND status = 'DONE'
+      `, [clock.day])
+      if (!asked) return { jobStatus: 'SKIPPED' as const, reason: 'no-ask' }
+    }
     const { rows: owners } = await client.query<{ id: string }>(`
       SELECT DISTINCT u.id FROM users u JOIN listings l ON l.owner_id = u.id
       WHERE u.status = 'ACTIVE' AND u.actuality_suspended_at IS NULL AND l.status = 'ACTIVE'
-        AND l.asked_at BETWEEN $1::timestamptz - interval '8 hours' AND $1 AND l.reminded_at IS NULL
+        AND l.asked_at BETWEEN $1::timestamptz - $2::int * interval '1 hour' AND $1 AND l.reminded_at IS NULL
       ORDER BY u.id
-    `, [clock.now])
+    `, [clock.now, manual ? 24 : 8])
     let reminded = 0
     let notified = 0
     for (const { id: ownerId } of owners) {
@@ -115,13 +116,13 @@ export class ActualityJobs implements OnModuleInit {
       const { rows } = await client.query<Question>(`
         UPDATE listings l SET reminded_at = $3
         FROM listing_actuality_asks a WHERE l.owner_id = $1 AND l.status = 'ACTIVE'
-          AND l.asked_at BETWEEN $3::timestamptz - interval '8 hours' AND $3 AND l.reminded_at IS NULL
-          AND a.listing_id = l.id AND a.local_date = $2::date AND a.asked_at = l.asked_at
+          AND l.asked_at BETWEEN $3::timestamptz - $5::int * interval '1 hour' AND $3 AND l.reminded_at IS NULL
+          AND a.listing_id = l.id AND ($4::boolean OR a.local_date = $2::date) AND a.asked_at = l.asked_at
           AND a.answered_at IS NULL AND a.missed_at IS NULL
         RETURNING l.id, l.title, l.kind, l.quantity, l.price, l.currency, l.asked_at, l.expires_at
-      `, [ownerId, clock.day, clock.now])
+      `, [ownerId, clock.day, clock.now, manual, manual ? 24 : 8])
       if (!rows.length) continue
-      await this.notifyQuestions(client, ownerId, rows, clock, true)
+      await this.notifyQuestions(client, ownerId, rows, clock, 'remind', manual)
       reminded += rows.length
       notified++
     }
@@ -247,15 +248,36 @@ export class ActualityJobs implements OnModuleInit {
     }
   }
 
-  private async notifyQuestions(client: PoolClient, ownerId: string, questions: Question[], clock: Clock, reminder: boolean) {
+  async telegramStatus(client: PoolClient, ownerId: string): Promise<string | undefined> {
+    const clock = await this.jobs.clock(client)
+    const { rows } = await client.query<Question>(`
+      SELECT l.id,l.title,l.kind,l.quantity,l.price,l.currency,l.asked_at,l.expires_at
+      FROM listings l JOIN listing_actuality_asks a ON a.listing_id=l.id AND a.asked_at=l.asked_at
+      WHERE l.owner_id=$1 AND l.status='ACTIVE' AND a.answered_at IS NULL AND a.missed_at IS NULL
+        AND l.asked_at > now()-interval '24 hours'
+    `, [ownerId])
+    if (rows.length) {
+      await this.notifyQuestions(client, ownerId, rows, clock, 'status')
+      return undefined
+    }
+    const { rows: [done] } = await client.query<{ count: number }>(`
+      SELECT count(*)::int AS count FROM listing_actuality_asks
+      WHERE owner_id=$1 AND answer IN ('ACTUAL','CHANGED','EDITED') AND (answered_at AT TIME ZONE $2)::date=$3::date
+    `, [ownerId, clock.timezone, clock.day])
+    return `Все объявления подтверждены. Подтверждено сегодня: ${done.count}.`
+  }
+
+  private async notifyQuestions(client: PoolClient, ownerId: string, questions: Question[], clock: Clock,
+    kind: 'ask' | 'remind' | 'status', manual = false) {
     questions.sort((a, b) => a.asked_at.getTime() - b.asked_at.getTime() || a.title.localeCompare(b.title))
     const firstDeadline = new Date(questions[0].asked_at.getTime() + dayMs)
     const options = { timeZone: clock.timezone, dateStyle: 'short', timeStyle: 'short' } as const
     const time = new Intl.DateTimeFormat('ru', options)
     const deadlines = `Ответьте до ${time.format(firstDeadline)} (${clock.timezone}), иначе объявления будут скрыты.`
     const body = [deadlines]
-    const actions: Action[] = []
-    for (const listing of questions) {
+    const telegramLines = [deadlines]
+    const actions: NotificationAction[] = []
+    for (const listing of kind === 'status' ? questions.slice(0, 6) : questions) {
       const expiresAt = new Date(listing.asked_at.getTime() + dayMs)
       const token = await this.actions.issue(client, {
         purpose: 'listing.actuality', userId: ownerId, subjectId: listing.id,
@@ -263,15 +285,17 @@ export class ActualityJobs implements OnModuleInit {
       })
       const price = listing.price === null ? 'по договорённости'
         : new Intl.NumberFormat('ru', { style: 'currency', currency: listing.currency }).format(Number(listing.price))
-      body.push(`${listing.title} · ${listing.quantity} шт. · ${price}`)
+      const line = `${listing.title} · ${listing.quantity} шт. · ${price}`
+      body.push(line)
+      if (telegramLines.length < 7) telegramLines.push(line)
       actions.push({ label: `Ответить · ${listing.title}`, token, action: 'listing.actuality' })
-      if (!reminder && listing.expires_at && listing.expires_at <= expiresAt) {
+      if (kind !== 'remind' && listing.expires_at && listing.expires_at > clock.now && listing.expires_at <= expiresAt) {
         const extend = await this.actions.issue(client, {
           purpose: 'listing.extend', userId: ownerId, subjectId: listing.id, expiresAt: listing.expires_at,
         })
         const days = listing.kind === 'BUY' ? 21 : 14
         body.push(`Срок «${listing.title}» истекает ${time.format(listing.expires_at)}. Продлить на ${days} дн.?`)
-        actions.push({ label: `Продлить · ${listing.title}`, token: extend, action: 'listing.extend' })
+        actions.push({ label: `Продлить · ${listing.title}`, token: extend, action: 'listing.extend', telegramLabel: `Продлить на ${days} дн.` })
       }
     }
     const all = await this.actions.issue(client, {
@@ -279,11 +303,14 @@ export class ActualityJobs implements OnModuleInit {
       payload: { askedAtBefore: clock.now.toISOString() }, expiresAt: firstDeadline,
     })
     actions.unshift({ label: 'Все актуальны', token: all, action: 'listing.actuality-all' })
-    const kind = reminder ? 'actuality.remind' : 'actuality.ask'
+    const noticeKind = kind === 'status' ? 'actuality.bot_status' : `actuality.${kind}`
     await this.notifications.notify(client, ownerId, {
-      kind, title: reminder ? 'Подтвердите актуальность объявлений' : 'Актуально?',
-      body: body.join('\n').slice(0, 3990), payload: { listingIds: questions.map(row => row.id), deadlineAt: firstDeadline },
-      actions, dedupeKey: `${kind}:${ownerId}:${clock.day}`, channels: ['EMAIL'],
+      kind: noticeKind, title: kind === 'status' ? `Ждут ответа: ${questions.length}`
+        : kind === 'remind' ? 'Подтвердите актуальность объявлений' : 'Актуально?',
+      body: body.join('\n').slice(0, 3990), payload: { listingIds: questions.map(row => row.id), deadlineAt: firstDeadline,
+        telegramLines, questionCount: questions.length, manual },
+      actions, dedupeKey: kind === 'status' ? undefined : `${noticeKind}:${ownerId}:${manual ? clock.now.toISOString() : clock.day}`,
+      channels: kind === 'status' ? [] : ['EMAIL'],
     })
   }
 }

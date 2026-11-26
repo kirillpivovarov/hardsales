@@ -5,11 +5,13 @@ import type { PoolClient } from 'pg';
 import { hashPassword, strongAdminPassword } from '../auth/auth.crypto';
 import { USERNAME_PATTERN } from '../auth/auth.dto';
 import { demoMode, isProduction } from '../config';
+import { policyVersion, recordConsent } from '../privacy/policy';
 import { DatabaseService } from './database.service';
 
 const DEMO_SELLER = '00000000-0000-4000-8000-000000000001';
 const DEMO_BUYER = '00000000-0000-4000-8000-000000000002';
 const DEMO_ADMIN = '00000000-0000-4000-8000-000000000003';
+const DEMO_AGENT = '00000000-0000-4000-8000-000000000004';
 
 async function seedExchangeFile(client: PoolClient, name: 'exchange' | 'exchange-features'): Promise<void> {
   const marker = `seed:demo-${name}`;
@@ -34,6 +36,17 @@ async function seedDemoExchange(client: PoolClient): Promise<void> {
   await client.query("SELECT set_config('hwforai.demo_exchange', $1, true)", [enableFeatures ? 'on' : 'off']);
   await seedExchangeFile(client, 'exchange');
   if (enableFeatures) await seedExchangeFile(client, 'exchange-features');
+
+  // Only the fixed synthetic accounts get consent at initialization. A later policy version still requires acceptance.
+  const version = await policyVersion(client);
+  const at = new Date();
+  const { rows } = await client.query<{ id: string }>(`
+    UPDATE users SET pd_consent_version=$1, pd_consent_at=$2
+    WHERE id=ANY($3::uuid[]) AND pd_consent_version IS NULL RETURNING id
+  `, [version, at, [DEMO_SELLER, DEMO_BUYER, DEMO_AGENT]]);
+  for (const { id } of rows) {
+    await recordConsent(client, id, version, 'MIGRATION', { at, ip: null, userAgent: null }, { pd: true, infoEmail: false });
+  }
 }
 
 export async function seedConfiguredUsers(database: DatabaseService): Promise<void> {

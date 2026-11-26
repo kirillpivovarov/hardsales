@@ -30,7 +30,8 @@ interface ListingRow {
   kind: 'BUY' | 'SELL'
   asked_at: Date | null
   hidden_at: Date | null
-  hidden_reason: 'NO_ANSWER' | 'MISSED3' | 'PAUSE' | 'SPOT_CHECK' | null
+  hidden_reason: 'NO_ANSWER' | 'MISSED3' | 'PAUSE' | 'SPOT_CHECK' | 'DUPLICATE' | null
+  duplicate_of: string | null
   spot_check_hold: boolean
   confirmed_at: Date | null
   expires_at: Date | null
@@ -193,6 +194,7 @@ export class ActualityService implements OnModuleInit {
       `, [listingId])
       return
     }
+    if (listing.duplicate_of) throw new ConflictException('Объявление помечено как дубль. Оспорить решение можно у модератора.')
     if (listing.status === 'ACTIVE') return
     if (listing.spot_check_hold) throw new ConflictException('Объявление скрыто до завершения проверки.')
     await this.assertCanActivate(client, ownerId)
@@ -488,7 +490,7 @@ export class ActualityService implements OnModuleInit {
 
   private async ownedListing(db: Queryable, ownerId: string, id: string, lock = true) {
     const { rows: [listing] } = await db.query<ListingRow>(`
-      SELECT id, title, status, kind, asked_at, hidden_at, hidden_reason, spot_check_hold, expires_at, confirmed_at, price_mode,
+      SELECT id, title, status, kind, asked_at, hidden_at, hidden_reason, duplicate_of, spot_check_hold, expires_at, confirmed_at, price_mode,
         price::float8 AS price, quantity, min_lot
       FROM listings WHERE id = $1 AND owner_id = $2 ${lock ? 'FOR UPDATE' : ''}
     `, [id, ownerId])

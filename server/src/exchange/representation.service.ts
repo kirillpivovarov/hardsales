@@ -3,6 +3,7 @@ import {
   NotFoundException, type OnModuleInit,
 } from '@nestjs/common'
 import { randomUUID } from 'node:crypto'
+import type { PoolClient } from 'pg'
 import { hashToken } from '../auth/auth.crypto'
 import type { SessionUser } from '../auth/auth.types'
 import { appOrigin, port } from '../config'
@@ -16,6 +17,7 @@ import { ExchangeJobs } from './jobs'
 import { ExchangeNotifications } from './notifications'
 import { PlatformSettings } from './platform-settings'
 import { agentFee, type AgentFee } from './representation.rules'
+import { renderLetter, type ThirdPartyLetter } from '../privacy/policy'
 
 type Principal = {
   id: string; user_id: string; name: string; company: string; number: number
@@ -91,9 +93,30 @@ export class RepresentationService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
+    this.actions.register('principal.answer', {
+      describe: async (client, token) => ({ title: 'Подтверждение представительства', fields: {
+        hasFee: (await this.principal(client, String(token.payload.agentId), token.subjectId)).platform_fee_snapshot?.disclosed === true,
+      } }),
+      lockSubjects: async (client, token) => {
+        await client.query('SELECT id FROM users WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE', [[token.userId, token.payload.agentId]])
+      },
+      execute: (client, token, raw) => this.answerPlatformInTransaction(client, token.userId!, {
+        ...object(raw), agentId: token.payload.agentId, principalId: token.subjectId,
+      }, token.payload.requestedAt),
+    })
+    this.actions.register('email.optout', {
+      describe: async () => ({ title: 'Отказ от писем площадки', fields: [] }),
+      execute: (client, token) => this.optOut(client, token.subjectId),
+    })
     for (const purpose of ['principal.confirm', 'company_email.confirm']) {
       this.actions.register(purpose, {
         describe: (client, token) => this.describeLetter(client, token),
+        lockSubjects: async (client, token) => {
+          await client.query(`
+            SELECT u.id FROM users u JOIN company_email_letters l ON l.user_id=u.id
+            WHERE l.id=$1 FOR UPDATE OF u
+          `, [token.subjectId])
+        },
         execute: (client, token, body) => this.answerLetter(client, token, body),
       })
     }
@@ -108,7 +131,7 @@ export class RepresentationService implements OnModuleInit {
       if (before === true || after !== true) return
       const { rows } = await client.query<{ id: string }>("SELECT id FROM users WHERE status = 'ACTIVE' AND role IN ('BUYER','SELLER')")
       for (const user of rows) await this.notifications.notify(client, user.id, {
-        kind: 'representation.enabled', title: 'Укажите роль в сделках',
+        kind: 'info.representation_enabled', title: 'Укажите роль в сделках',
         body: 'Укажите в профиле, работаете вы как прямая сторона или как агент. Агенту нужно добавить принципала, от чьего имени он публикует объявления.',
         actions: [{ label: 'Открыть профиль', href: '/account#principals', action: 'open' }],
         dedupeKey: 'representation.enabled', channels: ['EMAIL'],
@@ -286,6 +309,9 @@ export class RepresentationService implements OnModuleInit {
   async requestPlatform(user: SessionUser, id: string) {
     return this.db.transaction(async client => {
       await this.enabled(client)
+      const candidate = await this.principal(client, user.id, id)
+      if (!candidate.platform_user_id) throw new ConflictException('Принципал не зарегистрирован на площадке')
+      await client.query('SELECT id FROM users WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE', [[user.id, candidate.platform_user_id]])
       const profile = await this.agent(client, user.id, true)
       const principal = await this.principal(client, user.id, id, true)
       if (!principal.platform_user_id) throw new ConflictException('Принципал не зарегистрирован на площадке')
@@ -299,11 +325,15 @@ export class RepresentationService implements OnModuleInit {
         UPDATE user_principals SET requested_at = now(), platform_requested_at = now(), platform_fee_snapshot = $2
         WHERE id = $1 RETURNING requested_at AS "requestedAt"
       `, [principal.id, fee.disclosed ? JSON.stringify(fee) : null])
+      const token = await this.actions.issue(client, { purpose: 'principal.answer', subjectId: principal.id, userId: person.id,
+        payload: { agentId: user.id, requestedAt: updated.requestedAt.toISOString() },
+        expiresAt: new Date(updated.requestedAt.getTime() + letterDurationMs) })
       await this.notifications.notify(client, person.id, {
         kind: 'representation.request', title: 'Подтверждение представительства',
         body: `Агент ${profile.display_name} указал, что представляет вас. ${feeText(fee)}`,
-        payload: { agentId: user.id, principalId: principal.id },
-        actions: [{ label: 'Ответить', href: '/principal-answers?principalId=' + principal.id, action: 'open' }],
+        payload: { agentId: user.id, principalId: principal.id, canChangeFee: fee.disclosed },
+        actions: [{ label: 'Ответить', token, action: 'principal.answer' },
+          { label: 'Открыть запрос', href: '/principal-answers?principalId=' + principal.id, action: 'open' }],
         dedupeKey: 'representation.request:' + principal.id + ':' + updated.requestedAt.toISOString(), channels: ['EMAIL'],
       })
       return updated
@@ -324,26 +354,33 @@ export class RepresentationService implements OnModuleInit {
   }
 
   async answerPlatform(user: SessionUser, raw: unknown) {
+    return this.db.transaction(client => this.answerPlatformInTransaction(client, user.id, raw))
+  }
+
+  private async answerPlatformInTransaction(client: PoolClient, userId: string, raw: unknown, requestedAt?: unknown) {
     const body = object(raw)
     const agentId = uuid(body.agentId, 'Агент')
     const id = uuid(body.principalId, 'Принципал')
     const answer = oneOf(body.answer, ['YES', 'NO', 'OTHER'], 'Ответ')
     const value = answer === 'OTHER' ? displayText(body.value, 'Другая цифра', 1, 120) : ''
-    return this.db.transaction(async client => {
-      await this.enabled(client)
-      const profile = await this.agent(client, agentId, true)
-      const principal = await this.principal(client, agentId, id, true)
-      if (principal.platform_user_id !== user.id) throw new ForbiddenException('Вы не принципал этого агента')
-      if (!principal.platform_requested_at || Date.now() - principal.platform_requested_at.getTime() > letterDurationMs) {
-        throw new ConflictException('Запрос уже закрыт')
-      }
-      if (answer === 'OTHER' && !principal.platform_fee_snapshot?.disclosed) throw new BadRequestException('В запросе не указано вознаграждение')
-      if (user.representationMode === 'AGENT') throw new ForbiddenException('Принципал должен быть прямой стороной')
-      await client.query('UPDATE user_principals SET platform_requested_at = NULL, platform_fee_snapshot = NULL WHERE id = $1', [id])
-      await this.resolvePrincipal(client, profile, principal, answer !== 'NO' ? 'PLATFORM' : 'DENIED',
-        { name: user.displayName }, answer === 'YES' && sameFee(principal.platform_fee_snapshot, feeFrom(profile)), value)
-      return { ok: true }
-    })
+    await this.enabled(client)
+    const candidate = await this.principal(client, agentId, id)
+    if (candidate.platform_user_id !== userId) throw new ForbiddenException('Вы не принципал этого агента')
+    await client.query('SELECT id FROM users WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE', [[userId, agentId]])
+    const profile = await this.agent(client, agentId, true)
+    const principal = await this.principal(client, agentId, id, true)
+    if (principal.platform_user_id !== userId) throw new ForbiddenException('Вы не принципал этого агента')
+    if (!principal.platform_requested_at || Date.now() - principal.platform_requested_at.getTime() > letterDurationMs ||
+      (requestedAt !== undefined && requestedAt !== principal.platform_requested_at.toISOString())) {
+      throw new ConflictException('Запрос уже закрыт')
+    }
+    if (answer === 'OTHER' && !principal.platform_fee_snapshot?.disclosed) throw new BadRequestException('В запросе не указано вознаграждение')
+    const person = await this.profile(client, userId)
+    if (person.status !== 'ACTIVE' || person.representation_mode === 'AGENT') throw new ForbiddenException('Принципал должен быть прямой стороной')
+    await client.query('UPDATE user_principals SET platform_requested_at = NULL, platform_fee_snapshot = NULL WHERE id = $1', [id])
+    await this.resolvePrincipal(client, profile, principal, answer !== 'NO' ? 'PLATFORM' : 'DENIED',
+      { name: person.display_name }, answer === 'YES' && sameFee(principal.platform_fee_snapshot, feeFrom(profile)), value)
+    return { ok: true }
   }
 
   async adminList(query: Record<string, unknown>) {
@@ -421,6 +458,18 @@ export class RepresentationService implements OnModuleInit {
   }
 
   private async sendLetter(client: Queryable, profile: Profile, principal: Principal | null, email: string, domainKind: string) {
+    const { rows: [setting] } = await client.query<{ value: ThirdPartyLetter }>(
+      "SELECT value FROM platform_settings WHERE key='third_party_letter' FOR SHARE",
+    )
+    if (!setting?.value.approved) {
+      throw new ConflictException('Письма компаниям временно недоступны: текст письма не утверждён владельцем площадки')
+    }
+    const emailHash = hashToken(email.toLowerCase())
+    await this.lockRecipient(client, emailHash)
+    const suppressed = await client.query('SELECT 1 FROM email_suppressions WHERE email_hash=$1', [emailHash])
+    if (suppressed.rowCount) {
+      throw new ConflictException('Получатель отказался от писем площадки. Подтвердите принципала другим способом')
+    }
     const { rows: [counts] } = await client.query<{ user_count: number; subject_count: number }>(`
       SELECT count(*)::int AS user_count, count(*) FILTER (WHERE principal_id IS NOT DISTINCT FROM $2::uuid)::int AS subject_count
       FROM company_email_letters WHERE user_id = $1 AND sent_at > now() - interval '24 hours'
@@ -432,18 +481,26 @@ export class RepresentationService implements OnModuleInit {
       purpose: principal ? 'principal.confirm' : 'company_email.confirm',
       userId: principal ? null : profile.id, subjectId: id, expiresAt: new Date(Date.now() + letterDurationMs),
     })
+    const optOut = await this.actions.issue(client, {
+      purpose: 'email.optout', subjectId: emailHash, expiresAt: new Date(Date.now() + 365 * 86_400_000),
+    })
     const fee = feeFrom(profile)
-    const link = new URL('/a/' + token, appOrigin() ?? 'http://localhost:' + port('PORT', 3001)).href
-    const subject = principal ? 'hwforai: подтвердите представительство' : 'hwforai: подтвердите почту компании'
-    const text = principal
-      ? [
-        `Агент ${profile.display_name}${profile.company_name ? ' (' + profile.company_name + ')' : ''} указал на площадке hwforai, что представляет вашу компанию.`,
-        feeText(fee), 'Площадка не раскрывает вашу компанию другим участникам.',
-        'Если вы не знаете этого агента, нажмите «Не подтверждаю».',
-      ] : ['Подтвердите рабочую почту компании на площадке hwforai.']
+    const origin = appOrigin() ?? 'http://localhost:' + port('PORT', 3001)
+    const values = {
+      link: new URL('/a/' + token, origin).href,
+      policyUrl: new URL('/info/pd_policy', origin).href,
+      optOutUrl: new URL('/a/' + optOut, origin).href,
+      agentNickname: profile.display_name, agentCompany: profile.company_name ?? '',
+      fee: feeText(fee), expiresDays: '14',
+    }
+    const subject = principal ? renderLetter(setting.value.subject, values).replace(/[\r\n]/g, ' ')
+      : 'hwforai: подтвердите почту компании'
+    const body = principal ? renderLetter(setting.value.body, values) : [
+      'Подтвердите рабочую почту компании на площадке hwforai. Ссылка действует 14 дней.', values.link,
+      'Политика обработки персональных данных: ' + values.policyUrl, 'Отказаться от писем: ' + values.optOutUrl,
+    ].join('\n\n')
     const outboxId = await this.notifications.queueEmail(client, {
-      to: email, subject, body: [...text.filter(Boolean), 'Ссылка действует 14 дней.', link].join('\n\n'),
-      dedupeKey: 'representation.letter:' + id,
+      to: email, subject, body, respectsOptOut: true, dedupeKey: 'representation.letter:' + id,
     })
     const { rows: [letter] } = await client.query(`
       INSERT INTO company_email_letters (id, kind, user_id, principal_id, to_email, domain_kind, token_hash, outbox_id, fee_snapshot)
@@ -452,6 +509,27 @@ export class RepresentationService implements OnModuleInit {
     `, [id, principal ? 'PRINCIPAL' : 'OWN', profile.id, principal?.id ?? null, email, domainKind, hashToken(token),
       outboxId, principal && fee.disclosed ? JSON.stringify(fee) : null])
     return letter
+  }
+
+  private async lockRecipient(client: Queryable, emailHash: string) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 9624280))', [emailHash])
+  }
+
+  private async optOut(client: Queryable, emailHash: string) {
+    await this.lockRecipient(client, emailHash)
+    await client.query(`
+      INSERT INTO email_suppressions(email_hash,reason) VALUES ($1,'RECIPIENT_OPT_OUT') ON CONFLICT DO NOTHING
+    `, [emailHash])
+    await client.query(`
+      UPDATE exchange_email_outbox SET status='SKIPPED',recipient='removed@invalid.invalid',
+        subject='Отказ получателя',body='Отказ получателя'
+      WHERE status='PENDING' AND respects_opt_out AND encode(sha256(convert_to(lower(recipient),'UTF8')),'hex')=$1
+    `, [emailHash])
+    await client.query(`
+      UPDATE company_email_letters SET status='EXPIRED' WHERE status='SENT'
+        AND encode(sha256(convert_to(lower(to_email),'UTF8')),'hex')=$1
+    `, [emailHash])
+    return { message: 'Площадка больше не будет писать на этот адрес' }
   }
 
   private async getLetter(client: Queryable, token: ExchangeAction, lock = false) {

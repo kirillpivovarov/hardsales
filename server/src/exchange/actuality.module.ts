@@ -8,6 +8,6 @@ import { TrustModule } from './trust.module'
 @Global()
 @Module({
   imports: [MatchingModule, TrustModule], controllers: [ActualityController],
-  providers: [ActualityService, ActualityJobs], exports: [ActualityService],
+  providers: [ActualityService, ActualityJobs], exports: [ActualityService, ActualityJobs],
 })
 export class ActualityModule {}

@@ -3,27 +3,39 @@ import { resolve } from 'node:path';
 import type { PoolClient } from 'pg';
 import type { ExchangeClock } from '../exchange/jobs';
 import { listingPublicWhere, visibleCategories } from '../market/market.queries';
-import { evaluatePair, type Compatibility, type ListingForMatch, type Rates } from './matching.rules';
+import { evaluatePair, explainPair, type Compatibility, type ListingForMatch, type MatchModel, type Rates } from './matching.rules';
 
 const compatibility = JSON.parse(readFileSync(resolve(__dirname, '../../seeds/exchange_data/payment_compatibility.json'), 'utf8')) as Compatibility;
 
 // Keep the visibility predicate aligned with the manual catalog. The lateral query can
 // use the partial seller/model index without constructing a cross product.
+const listingMatchColumns = `l.id, l.owner_id, l.title, l.kind, l.model_id, l.analog_model_ids, l.condition,
+  l.quantity, l.min_lot, l.ship_days, l.origin_scope, l.origin_country, l.destination_country,
+  l.counterparty, u.participant_type, l.delivery_by::text, l.price_mode, l.price::text,
+  l.currency, l.payment_terms, l.payment_methods, l.representation, l.confirmed_at`;
+const visibleForMatching = `${listingPublicWhere} AND u.onboarding_state <> 'REQUIRED' AND u.actuality_suspended_at IS NULL`;
+
 export const eligibleListings = `
   ${visibleCategories}, eligible AS NOT MATERIALIZED (
-    SELECT l.id, l.owner_id, l.title, l.kind, l.model_id, l.analog_model_ids, l.condition,
-      l.quantity, l.min_lot, l.ship_days, l.origin_scope, l.origin_country, l.destination_country,
-      l.counterparty, u.participant_type, l.delivery_by::text, l.price_mode, l.price::text,
-      l.currency, l.payment_terms, l.payment_methods, l.representation, l.confirmed_at
+    SELECT ${listingMatchColumns}
     FROM listings l JOIN users u ON u.id = l.owner_id
     JOIN hardware_models h ON h.id = l.model_id AND h.status = 'ACTIVE'
-    WHERE ${listingPublicWhere} AND u.onboarding_state <> 'REQUIRED' AND u.actuality_suspended_at IS NULL
+    WHERE ${visibleForMatching}
   )
 `;
+const operatorEligible = `operator_eligible AS NOT MATERIALIZED (
+  SELECT ${listingMatchColumns}, c.slug AS category_slug, u.display_name AS nickname
+  FROM listings l JOIN users u ON u.id = l.owner_id JOIN categories c ON c.id = l.category_id
+  LEFT JOIN hardware_models h ON h.id = l.model_id
+  WHERE ${visibleForMatching} AND (l.model_id IS NULL OR h.status = 'ACTIVE')
+)`;
+export const operatorEligibleListings = `${visibleCategories}, ${operatorEligible}`;
+export const matchingLock = 12;
 
 type Pair = {
   matchId: string | null; sell: ListingForMatch | null; buy: ListingForMatch | null;
   sellId: string; buyId: string; sellStatus: string | null; buyStatus: string | null; disabled: boolean;
+  operator: boolean; operatorVisible: boolean;
 };
 
 type MatchChange = {
@@ -37,11 +49,17 @@ function voidReason(pair: Pair) {
   if (statuses.includes('ARCHIVED')) return 'Объявление снято';
   if (statuses.includes('FROZEN') || statuses.includes('BANNED')) return 'Объявление ограничено модератором';
   if (pair.disabled) return 'Модель выключена в справочнике';
+  if (pair.operator) return 'Объявление больше недоступно';
   return 'Условия объявлений больше не совпадают';
 }
 
 export function compareListings(sell: ListingForMatch, buy: ListingForMatch, day: string, rates: Rates) {
   return evaluatePair(sell, buy, day, rates, compatibility);
+}
+
+export function explainListings(sell: ListingForMatch, buy: ListingForMatch, day: string, rates: Rates,
+  models: { sell: MatchModel | null; buy: MatchModel | null }) {
+  return explainPair(sell, buy, day, rates, compatibility, models);
 }
 
 export async function matchingRates(client: PoolClient): Promise<Rates> {
@@ -54,16 +72,22 @@ export async function matchingRates(client: PoolClient): Promise<Rates> {
 const existing = `
   SELECT m.id AS "matchId", to_jsonb(s) AS sell, to_jsonb(b) AS buy,
     l.id AS "sellId", r.id AS "buyId", l.status AS "sellStatus", r.status AS "buyStatus",
-    coalesce(sh.status <> 'ACTIVE', false) OR coalesce(bh.status <> 'ACTIVE', false) AS disabled
+    (coalesce(sh.status <> 'ACTIVE', false) OR coalesce(bh.status <> 'ACTIVE', false)
+      OR coalesce(oh.status <> 'ACTIVE', false)) AS disabled,
+    m.source = 'OPERATOR' AS operator, os.id IS NOT NULL AND ob.id IS NOT NULL AS "operatorVisible"
   FROM listing_matches m JOIN listings l ON l.id = m.sell_listing_id JOIN listings r ON r.id = m.buy_listing_id
   LEFT JOIN hardware_models sh ON sh.id = l.model_id LEFT JOIN hardware_models bh ON bh.id = r.model_id
-  LEFT JOIN eligible s ON s.id = l.id LEFT JOIN eligible b ON b.id = r.id
+  LEFT JOIN hardware_models oh ON oh.id = m.operator_model_id
+  LEFT JOIN eligible s ON s.id = l.id AND m.source = 'SYSTEM'
+  LEFT JOIN eligible b ON b.id = r.id AND m.source = 'SYSTEM'
+  LEFT JOIN operator_eligible os ON os.id = l.id AND m.source = 'OPERATOR'
+  LEFT JOIN operator_eligible ob ON ob.id = r.id AND m.source = 'OPERATOR'
   WHERE m.status IN ('NEW', 'CHAT', 'VOID')
 `;
 
 async function selectPairs(client: PoolClient, listingId: string | null, buyerIds: string[] | null, limit: number | null) {
   const { rows } = await client.query<Pair>(`
-    ${eligibleListings},
+    ${eligibleListings}, ${operatorEligible},
     affected_buyers AS NOT MATERIALIZED (
       SELECT b.* FROM eligible b WHERE b.kind = 'BUY' AND (
         b.id = ANY($2::uuid[]) OR b.id = $1 OR (
@@ -77,7 +101,7 @@ async function selectPairs(client: PoolClient, listingId: string | null, buyerId
       ${existing}
         AND (m.sell_listing_id = $1 OR m.buy_listing_id = $1 OR m.buy_listing_id = ANY($2::uuid[]))
       UNION ALL
-      SELECT NULL, to_jsonb(s), to_jsonb(b), s.id, b.id, NULL, NULL, false
+      SELECT NULL, to_jsonb(s), to_jsonb(b), s.id, b.id, NULL, NULL, false, false, false
       FROM affected_buyers b
       CROSS JOIN LATERAL (
         SELECT * FROM eligible s WHERE s.kind = 'SELL'
@@ -95,7 +119,13 @@ async function selectPairs(client: PoolClient, listingId: string | null, buyerId
 async function savePairs(client: PoolClient, pairs: Pair[], clock: ExchangeClock, rates: Rates, initial: boolean) {
   const changes: MatchChange[] = [];
   const voids: { id: string; reason: string }[] = [];
+  const restoreOperator: string[] = [];
   for (const pair of pairs) {
+    if (pair.operator && pair.matchId) {
+      if (pair.operatorVisible && !pair.disabled) restoreOperator.push(pair.matchId);
+      else voids.push({ id: pair.matchId, reason: voidReason(pair) });
+      continue;
+    }
     const { sell, buy } = pair;
     const evaluation = sell && buy ? compareListings(sell, buy, clock.day, rates) : null;
     if (evaluation && sell && buy) {
@@ -120,7 +150,7 @@ async function savePairs(client: PoolClient, pairs: Pair[], clock: ExchangeClock
         common_methods = EXCLUDED.common_methods, gap = EXCLUDED.gap, updated_at = now(),
         status = CASE WHEN listing_matches.status = 'VOID' THEN listing_matches.previous_status ELSE listing_matches.status END,
         previous_status = NULL, void_reason = NULL
-      WHERE listing_matches.status IN ('NEW', 'CHAT', 'VOID')
+      WHERE listing_matches.source = 'SYSTEM' AND listing_matches.status IN ('NEW', 'CHAT', 'VOID')
     `, [JSON.stringify(changes.slice(i, i + 1000)), initial]);
   }
   if (voids.length) {
@@ -132,7 +162,12 @@ async function savePairs(client: PoolClient, pairs: Pair[], clock: ExchangeClock
         AND (m.status <> 'VOID' OR m.void_reason IS DISTINCT FROM x.reason)
     `, [JSON.stringify(voids)]);
   }
-  return { evaluated: pairs.length, valid: changes.length };
+  if (restoreOperator.length) await client.query(`
+    UPDATE listing_matches SET status = coalesce(previous_status, 'NEW'), previous_status = NULL,
+      void_reason = NULL, updated_at = now()
+    WHERE id = ANY($1::uuid[]) AND source = 'OPERATOR' AND status = 'VOID'
+  `, [restoreOperator]);
+  return { evaluated: pairs.length, valid: changes.length + restoreOperator.length };
 }
 
 export async function isInitialPass(client: PoolClient) {

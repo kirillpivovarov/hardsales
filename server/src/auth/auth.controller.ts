@@ -1,7 +1,8 @@
 import { Body, Controller, Get, HttpCode, Patch, Post, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { ChallengeDto, CreateModeratorDto, CredentialsDto, LoginDto, PasswordDto, ProfileDto, RegisterDto, VerifyDto } from './auth.dto';
+import { AcceptPolicyDto, ChallengeDto, CreateModeratorDto, CredentialsDto, LoginDto, PasswordDto, ProfileDto, RegisterDto, VerifyDto } from './auth.dto';
 import { AuthService, COOKIE_NAME, SESSION_TTL, SessionResult, sessionCookie } from './auth.service';
+import { consentRequest } from '../privacy/policy';
 
 function setSession(response: Response, result: SessionResult) {
   response.cookie(COOKIE_NAME, result.token, { ...sessionCookie(), maxAge: SESSION_TTL * 1_000 });
@@ -23,7 +24,7 @@ export class AuthController {
 
   @Post('register')
   register(@Body() input: RegisterDto, @Req() request: Request) {
-    return this.auth.register(input, ip(request));
+    return this.auth.register(input, ip(request), consentRequest(request));
   }
 
   @Post('login')
@@ -47,8 +48,19 @@ export class AuthController {
 
   @Get('me')
   async me(@Req() request: Request) {
-    const [user, registrationMode] = await Promise.all([this.auth.resolve(request), this.auth.registrationMode()]);
-    return registrationMode === 'INVITE' ? { user, registrationMode } : { user };
+    const [user, registrationMode, policy] = await Promise.all([
+      this.auth.resolve(request), this.auth.registrationMode(), this.auth.privacyStatus(),
+    ]);
+    return {
+      user, ...policy, ...(registrationMode === 'INVITE' && { registrationMode }),
+      pdConsentRequired: user?.pdConsentRequired ?? false, infoEmailConsent: user?.infoEmailConsent ?? false,
+    };
+  }
+
+  @Post('consent')
+  @HttpCode(200)
+  async consent(@Req() request: Request, @Body() input: AcceptPolicyDto) {
+    return { user: await this.auth.acceptPolicy(request, input, consentRequest(request)) };
   }
 
   @Post('logout')
@@ -60,7 +72,7 @@ export class AuthController {
 
   @Patch('profile')
   async profile(@Body() input: ProfileDto, @Req() request: Request) {
-    return { user: await this.auth.updateProfile(request, input) };
+    return { user: await this.auth.updateProfile(request, input, consentRequest(request)) };
   }
 
   @Post('password')

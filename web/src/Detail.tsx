@@ -4,6 +4,7 @@ import { api, ApiError, isStaff } from './api';
 import type { User } from './api';
 import { ActualityBadges } from './ActualityWidgets';
 import { ListingExchangeBadges } from './ListingExchangeBadges';
+import { LotAppeal, OwnLotBadges } from './LotGroups';
 import { ListingProof, PaymentRisk } from './Trust';
 import { useExchange } from './Exchange';
 import { ListingModeration } from './AdminPage';
@@ -11,6 +12,7 @@ import { ListingVisual, listingIllustration } from './Catalog';
 import { StartChatButton } from './ChatPage';
 import { useI18n } from './i18n';
 import { ListingGallery } from './ListingImages';
+import { ListingPhotoReport } from './ListingPhotoReport';
 import { categoryName, countryName, formatMoney, terms } from './market';
 import type { Category, Listing } from './market';
 import { Icon, Notice, Spinner } from './ui';
@@ -127,6 +129,7 @@ export function ListingDetail({ user }: { user: User | null }) {
       <span className="listing-kicker">{category ? categoryName(category, locale) : t(listing.kind === 'SELL' ? 'Предложение' : 'Заявка на закупку')}</span>
       <h1>{listing.title}</h1>
       <ListingExchangeBadges listing={listing} /><ActualityBadges listing={listing} />
+      {myListing && <OwnLotBadges listing={listing} />}
       {staff && <div className="contextual-actions">
         <ListingModeration user={user} listing={{ id: listing.id, title: listing.title }}
           owner={listing.owner.id ? { id: listing.owner.id, title: ownerName } : undefined} onSaved={reloadAfterModeration} />
@@ -135,7 +138,10 @@ export function ListingDetail({ user }: { user: User | null }) {
     </div>
     <div className={'detail-layout' + (hasMedia ? ' detail-layout-with-media' : '')}>
       {hasMedia && <div className="detail-media">
-        {listing.images?.length ? <ListingGallery key={listing.id} images={listing.images} /> : <>
+        {listing.images?.length ? <>
+          <ListingGallery key={listing.id} images={listing.images} />
+          {!staff && !myListing && features.feature_disclosure_journal === true && <ListingPhotoReport key={listing.id} listingId={listing.id} />}
+        </> : <>
           <ListingVisual listing={listing} category={category} />
           <span className="illustration-note">{t('Иллюстрация оборудования')}</span>
         </>}
@@ -146,6 +152,7 @@ export function ListingDetail({ user }: { user: User | null }) {
           <strong className="detail-price">{price}</strong>
         </div>
         {features.feature_trust_rating === true && <PaymentRisk listing={listing} />}
+        {myListing && <LotAppeal listing={listing} onSaved={reloadAfterModeration} />}
         {myListing && ['ACTIVE','ARCHIVED'].includes(listing.status) && <Link className="button button-secondary" to={`/listings/${listing.id}/edit`}>{t('Редактировать')}</Link>}
         {compatible && listing.status === 'ACTIVE' && (companyOnly
           ? <p className="muted">{t('Автор принимает обращения только от компаний.')}</p>

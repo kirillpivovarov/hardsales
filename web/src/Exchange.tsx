@@ -4,6 +4,8 @@ import { api } from './api';
 import { useI18n } from './i18n';
 import { Button, Field, Icon, Notice, Spinner } from './ui';
 import type { RepresentationActionData } from './Representation';
+import { TelegramDemoActions, type TelegramActionFields } from './Telegram';
+import { ThirdPartyLetterEditor, type ThirdPartyLetter } from './Consent';
 
 type Settings = Record<string, boolean | number | string | string[]>;
 const ExchangeContext = createContext({ features: {} as Settings, reload: () => {} });
@@ -106,9 +108,15 @@ const settingNames: Record<string, string> = {
   feature_invites: 'Приглашения, анкета и правила', feature_actuality: 'Подтверждение актуальности',
   feature_disclosure_journal: 'Журнал раскрытий', feature_representation: 'Прямые стороны и агенты',
   feature_matching: 'Совпадения объявлений', feature_trust_rating: 'Рейтинг и проверка',
+  feature_telegram: 'Уведомления в Telegram',
+  feature_lot_groups: 'Дубли лотов', lot_price_tolerance: 'Допуск цены одинаковых лотов, доля',
+  near_miss_max_failures: 'Допустимое число расхождений при ручном сведении',
+  near_miss_price_over: 'Допуск сверх бюджета при ручном сведении, доля',
   feature_catalog_sync: 'Синхронизация справочника', disclosure_min_level: 'Уровень для раскрытия',
   low_rating_threshold: 'Порог низкого рейтинга', catalog_sync_vendors: 'Идентификаторы производителей PCI',
+  pd_policy_version: 'Версия политики обработки данных',
 };
+const dedicatedSettings = new Set(['pilot_period', 'stop_rule', 'pilot_targets', 'pilot_excluded_users']);
 
 export function ExchangeSettings() {
   const { t } = useI18n();
@@ -137,13 +145,17 @@ export function ExchangeSettings() {
     <h2>{t('Настройки биржи')}</h2>
     {loadError && <Notice tone="error">{t(loadError)}</Notice>}
     {!values && !loadError && <Spinner />}
-    {values?.map(row => <div key={row.key} className="workflow-stack">
+    {values?.filter(row => !dedicatedSettings.has(row.key)).map(row => row.key === 'third_party_letter' ?
+      <ThirdPartyLetterEditor key={row.key} value={row.value as unknown as ThirdPartyLetter} onSaved={value => {
+        setValues(list => list?.map(item => item.key === row.key ? { key: item.key, value: value as unknown as Settings[string] } : item));
+      }} /> : <div key={row.key} className="workflow-stack">
       <form className="exchange-setting" aria-busy={busy === row.key} onSubmit={event => void save(event, row.key, row.value)}>
       <Field label={t(settingNames[row.key] ?? row.key)}>
         {typeof row.value === 'boolean' ? <input type="checkbox" name="value" defaultChecked={row.value} /> :
           row.key === 'registration_mode' ? <select name="value" defaultValue={String(row.value)}>
             <option value="OPEN">{t('Открытая регистрация')}</option><option value="INVITE">{t('Только по приглашению')}</option>
           </select> : <input type={typeof row.value === 'number' ? 'number' : 'text'} name="value"
+            step={row.key === 'lot_price_tolerance' || row.key === 'near_miss_price_over' ? 'any' : undefined}
             defaultValue={Array.isArray(row.value) ? row.value.join(', ') : row.value} required />}
       </Field>
         <Button type="submit" variant="secondary" disabled={Boolean(busy)}>{t('Сохранить')}</Button>
@@ -153,13 +165,16 @@ export function ExchangeSettings() {
   </div>;
 }
 
-export function ExchangeJobRuns() {
+const jobStatuses: Record<string, string> = { RUNNING: 'Выполняется', DONE: 'Завершена', FAILED: 'Ошибка', SKIPPED: 'Пропущена' };
+
+export function ExchangeJobRuns({ administrator = false }: { administrator?: boolean }) {
   const { t, locale } = useI18n();
   const [records, setRecords] = useState<{ id: string; job: string; slot: string; status: string; startedAt: string }[]>();
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
   const [job, setJob] = useState('');
   const [total, setTotal] = useState(0);
+  const [revision, setRevision] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
     void api<{ items: NonNullable<typeof records>; total: number }>('/admin/jobs?' + new URLSearchParams({
@@ -167,9 +182,10 @@ export function ExchangeJobRuns() {
     }), { signal: controller.signal }).then(result => { setRecords(result.items); setTotal(result.total); })
       .catch((err: Error) => { if (!controller.signal.aborted) setError(err.message); });
     return () => controller.abort();
-  }, [job, page]);
+  }, [job, page, revision]);
   return <div className="workflow-stack">
     <h2>{t('Фоновые задачи')}</h2>
+    {administrator && <TelegramDemoActions onFinished={() => setRevision(value => value + 1)} />}
     <form className="exchange-setting" onSubmit={event => {
       event.preventDefault();
       setPage(1); setJob(String(new FormData(event.currentTarget).get('job') ?? '').trim());
@@ -179,7 +195,7 @@ export function ExchangeJobRuns() {
     {error && <Notice tone="error">{t(error)}</Notice>}
     {!records && !error && <Spinner />}
     <ul className="exchange-runs">{records?.map(item => <li key={item.id}>
-      <strong>{item.job}</strong> <span>{item.slot}</span> <span>{item.status}</span>
+      <strong>{item.job}</strong> <span>{item.slot}</span> <span>{t(jobStatuses[item.status] ?? item.status)}</span>
       <time dateTime={item.startedAt}>{new Date(item.startedAt).toLocaleString(locale)}</time>
     </li>)}</ul>
     <div className="admin-actions">
@@ -192,7 +208,7 @@ export function ExchangeJobRuns() {
 type ActionDescription = RepresentationActionData & {
   title?: string;
   listing?: { title?: string };
-  fields?: { priceMode?: string; price?: number | null; quantity?: number; minLot?: number };
+  fields?: TelegramActionFields & { priceMode?: string; price?: number | null; quantity?: number; minLot?: number };
 };
 export function ActionPage({ renderForm }: { renderForm: (
   action: ActionDescription, onSubmit: (body: Record<string, unknown>) => Promise<void>, pending: boolean
@@ -203,11 +219,12 @@ export function ActionPage({ renderForm }: { renderForm: (
   const [pending, setPending] = useState(false);
   const [done, setDone] = useState(false);
   const [dealId, setDealId] = useState<string>();
+  const [chatId, setChatId] = useState<string>();
   const [error, setError] = useState('');
   const path = '/actions/' + encodeURIComponent(token ?? '');
   useEffect(() => {
     const controller = new AbortController();
-    setError(''); setDone(false); setAction(undefined); setDealId(undefined);
+    setError(''); setDone(false); setAction(undefined); setDealId(undefined); setChatId(undefined);
     void api<ActionDescription>(path, { signal: controller.signal }).then(setAction)
       .catch((err: Error) => { if (!controller.signal.aborted) setError(err.message); });
     return () => controller.abort();
@@ -216,8 +233,9 @@ export function ActionPage({ renderForm }: { renderForm: (
     if (pending) return;
     setPending(true); setError('');
     try {
-      const data = await api<{ dealId?: string }>(path, { method: 'POST', body });
+      const data = await api<{ dealId?: string; chatId?: string }>(path, { method: 'POST', body });
       setDealId(data?.dealId);
+      setChatId(data?.chatId);
       setDone(true);
     }
     catch (err) { setError((err as Error).message); }
@@ -227,8 +245,10 @@ export function ActionPage({ renderForm }: { renderForm: (
     <h1>{t(action?.title ?? 'Подтверждение действия')}</h1>
     {action?.listing?.title && <p>{action.listing.title}</p>}
     {error && <Notice tone="error">{t(error)}</Notice>}
-    {done ? <Notice tone="success">{t('Ответ сохранён.')}</Notice> : action ? renderForm(action, submit, pending) : !error && <Spinner />}
+    {done ? <Notice tone="success">{t(action?.purpose === 'email.optout' ? 'Площадка больше не будет писать на этот адрес' : 'Ответ сохранён.')}</Notice>
+      : action ? renderForm(action, submit, pending) : !error && <Spinner />}
     {dealId && <p><Link className="button button-secondary" to={`/deals/${encodeURIComponent(dealId)}?action=agree`}>{t('Открыть сделку')}</Link></p>}
+    {chatId && <p><Link className="button button-secondary" to={`/chats/${encodeURIComponent(chatId)}`}>{t('Открыть чат')}</Link></p>}
     <Link to="/catalog" className="back-link">{t('К каталогу')}</Link>
   </section>;
 }

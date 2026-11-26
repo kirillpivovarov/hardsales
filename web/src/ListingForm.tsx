@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, type User } from './api';
+import { api, ApiError, type User } from './api';
 import { useI18n } from './i18n';
 import { ListingImagesEditor, listingImagePayload } from './ListingImages';
 import type { ListingImageDraft } from './ListingImages';
@@ -130,19 +130,26 @@ function ListingFields({
   const [photoDraft, setPhotoDraft] = useState<ListingImageDraft[]>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [fieldError, setFieldError] = useState<{ field: string; message: string }>();
   const earliestDate = new Date().toISOString().slice(0, 10);
   const hasPreviousDate = listing?.deliveryBy && listing.deliveryBy < earliestDate;
   const photos = photoDraft ?? (listing?.images ?? []).map(image => ({ key: image.id, image }));
+  const newPhotoKeys = photos.filter(photo => 'file' in photo).map(photo => photo.key).sort();
+  const photoConfirmation = (features.feature_disclosure_journal === true || fieldError?.field === 'images') && newPhotoKeys.length > 0;
   const selectedCategory = categories.find(category => category.id === categoryId);
   const attributes = [...new Set([
     ...(selectedCategory?.attributeKeys ?? []),
     ...(listing?.categoryId === categoryId ? Object.keys(listing?.specs ?? {}) : []),
   ])];
+  const fieldHint = (name: string, hint?: string) => fieldError?.field === name
+    ? <span role="alert" className="field-error">{t(fieldError.message)}</span> : (hint ? t(hint) : undefined);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
-    const form = new FormData(event.currentTarget);
+    const element = event.currentTarget;
+    const form = new FormData(element);
+    setFieldError(undefined);
     const value = (name: string) => String(form.get(name) ?? '').trim();
     const sourceCountry = value('originCountry');
     const sellerScope = sourceCountry === 'ANY' ? 'ANY' : 'COUNTRY';
@@ -181,6 +188,7 @@ function ListingFields({
         counterparty: value('counterparty'),
         paymentMethods,
         specs,
+        ...(form.get('imageContactAcknowledged') === 'on' && { imageContactAcknowledged: true }),
         ...modelSelection,
         ...readListingRepresentation(form),
         ...(value('lifetimeDays') ? { lifetimeDays: Number(value('lifetimeDays')) } : {}),
@@ -194,7 +202,13 @@ function ListingFields({
       });
       onSaved(saved);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Не удалось сохранить объявление.');
+      if (cause instanceof ApiError && cause.field && ['CONTACT_IN_FIELD', 'PHOTO_CONTACT_CONFIRMATION_REQUIRED'].includes(cause.code ?? '')) {
+        const control = element.elements.namedItem(cause.field === 'images' ? 'imageContactAcknowledged' : cause.field);
+        if (control instanceof HTMLElement) control.focus();
+        setFieldError({ field: cause.field, message: cause.message });
+      } else {
+        setError(cause instanceof Error ? cause.message : 'Не удалось сохранить объявление.');
+      }
     } finally {
       setBusy(false);
     }
@@ -207,8 +221,8 @@ function ListingFields({
         <h2>{t(isBuyer ? 'Какое оборудование нужно' : 'Какое оборудование продаётся')}</h2>
         <div className="form-grid workflow-form">
           <div className="workflow-span">
-            <Field label={t('Заголовок')}>
-              <input name="title" value={title} onChange={event => setTitle(event.target.value)} placeholder={t('Например, сервер с 4 × NVIDIA H100')} minLength={3} maxLength={140} required />
+            <Field label={t('Заголовок')} hint={fieldHint('title')}>
+              <input name="title" aria-invalid={fieldError?.field === 'title'} value={title} onChange={event => setTitle(event.target.value)} placeholder={t('Например, сервер с 4 × NVIDIA H100')} minLength={3} maxLength={140} required />
             </Field>
           </div>
           <div className="workflow-span">
@@ -250,18 +264,25 @@ function ListingFields({
             </select>
           </Field>
           <div className="workflow-span">
-            <Field label={t('Описание')} hint={t('Укажите модель, конфигурацию и комплектацию. Для общения используйте чат.')}>
-              <textarea name="description" defaultValue={listing?.description} minLength={10} maxLength={8000} required />
+            <Field label={t('Описание')} hint={fieldHint('description', 'Укажите модель, конфигурацию и комплектацию. Для общения используйте чат.')}>
+              <textarea name="description" aria-invalid={fieldError?.field === 'description'} defaultValue={listing?.description} minLength={10} maxLength={8000} required />
             </Field>
           </div>
           {attributes.map(attribute => (
-            <Field key={`${categoryId}-${attribute}`} label={t(attribute)}>
-              <input name={`spec:${attribute}`} value={draftSpecs[attribute] ?? ''} onChange={event => setDraftSpecs(values => ({ ...values, [attribute]: event.target.value }))} maxLength={300} />
+            <Field key={`${categoryId}-${attribute}`} label={t(attribute)} hint={fieldHint(`spec:${attribute}`)}>
+              <input name={`spec:${attribute}`} aria-invalid={fieldError?.field === `spec:${attribute}`} value={draftSpecs[attribute] ?? ''} onChange={event => setDraftSpecs(values => ({ ...values, [attribute]: event.target.value }))} maxLength={300} />
             </Field>
           ))}
         </div>
       </section>
       <ListingImagesEditor drafts={photos} onChange={setPhotoDraft} disabled={busy} />
+      {photoConfirmation && <div>
+        <label className="workflow-checkbox">
+          <input key={newPhotoKeys.join(',')} type="checkbox" name="imageContactAcknowledged" required />
+          {t('На фото нет контактов')}
+        </label>
+        {fieldHint('images')}
+      </div>}
       <section className="panel workflow-section">
         <h2>{t('Сроки и география')}</h2>
         <div className="form-grid workflow-form">
@@ -293,8 +314,8 @@ function ListingFields({
             />
           )}
           {!isBuyer && availability === 'STOCK' && (
-            <Field label={t('Город склада')} hint={t('Если складов несколько, укажите основной город.')}>
-              <input name="stockCity" list="exchange-stock-cities" defaultValue={listing?.stockCity ?? ''} minLength={2} maxLength={120} required />
+            <Field label={t('Город склада')} hint={fieldHint('stockCity', 'Если складов несколько, укажите основной город.')}>
+              <input name="stockCity" aria-invalid={fieldError?.field === 'stockCity'} list="exchange-stock-cities" defaultValue={listing?.stockCity ?? ''} minLength={2} maxLength={120} required />
               <datalist id="exchange-stock-cities">{locationData.locations.map(place =>
                 <option key={place.id} value={locale.startsWith('ru') ? place.city_ru : place.city_en} />)}</datalist>
             </Field>

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
-import { solveCaptcha } from './captcha-helper.mjs';
+import { demoRegistrationConsent, solveCaptcha } from './captcha-helper.mjs';
 
 const apiOrigin = process.env.HWFORAI_MARKET_TEST_URL?.replace(/\/$/, '');
 const mailOrigin = process.env.MAILPIT_URL?.replace(/\/$/, '');
@@ -44,6 +44,7 @@ async function register(role, prefix, participantType = 'COMPANY') {
   const { payload: { challengeId } } = await call('/auth/register', {
     method: 'POST',
     body: {
+      ...demoRegistrationConsent,
       username, email, password: fixturePassword, role, captchaToken: await solveCaptcha(apiOrigin),
       participantType,
       ...(participantType === 'COMPANY' ? { companyName: 'Тестовая компания' } : {}),
@@ -86,6 +87,7 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
     const username = 'invalid-admin-' + suffix;
     const registration = await call('/auth/register', {
       method: 'POST', status: 400, body: {
+        ...demoRegistrationConsent,
         username, email: username + '@example.test', password: fixturePassword, role: 'ADMIN',
         captchaToken: await solveCaptcha(apiOrigin),
         participantType: 'INDIVIDUAL', city: 'Пермь', country: 'RU', telegram: 'invalid_admin_' + suffix,

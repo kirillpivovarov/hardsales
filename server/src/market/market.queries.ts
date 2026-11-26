@@ -1,5 +1,6 @@
 import { representationLabels, representationListingColumns, representationOwnerColumns } from '../exchange/representation.rules'
 import { listingModelColumns } from '../models/model-listings'
+import { ownLotFields } from '../lots/lot-public'
 
 // Explicit projections keep private account fields out of marketplace responses.
 export function publicProfile(alias: string) {
@@ -71,6 +72,7 @@ export function listingColumnsFor(privateActuality = 'false') {
   CASE WHEN ${trustEnabledSql} THEN listing_trust_projection(l,u) END AS trust,
   CASE WHEN (${privateActuality}) THEN (SELECT to_jsonb(fields) FROM (
     SELECT ${representationOwnerColumns()},
+      ${ownLotFields},
       CASE WHEN ${trustEnabledSql} THEN l.trust_factors END AS "trustFactors",
       CASE WHEN ${trustEnabledSql} AND l.status = 'ACTIVE' THEN (
         SELECT (s.value #>> '{}')::int FROM platform_settings s

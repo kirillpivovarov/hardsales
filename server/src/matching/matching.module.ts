@@ -1,7 +1,8 @@
-import { Body, Controller, Get, HttpCode, Module, Param, Post, Put, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Module, Param, Post, Put, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { AuthService } from '../auth/auth.service';
 import { MatchingService } from './matching.service';
+import { NearMissesService } from './near-misses.service';
 
 @Controller('matches')
 class MatchesController {
@@ -41,7 +42,7 @@ class AdminMatchesController {
 
   @Get('matches')
   async list(@Req() request: Request, @Query() query: Record<string, unknown>) {
-    await this.auth.admin(request);
+    await this.auth.staff(request);
     return this.matches.adminList(query);
   }
 
@@ -57,9 +58,36 @@ class AdminMatchesController {
   }
 }
 
+@Controller('admin/near-misses')
+class NearMissesController {
+  constructor(private readonly auth: AuthService, private readonly matches: NearMissesService) {}
+
+  @Get()
+  async list(@Req() request: Request, @Query() query: Record<string, unknown>) {
+    await this.auth.staff(request);
+    return this.matches.list(query);
+  }
+
+  @Post('propose')
+  async propose(@Req() request: Request, @Body() body: unknown) {
+    return this.matches.propose(await this.auth.staff(request), body);
+  }
+
+  @Post('dismiss')
+  @HttpCode(200)
+  async dismiss(@Req() request: Request, @Body() body: unknown) {
+    return this.matches.dismiss(await this.auth.staff(request), body);
+  }
+
+  @Delete('dismiss')
+  async restore(@Req() request: Request, @Body() body: unknown) {
+    return this.matches.dismiss(await this.auth.staff(request), body, true);
+  }
+}
+
 @Module({
-  controllers: [MatchesController, AdminMatchesController],
-  providers: [MatchingService],
+  controllers: [MatchesController, AdminMatchesController, NearMissesController],
+  providers: [MatchingService, NearMissesService],
   exports: [MatchingService],
 })
 export class MatchingModule {}

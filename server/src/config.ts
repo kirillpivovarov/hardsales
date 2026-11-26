@@ -1,4 +1,5 @@
 import { isAbsolute } from 'node:path';
+import { checkTelegramConfig } from './telegram/telegram-config';
 
 export function flag(name: string, fallback = false): boolean {
   const value = process.env[name];
@@ -29,6 +30,7 @@ export function appOrigin(): string | undefined {
 
 export function checkConfig(): void {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+  checkTelegramConfig();
   if (process.env.SERVE_WEB_DIR && !isAbsolute(process.env.SERVE_WEB_DIR)) {
     throw new Error('SERVE_WEB_DIR must be an absolute path');
   }

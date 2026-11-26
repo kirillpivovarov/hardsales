@@ -7,12 +7,18 @@ import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import type { PoolClient } from 'pg';
 import { appOrigin, demoMode, isProduction } from '../config';
+import { isPublicProfileText } from '../contact';
+import { ContactGuardService } from '../contact-guard/contact-guard.service';
 import { DatabaseService, type Queryable } from '../database/database.service';
 import { assertCompanyAlias } from '../exchange/disclosure-names';
 import { INVALID_INVITE, INVITE_NO_LONGER_AVAILABLE, InvitesService, type AvailableInvite } from '../exchange/invites.service';
 import { OnboardingService } from '../exchange/onboarding.service';
+import {
+  assertPolicyVersion, assertRegistrationAvailable, CONSENT_REQUIRED, policyRequired, policyVersion,
+  recordConsent, registrationAvailable, type ConsentEvidence,
+} from '../privacy/policy';
 import { codesMatch, hashCode, hashPassword, hashToken, passwordMatches, strongAdminPassword } from './auth.crypto';
-import type { CreateModeratorDto, CredentialsDto, LoginDto, ProfileDto, RegisterDto } from './auth.dto';
+import type { AcceptPolicyDto, CreateModeratorDto, CredentialsDto, LoginDto, ProfileDto, RegisterDto } from './auth.dto';
 import { isStaffRole, type ParticipantRole, type SessionUser, type StaffSession, type UserRow } from './auth.types';
 import { MailService } from './mail.service';
 import { CAPTCHA_TTL, createRegistrationCaptcha, verifyRegistrationCaptcha } from './captcha';
@@ -35,9 +41,13 @@ const INVALID_CODE = 'Код неверен, истёк или уже испол
 const REGISTRATION_COOLDOWN = 'Код можно запросить ещё раз через минуту.';
 const DUMMY_PASSWORD_HASH = `scrypt$${'0'.repeat(32)}$${'0'.repeat(128)}`;
 
-interface PendingProfile extends Omit<RegisterDto, 'password' | 'captchaToken' | 'inviteCode'> {
+interface PendingProfile extends Omit<RegisterDto, 'password' | 'captchaToken' | 'inviteCode' | 'pdConsent' | 'pdPolicyVersion'> {
   passwordHash: string;
   inviteId?: string;
+  pdConsentVersion: string;
+  pdConsentAt: string;
+  consentIp: string | null;
+  consentUserAgent: string | null;
 }
 
 type PendingRegistration = PendingProfile | { suppressed: true };
@@ -122,6 +132,7 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     private readonly mail: MailService,
     private readonly invites: InvitesService,
     private readonly onboarding: OnboardingService,
+    private readonly contactGuard: ContactGuardService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -143,9 +154,19 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     return (await this.invites.registration()).mode;
   }
 
-  async register(input: RegisterDto, ip: string): Promise<ChallengeResult> {
+  async privacyStatus() {
+    const version = await policyVersion(this.db);
+    return { pdPolicyVersion: version, pdRegistrationAvailable: registrationAvailable(version) };
+  }
+
+  async register(input: RegisterDto, ip: string, evidence: ConsentEvidence): Promise<ChallengeResult> {
+    const { captchaToken, password, inviteCode, pdConsent, pdPolicyVersion, infoEmailConsent, ...profile } = input;
+    if (pdConsent !== true) throw new BadRequestException(CONSENT_REQUIRED);
+    const version = await policyVersion(this.db);
+    assertRegistrationAvailable(version);
+    assertPolicyVersion(version, pdPolicyVersion);
+    await this.contactGuard.assertFields(undefined, 'PROFILE', { username: profile.username, city: profile.city });
     await this.limit('register-ip', ip, 12, 3600);
-    const { captchaToken, password, inviteCode, ...profile } = input;
     const signature = await verifyRegistrationCaptcha(captchaToken);
     // A challenge can be submitted only once, even across application replicas or encoded differently.
     await this.limit('registration-captcha-used', signature, 1, CAPTCHA_TTL);
@@ -172,7 +193,10 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       await this.checkRegistrationCooldown(client, profile.email);
       const pending: PendingRegistration = await this.registeredEmail(client, profile.email)
         ? { suppressed: true }
-        : { ...profile, passwordHash, inviteId: invite?.id };
+        : {
+          ...profile, passwordHash, inviteId: invite?.id, pdConsentVersion: version, pdConsentAt: evidence.at.toISOString(),
+          consentIp: evidence.ip, consentUserAgent: evidence.userAgent, infoEmailConsent: infoEmailConsent === true,
+        };
       return this.insertChallenge(client, 'REGISTER', profile.email, null, pending, null);
     });
     return this.deliverChallenge(challenge);
@@ -259,18 +283,28 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       let user: UserRow | undefined;
       if (challenge.purpose === 'REGISTER') {
         if (!pending || (pending.role !== 'BUYER' && pending.role !== 'SELLER')) return null;
+        if (!pending.pdConsentVersion || !pending.pdConsentAt) {
+          await client.query('DELETE FROM email_challenges WHERE id = $1', [id]);
+          return { error: 'consent' } as const;
+        }
+        const consentAt = new Date(pending.pdConsentAt);
         const registration = await this.invites.lockRegistration(client);
         if (!pending.inviteId && registration.mode === 'INVITE') throw new ConflictException(INVITE_NO_LONGER_AVAILABLE);
         const invite = pending.inviteId ? await this.invites.lockAvailable(client, pending.inviteId, pending.role) : null;
         user = (await client.query<UserRow>(`
           INSERT INTO users (username, display_name, email, password_hash, role, participant_type,
-            company_name, city, country, telegram, email_verified_at, invite_id, onboarding_state)
-          VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11)
+            company_name, city, country, telegram, email_verified_at, invite_id, onboarding_state,
+            pd_consent_version, pd_consent_at, info_email_consent)
+          VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13, $14)
           ON CONFLICT DO NOTHING RETURNING *
         `, [pending.username, pending.email, pending.passwordHash, pending.role, pending.participantType,
           pending.participantType === 'COMPANY' ? pending.companyName : null,
           pending.city, pending.country, pending.telegram.replace(/^@/, ''), invite?.id ?? null,
-          registration.enabled || invite ? 'REQUIRED' : 'EXEMPT'])).rows[0];
+          registration.enabled || invite ? 'REQUIRED' : 'EXEMPT', pending.pdConsentVersion, consentAt,
+          pending.infoEmailConsent === true])).rows[0];
+        if (user) await recordConsent(client, user.id, pending.pdConsentVersion, 'REGISTRATION',
+          { at: consentAt, ip: pending.consentIp, userAgent: pending.consentUserAgent },
+          { pd: true, infoEmail: pending.infoEmailConsent === true });
         if (invite && user) await this.invites.consume(client, invite, user.id, user.display_name);
       } else {
         user = (await client.query<UserRow>('SELECT * FROM users WHERE id = $1 FOR UPDATE', [challenge.user_id])).rows[0];
@@ -298,6 +332,7 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
       throw new ConflictException('Этот логин или адрес уже используется. Вернитесь к форме и выберите другой логин или войдите в свой аккаунт.');
     }
     if (result.error === 'missing') throw new UnauthorizedException('Запросите вход заново.');
+    if (result.error === 'consent') throw new ConflictException('Подтвердите согласие и запросите код заново.');
     throw statusError(result.error);
   }
 
@@ -317,9 +352,12 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     return null;
   }
 
-  async require(request: Request): Promise<SessionUser> {
+  async require(request: Request, allowPendingConsent = false): Promise<SessionUser> {
     const user = (await this.resolve(request, true))!;
     if (user.mustChangePassword) throw new ForbiddenException('Замените начальный пароль в настройках аккаунта.');
+    if (!allowPendingConsent && user.pdConsentRequired && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) {
+      throw policyRequired();
+    }
     return user;
   }
 
@@ -335,10 +373,27 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     return { ...user, role: user.role, sessionHash: hashToken(sessionToken(request)!) };
   }
 
-  async participant(request: Request): Promise<SessionUser<ParticipantRole>> {
-    const user = await this.require(request);
+  async participant(request: Request, allowPendingConsent = false): Promise<SessionUser<ParticipantRole>> {
+    const user = await this.require(request, allowPendingConsent);
     if (isStaffRole(user.role)) throw new ForbiddenException('Действие доступно покупателям и продавцам.');
     return { ...user, role: user.role };
+  }
+
+  async acceptPolicy(request: Request, input: AcceptPolicyDto, evidence: ConsentEvidence): Promise<SessionUser> {
+    const owner = await this.participant(request, true);
+    return this.db.transaction(async client => {
+      const version = await policyVersion(client, true);
+      assertPolicyVersion(version, input.pdPolicyVersion);
+      const { rows: [user] } = await client.query<UserRow>(`
+        UPDATE users SET pd_consent_version=$2, pd_consent_at=$3, info_email_consent=COALESCE($4,info_email_consent)
+        WHERE id=$1 AND status='ACTIVE'
+          AND EXISTS (SELECT 1 FROM auth_sessions WHERE token_hash=$5 AND user_id=$1 AND expires_at>now())
+        RETURNING *
+      `, [owner.id, version, evidence.at, input.infoEmailConsent, hashToken(sessionToken(request)!)]);
+      if (!user) throw new ForbiddenException('Профиль недоступен.');
+      await recordConsent(client, user.id, version, 'LOGIN', evidence, { pd: true, infoEmail: input.infoEmailConsent });
+      return this.onboarding.presentUser(user, client);
+    });
   }
 
   async createModerator(request: Request, input: CreateModeratorDto): Promise<SessionUser> {
@@ -389,16 +444,27 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     });
   }
 
-  async updateProfile(request: Request, input: ProfileDto): Promise<SessionUser> {
+  async updateProfile(request: Request, input: ProfileDto, evidence: ConsentEvidence): Promise<SessionUser> {
     const owner = await this.require(request);
     if (owner.role === 'MODERATOR') throw new ForbiddenException('Настройки торгового профиля доступны покупателям и продавцам.');
+    await this.contactGuard.assertFields(isStaffRole(owner.role) ? undefined : owner.id, 'PROFILE', {
+      displayName: input.displayName, city: input.city,
+    });
+    if ([input.displayName, input.city].some(value => value !== undefined && !isPublicProfileText(value))) {
+      throw new BadRequestException('Уберите контакты и ссылки из отображаемого имени и города.');
+    }
     if (input.companyName !== undefined && owner.participantType !== 'COMPANY') {
       throw new BadRequestException('Название компании доступно только компаниям.');
     }
+    if (input.infoEmailConsent !== undefined && isStaffRole(owner.role)) {
+      throw new ForbiddenException('Настройка информационных писем доступна участникам.');
+    }
     return this.db.transaction(async (client) => {
-      if (input.companyName !== undefined || input.displayName !== undefined) {
+      let previousInfoConsent: boolean | undefined;
+      if (input.companyName !== undefined || input.displayName !== undefined || input.infoEmailConsent !== undefined) {
         const { rows: [current] } = await client.query<UserRow>('SELECT * FROM users WHERE id = $1 FOR UPDATE', [owner.id]);
         if (!current) throw new ForbiddenException('Профиль недоступен.');
+        previousInfoConsent = current.info_email_consent;
         const name = input.companyName ?? current.company_name;
         const nickname = input.displayName ?? current.display_name;
         if (name !== current.company_name || nickname !== current.display_name) {
@@ -413,13 +479,17 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
           telegram = COALESCE($5, telegram),
           company_name = COALESCE($6, company_name),
           notify_email = COALESCE($8, notify_email),
+          info_email_consent = COALESCE($9, info_email_consent),
           updated_at = now()
         WHERE id = $1 AND status = 'ACTIVE'
           AND EXISTS (SELECT 1 FROM auth_sessions WHERE token_hash = $7 AND user_id = $1 AND expires_at > now())
         RETURNING *
       `, [owner.id, input.displayName, input.city, input.country, input.telegram?.replace(/^@/, ''), input.companyName,
-        hashToken(sessionToken(request)!), input.notifyEmail]);
+        hashToken(sessionToken(request)!), input.notifyEmail, input.infoEmailConsent]);
       if (!updated) throw new ForbiddenException('Профиль недоступен.');
+      if (input.infoEmailConsent !== undefined && input.infoEmailConsent !== previousInfoConsent) {
+        await recordConsent(client, updated.id, owner.pdPolicyVersion, 'PROFILE', evidence, { infoEmail: input.infoEmailConsent });
+      }
       await this.recordStaffAction(client, updated, updated.id, 'profile-edited', {
         fields: Object.keys(input).filter((key) => input[key as keyof ProfileDto] !== undefined),
       });
@@ -429,6 +499,7 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
 
   async changeCredentials(request: Request, input: CredentialsDto): Promise<SessionResult> {
     const owner = (await this.resolve(request, true))!;
+    if (owner.pdConsentRequired) throw policyRequired();
     const token = sessionToken(request)!;
     if (input.username !== undefined && owner.role !== 'ADMIN') {
       throw new ForbiddenException('Смена логина доступна администратору.');

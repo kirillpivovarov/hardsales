@@ -18,6 +18,11 @@ export interface User {
   rulesVersion?: string;
   rulesRequired?: boolean;
   notifyEmail?: boolean;
+  pdPolicyVersion?: string;
+  pdConsentVersion?: string | null;
+  pdConsentAt?: string | null;
+  pdConsentRequired?: boolean;
+  infoEmailConsent?: boolean;
 }
 
 export function isStaff(user?: User | null): boolean {
@@ -25,9 +30,18 @@ export function isStaff(user?: User | null): boolean {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  readonly code?: string;
+  readonly field?: string;
+  readonly kinds?: string[];
+  readonly warning: boolean;
+
+  constructor(public status: number, message: string, metadata?: Record<string, unknown>) {
     super(message);
     this.name = 'ApiError';
+    this.code = typeof metadata?.code === 'string' ? metadata.code : undefined;
+    this.field = typeof metadata?.field === 'string' ? metadata.field : undefined;
+    this.kinds = Array.isArray(metadata?.kinds) ? metadata.kinds.filter((kind): kind is string => typeof kind === 'string') : undefined;
+    this.warning = metadata?.warning === true;
   }
 }
 
@@ -48,9 +62,12 @@ export async function api<T>(path: string, options: {
   if (response.status === 204) return undefined as T;
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
+    if (response.status === 403 && payload?.code === 'PD_CONSENT_REQUIRED') {
+      window.dispatchEvent(new Event('hwforai:consent-required'));
+    }
     const message = Array.isArray(payload?.message) ? payload.message.join(' · ') : payload?.message;
     const fallback = response.status === 413 ? 'Размер запроса превышает допустимый предел.' : 'Сервис временно недоступен.';
-    throw new ApiError(response.status, typeof message === 'string' ? message : fallback);
+    throw new ApiError(response.status, typeof message === 'string' ? message : fallback, payload);
   }
   if (payload === null) throw new ApiError(502, 'Сервис вернул некорректный ответ.');
   return payload as T;

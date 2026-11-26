@@ -130,6 +130,22 @@ test('production staff verify email over SMTP and rotate credentials with audit'
   assert.equal(credentialChanges[0].before, null);
   assert.deepEqual(credentialChanges[0].after, { usernameChanged: true });
 
+  await t.test('working registration opens only after policy publication', async () => {
+    const guest = async () => fetch(apiUrl + '/auth/me').then(response => response.json());
+    const before = await guest();
+    assert.equal(before.pdRegistrationAvailable, false);
+    const signup = await request('/auth/register', 'POST', {
+      username: 'prod-policy-tester', email: 'prod-policy-tester@example.test',
+      password: 'Production-policy-test-2026!', role: 'BUYER', participantType: 'INDIVIDUAL',
+      city: 'Томск', country: 'RU', telegram: 'prod_policy_tester', captchaToken: 'not-solved',
+      pdConsent: true, pdPolicyVersion: before.pdPolicyVersion,
+    });
+    assert.equal(signup.status, 503, await signup.text());
+    const published = await request('/admin/settings/pd_policy_version', 'PUT', { value: '1.0' }, { cookie: renewed.cookie });
+    assert.equal(published.status, 200, await published.text());
+    assert.equal((await guest()).pdRegistrationAvailable, true);
+  });
+
   await t.test('administrator provisions a moderator who must verify mail and rotate before moderation', async () => {
     const username = process.env.HWFORAI_PRODUCTION_MODERATOR_USERNAME || `qa-staff-${randomBytes(5).toString('hex')}`;
     const email = username + '@example.test';

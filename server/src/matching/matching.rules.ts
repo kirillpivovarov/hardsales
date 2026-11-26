@@ -1,6 +1,6 @@
 export type ListingForMatch = {
   id: string; title: string; kind: 'SELL' | 'BUY'; owner_id: string;
-  model_id: string; analog_model_ids: string[]; condition: 'NEW' | 'REFURBISHED' | 'USED' | 'ANY';
+  model_id: string | null; analog_model_ids: string[]; condition: 'NEW' | 'REFURBISHED' | 'USED' | 'ANY';
   quantity: number; min_lot: number; ship_days: number | null;
   origin_scope: string | null; origin_country: string | null; destination_country: string | null;
   counterparty: 'COMPANY' | 'ANY'; participant_type: 'COMPANY' | 'INDIVIDUAL';
@@ -23,6 +23,20 @@ export const declineReasons = [
 ] as const;
 
 const conditionRank = { ANY: 0, USED: 1, REFURBISHED: 2, NEW: 3 };
+const conditionNames = { ANY: 'любое', USED: 'бывшее в употреблении', REFURBISHED: 'восстановленное', NEW: 'новое' };
+const regions = new Intl.DisplayNames('ru', { type: 'region' });
+
+export const nearMissKeys = [
+  'MODEL_ANALOG', 'MODEL_MISSING', 'CONDITION', 'QUANTITY', 'ORIGIN', 'DESTINATION', 'COUNTERPARTY', 'SHIP_DATE', 'PRICE_OVER',
+] as const;
+export type NearMissKey = typeof nearMissKeys[number];
+export type MatchFailure = { key: NearMissKey | 'MODEL_INCOMPATIBLE' | 'INVALID_PAIR'; text: string; detail: object };
+export type MatchModel = { id: string; nameRu: string; nameEn: string; groups: string[] };
+type ModelEvidence = { sell: MatchModel | null; buy: MatchModel | null };
+
+export function matchRegion(code: string | null) {
+  return code ? regions.of(code) ?? code : 'любая страна';
+}
 
 function intersect(a: string[], b: string[]) {
   return [...new Set(a)].filter(value => b.includes(value));
@@ -38,16 +52,21 @@ export function addWorkDays(day: string, days: number) {
   return date.toISOString().slice(0, 10);
 }
 
+export function counterpartyEligible(sell: ListingForMatch, buy: ListingForMatch) {
+  return (sell.counterparty !== 'COMPANY' || buy.participant_type === 'COMPANY')
+    && (buy.counterparty !== 'COMPANY' || sell.participant_type === 'COMPANY');
+}
+
 function eligible(sell: ListingForMatch, buy: ListingForMatch, day: string) {
   if (sell.kind !== 'SELL' || buy.kind !== 'BUY' || sell.owner_id === buy.owner_id) return false;
+  if (!sell.model_id || !buy.model_id) return false;
   if (sell.model_id !== buy.model_id && !buy.analog_model_ids.includes(sell.model_id)) return false;
   if (conditionRank[sell.condition] < conditionRank[buy.condition]) return false;
   if (sell.quantity < buy.min_lot || buy.quantity < sell.min_lot) return false;
   const requiredOrigin = buy.origin_scope === 'DOMESTIC' ? buy.destination_country : buy.origin_country;
   if (buy.origin_scope !== 'ANY' && sell.origin_scope !== 'ANY' && sell.origin_country !== requiredOrigin) return false;
   if (sell.destination_country !== null && sell.destination_country !== buy.destination_country) return false;
-  if (sell.counterparty === 'COMPANY' && buy.participant_type !== 'COMPANY') return false;
-  if (buy.counterparty === 'COMPANY' && sell.participant_type !== 'COMPANY') return false;
+  if (!counterpartyEligible(sell, buy)) return false;
   return sell.ship_days === null || !buy.delivery_by || addWorkDays(day, sell.ship_days) <= buy.delivery_by;
 }
 
@@ -70,9 +89,9 @@ function fixedDecimal(value: string, digits: number) {
   return BigInt(integer + decimal.padEnd(digits, '0').slice(0, digits));
 }
 
-export function evaluatePair(sell: ListingForMatch, buy: ListingForMatch, day: string, rates: Rates, compatibility: Compatibility) {
-  if (!eligible(sell, buy, day)) return null;
+function compareTerms(sell: ListingForMatch, buy: ListingForMatch, rates: Rates, compatibility: Compatibility) {
   const mismatches: { key: 'PRICE' | 'PRICE_UNKNOWN' | 'PAYMENT'; text: string }[] = [];
+  let priceOver: number | null = null;
   const sellRate = rates[sell.currency], buyRate = rates[buy.currency];
   if (sell.price_mode !== 'FIXED' || buy.price_mode !== 'FIXED' || sell.price === null || buy.price === null) {
     mismatches.push({ key: 'PRICE_UNKNOWN', text: 'Цена договорная: обсудите в чате' });
@@ -82,16 +101,78 @@ export function evaluatePair(sell: ListingForMatch, buy: ListingForMatch, day: s
     // Cross-multiplication preserves the 5% threshold for decimal amounts and rates.
     const asking = fixedDecimal(sell.price, 2) * fixedDecimal(sellRate, 8) * BigInt(buy.quantity);
     const budget = fixedDecimal(buy.price, 2) * fixedDecimal(buyRate, 8) * BigInt(sell.quantity);
-    if (asking * 100n > budget * 105n) return null;
-    if (asking > budget) {
+    if (asking * 100n > budget * 105n) priceOver = Number(asking - budget) / Number(budget);
+    else if (asking > budget) {
       const over = (100 * Number(asking - budget) / Number(budget)).toFixed(1).replace('.', ',');
       mismatches.push({ key: 'PRICE', text: `Цена выше бюджета покупателя на ${over} % (в пределах 5 %)` });
     }
   }
-  const compareTerms = sell.payment_terms.length > 0 && buy.payment_terms.length > 0;
-  const commonTerms = compareTerms ? intersect(sell.payment_terms, buy.payment_terms) : [];
-  const commonMethods = compareTerms ? [] : intersect(sell.payment_methods, buy.payment_methods);
+  const formalPayment = sell.payment_terms.length > 0 && buy.payment_terms.length > 0;
+  const commonTerms = formalPayment ? intersect(sell.payment_terms, buy.payment_terms) : [];
+  const commonMethods = formalPayment ? [] : intersect(sell.payment_methods, buy.payment_methods);
   const gap = commonTerms.length || commonMethods.length ? null : gapFor(sell, buy, compatibility);
   if (gap) mismatches.push({ key: 'PAYMENT', text: `Разрыв по оплате. Его закрывают: ${gap.rows.map(row => row.tool).join(', ')}.` });
-  return { type: mismatches.length ? 'PARTIAL' : 'FULL', mismatches, commonTerms, commonMethods, gap } as const;
+  return { terms: { type: mismatches.length ? 'PARTIAL' : 'FULL', mismatches, commonTerms, commonMethods, gap } as const, priceOver };
+}
+
+export function evaluatePair(sell: ListingForMatch, buy: ListingForMatch, day: string, rates: Rates, compatibility: Compatibility) {
+  if (!eligible(sell, buy, day)) return null;
+  const { terms, priceOver } = compareTerms(sell, buy, rates, compatibility);
+  return priceOver === null ? terms : null;
+}
+
+export function explainPair(sell: ListingForMatch, buy: ListingForMatch, day: string, rates: Rates, compatibility: Compatibility,
+  models?: ModelEvidence) {
+  const failures: MatchFailure[] = [];
+  const add = (key: MatchFailure['key'], text: string, detail: object = {}) => { failures.push({ key, text, detail }); };
+
+  if (sell.kind !== 'SELL' || buy.kind !== 'BUY' || sell.owner_id === buy.owner_id) {
+    add('INVALID_PAIR', 'Нужны предложение и заявка от разных участников');
+  }
+  const sellerModelId = sell.model_id ?? models?.sell?.id;
+  const buyerModelId = buy.model_id ?? models?.buy?.id;
+  const sharedGroup = models?.sell?.groups.some(group => models.buy?.groups.includes(group)) ?? false;
+  const sameModel = Boolean(sellerModelId && buyerModelId && sellerModelId === buyerModelId);
+  const allowedAnalog = Boolean(sellerModelId && buy.analog_model_ids.includes(sellerModelId));
+  if (!sell.model_id || !buy.model_id) {
+    const byTitle = !sell.model_id ? models?.sell : models?.buy;
+    if (byTitle && (sameModel || sharedGroup || allowedAnalog)) {
+      const owner = !sell.model_id && !buy.model_id ? 'сторон' : !sell.model_id ? 'продавца' : 'покупателя';
+      add('MODEL_MISSING', `У ${owner} нет модели из справочника, по названию похоже на ${byTitle.nameRu}`, { modelId: byTitle.id });
+    } else add('MODEL_INCOMPATIBLE', 'Не удалось сопоставить модели из объявлений');
+  } else if (!sameModel && !allowedAnalog) {
+    if (sharedGroup) {
+      add('MODEL_ANALOG', `Модель продавца ${models?.sell?.nameRu ?? sell.model_id} не отмечена покупателем как аналог`,
+        { sellerModelId, buyerModelId });
+    } else add('MODEL_INCOMPATIBLE', 'Модели находятся в разных группах аналогов', { sellerModelId, buyerModelId });
+  }
+
+  if (conditionRank[sell.condition] < conditionRank[buy.condition]) {
+    add('CONDITION', `Состояние: продавец ${conditionNames[sell.condition]}, покупатель хочет ${conditionNames[buy.condition]}`,
+      { sell: sell.condition, buy: buy.condition });
+  }
+  if (sell.quantity < buy.min_lot) {
+    add('QUANTITY', `Количество: у продавца ${sell.quantity} шт. при партии покупателя от ${buy.min_lot}`,
+      { quantity: sell.quantity, minLot: buy.min_lot });
+  } else if (buy.quantity < sell.min_lot) {
+    add('QUANTITY', `Количество: покупателю нужно ${buy.quantity} шт. при партии продавца от ${sell.min_lot}`,
+      { quantity: buy.quantity, minLot: sell.min_lot });
+  }
+  const requiredOrigin = buy.origin_scope === 'DOMESTIC' ? buy.destination_country : buy.origin_country;
+  if (buy.origin_scope !== 'ANY' && sell.origin_scope !== 'ANY' && sell.origin_country !== requiredOrigin) {
+    add('ORIGIN', `Отгрузка из ${matchRegion(sell.origin_country)}, покупатель ждёт из ${matchRegion(requiredOrigin)}`,
+      { actual: sell.origin_country, required: requiredOrigin });
+  }
+  if (sell.destination_country !== null && sell.destination_country !== buy.destination_country) {
+    add('DESTINATION', `Продавец доставляет в ${matchRegion(sell.destination_country)}, покупателю нужно в ${matchRegion(buy.destination_country)}`,
+      { actual: sell.destination_country, required: buy.destination_country });
+  }
+  if (!counterpartyEligible(sell, buy)) add('COUNTERPARTY', 'Сторона принимает только компании');
+  const shipDate = sell.ship_days === null ? null : addWorkDays(day, sell.ship_days);
+  if (shipDate && buy.delivery_by && shipDate > buy.delivery_by) {
+    add('SHIP_DATE', `Отгрузка ${shipDate}, покупателю нужно к ${buy.delivery_by}`, { shipDate, deliveryBy: buy.delivery_by });
+  }
+  const { terms, priceOver } = compareTerms(sell, buy, rates, compatibility);
+  if (priceOver !== null) add('PRICE_OVER', `Цена выше бюджета на ${(100 * priceOver).toFixed(1).replace('.', ',')} %`, { ratio: priceOver });
+  return { failures, evaluation: failures.length ? null : terms, terms, priceOver };
 }

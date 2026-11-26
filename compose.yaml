@@ -41,6 +41,9 @@ services:
       SMTP_REQUIRE_TLS: "false"
       MAIL_FROM: "hwforai <no-reply@hwforai.local>"
       MODERATION_AGENT_TOKEN: ${MODERATION_AGENT_TOKEN:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_MODE: ${TELEGRAM_MODE:-polling}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
     ports:
       - "127.0.0.1:${APP_PORT:-3100}:3001"
     healthcheck:

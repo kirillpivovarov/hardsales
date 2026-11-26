@@ -4,6 +4,7 @@ import { api, isStaff, type User } from './api'
 import { useI18n } from './i18n'
 import { ListingForm } from './ListingForm'
 import { StaffDialog } from './StaffDialog'
+import { TelegramUserControl } from './Telegram'
 import { CountrySelect } from './CountrySelect'
 import { categoryIcons, countryName } from './market'
 import { Button, Field, Notice, Spinner } from './ui'
@@ -57,6 +58,8 @@ const labels: Record<string, string> = {
   INDIVIDUAL: 'Частное лицо',
   FRAUD: 'Подозрение на мошенничество',
   ABUSE: 'Оскорбления или угрозы',
+  CONTACT_BYPASS: 'Попытки обхода защиты контактов',
+  CONTACT_PHOTO: 'Контакты на фото',
   OTHER: 'Другая причина',
   ON_PLATFORM: 'Чат площадки',
   VERIFIED_TELEGRAM: 'Привязанный Telegram',
@@ -72,6 +75,7 @@ const labels: Record<string, string> = {
   'reports-listed': 'Просмотр списка жалоб',
   'report-viewed': 'Просмотр жалобы',
   'evidence-viewed': 'Просмотр переписки по жалобе',
+  'contact-blocks-viewed': 'Просмотр журнала попыток обхода',
   'credentials-changed': 'Смена данных для входа',
   'moderator-created': 'Создание модератора',
   login: 'Вход в аккаунт',
@@ -119,8 +123,9 @@ type ReviewRow = {
 
 type ReportRow = {
   id: string
-  chatId: string
-  reporter: Person
+  chatId: string | null
+  listingId?: string | null
+  reporter: Person | null
   subject: Person
   reason: string
   scope?: string
@@ -135,7 +140,7 @@ type ReportMessage = { id: number; body: string; nickname: string; createdAt: st
 type AuditRow = {
   id: number
   actor: string | { username?: string; nickname?: string; id?: string } | null
-  actorRole: 'ADMIN' | 'MODERATOR' | 'AGENT' | null
+  actorRole: User['role'] | 'AGENT' | null
   entity: string
   entityId: string
   action: string
@@ -301,7 +306,7 @@ function PagedRecords<T extends { id: string | number; status?: string }>({
       {tab === 'audit' && <Field label={t('Роль исполнителя')}>
         <select value={actorRole} onChange={event => { setActorRole(event.target.value); setPage(1) }}>
           <option value="">{t('Все роли')}</option>
-          {['ADMIN', 'MODERATOR', 'AGENT'].map(role => <option key={role} value={role}>{statusLabel(t, role)}</option>)}
+          {['ADMIN', 'MODERATOR', 'AGENT', 'BUYER', 'SELLER'].map(role => <option key={role} value={role}>{statusLabel(t, role)}</option>)}
         </select>
       </Field>}
       <Button variant="secondary" type="submit">{t('Найти')}</Button>
@@ -341,6 +346,7 @@ function Users({ version, edit, administrator }: PagedProps & { administrator: b
       <Button variant="secondary" type="button" onClick={() => edit({ type: 'user', id: row.id })}>{t('Редактировать')}</Button>
       {row.status !== 'BANNED' && <Button variant="ghost" type="button" onClick={() => edit({ type: 'status', tab: 'users', id: row.id, name: row.displayName, status: row.status })}>{t('Статус')}</Button>}
       {administrator && <Link className="button button-ghost" to={'/admin?section=exchange&part=onboarding&userId=' + row.id}>{t('Анкета')}</Link>}
+      {administrator && <Link className="button button-ghost" to={'/admin?section=exchange&part=user-consents&userId=' + row.id}>{t('История согласий')}</Link>}
     </div> },
   ]} />
 }
@@ -383,7 +389,7 @@ function Reports({ version, edit, subjectId }: PagedProps & { subjectId?: string
   const { t, locale } = useI18n()
   return <PagedRecords<ReportRow> tab="reports" version={version} subjectId={subjectId} columns={[
     { label: t('Жалоба'), render: row => <RecordLabel title={statusLabel(t, row.reason)} detail={row.details.length > 150 ? row.details.slice(0, 149) + '…' : row.details} /> },
-    { label: t('Участники'), render: row => <RecordLabel title={row.reporter?.nickname ?? '—'} detail={t('На профиль {name}', { name: row.subject?.nickname ?? '—' })} /> },
+    { label: t('Участники'), render: row => <RecordLabel title={row.reporter?.nickname ?? t('Площадка')} detail={t('На профиль {name}', { name: row.subject?.nickname ?? '—' })} /> },
     { label: t('Статус'), render: row => <RecordLabel title={statusLabel(t, row.status)} detail={formatDate(locale, row.createdAt)} /> },
     { label: t('Действия'), render: row => <Button variant="secondary" type="button" onClick={() => edit({ type: 'status', tab: 'reports', id: row.id, name: statusLabel(t, row.reason), status: row.status })}>{t('Рассмотреть')}</Button> },
   ]} />
@@ -583,11 +589,12 @@ function StatusForm({
   })}>
     <p>{editor.name} <span className="muted">· {statusLabel(t, editor.status)}</span></p>
     {editor.report && <div>
-      {editor.report.scope && <p className="muted">{statusLabel(t, editor.report.scope)}</p>}
+      {editor.report.scope && editor.report.chatId && <p className="muted">{statusLabel(t, editor.report.scope)}</p>}
       <p className="preserve-text">{editor.report.details}</p>
+      {editor.report.listingId && <Link className="text-link" to={'/listings/' + editor.report.listingId}>{t('Открыть объявление')}</Link>}
       {editor.report.resolution && <p className="muted preserve-text">{t('Решение · {reason}', { reason: editor.report.resolution })}</p>}
     </div>}
-    {editor.tab === 'reports' && <ReportEvidence reportId={editor.id} />}
+    {editor.tab === 'reports' && editor.report?.chatId && <ReportEvidence reportId={editor.id} />}
     <Field label={t('Новый статус')}>
       <select name="status" value={status} onChange={event => setStatus(event.target.value)} required>
         <option value="">{t('Выберите статус')}</option>
@@ -818,10 +825,13 @@ function editorTitle(editor: Editor, t: Translator) {
 
 type EditorActions = { close: () => void; saved: (result?: unknown) => void }
 
-function EditorFields({ editor, close, saved }: { editor: Editor } & EditorActions) {
+function EditorFields({ editor, close, saved, administrator = false }: { editor: Editor; administrator?: boolean } & EditorActions) {
   const actions = { onClose: close, onSaved: saved }
   switch (editor.type) {
-    case 'user': return editor.row ? <UserForm row={editor.row} {...actions} /> : <UserEditor id={editor.id} close={close} saved={saved} />
+    case 'user': return <>
+      {editor.row ? <UserForm row={editor.row} {...actions} /> : <UserEditor id={editor.id} close={close} saved={saved} />}
+      {administrator && <TelegramUserControl userId={editor.id} />}
+    </>
     case 'listing': return <ListingForm listingId={editor.id} admin onSaved={saved} />
     case 'status': return editor.tab === 'reports' ? <ReportStatusForm editor={editor} close={close} saved={saved} /> : <StatusForm editor={editor} {...actions} />
     case 'category': return <CategoryForm {...editor} {...actions} />
@@ -988,7 +998,9 @@ export function AdminPage({ user }: { user?: User | null }) {
         {(tab === 'categories' || tab === 'content' || tab === 'locales') && <ReferenceRecords tab={tab} {...props} />}
       </section>
     </div>
-    {editor && <StaffDialog title={editorTitle(editor, t)} onClose={close}><EditorFields editor={editor} close={close} saved={refresh} /></StaffDialog>}
+    {editor && <StaffDialog title={editorTitle(editor, t)} onClose={close}>
+      <EditorFields editor={editor} close={close} saved={refresh} administrator={user?.role === 'ADMIN'} />
+    </StaffDialog>}
   </div>
 }
 

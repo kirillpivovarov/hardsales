@@ -1,11 +1,13 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Post, Req } from '@nestjs/common'
+import { Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, Post, Req } from '@nestjs/common'
 import type { Request } from 'express'
 import { AuthService } from '../auth/auth.service'
+import { demoMode } from '../config'
 import { ActualityService } from './actuality.service'
+import { ExchangeJobs } from './jobs'
 
 @Controller()
 export class ActualityController {
-  constructor(private readonly auth: AuthService, private readonly actuality: ActualityService) {}
+  constructor(private readonly auth: AuthService, private readonly actuality: ActualityService, private readonly jobs: ExchangeJobs) {}
 
   @Post('listings/:id/actuality')
   @HttpCode(200)
@@ -50,5 +52,23 @@ export class ActualityController {
   @HttpCode(200)
   async staffResume(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     return this.actuality.staffResume(await this.auth.admin(request), id, body)
+  }
+
+  @Post('admin/actuality/ask-now')
+  @HttpCode(200)
+  async askNow(@Req() request: Request) {
+    return this.manual('actuality.ask', request)
+  }
+
+  @Post('admin/actuality/remind-now')
+  @HttpCode(200)
+  async remindNow(@Req() request: Request) {
+    return this.manual('actuality.remind', request)
+  }
+
+  private async manual(name: 'actuality.ask' | 'actuality.remind', request: Request) {
+    if (!demoMode()) throw new NotFoundException('Задача не найдена')
+    await this.auth.admin(request)
+    return this.jobs.runNow(name, 'manual:' + new Date().toISOString())
   }
 }

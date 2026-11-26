@@ -5,6 +5,7 @@ import paymentForms from '../../server/seeds/exchange_data/payment_forms.json';
 import { api } from './api';
 import { useI18n } from './i18n';
 import { countryName, formatMoney, terms } from './market';
+import { NearMisses } from './NearMisses';
 import { PaymentRisk, TrustBadges, type ListingTrust } from './Trust';
 import { Button, Field, Notice, Spinner } from './ui';
 import './matches.css';
@@ -27,15 +28,16 @@ type MatchListing = Summary & {
 };
 type MatchSummary = {
   id: string; number: number; status: Status; type: 'FULL' | 'PARTIAL'; createdAt: string;
-  model: { nameRu: string; nameEn: string; viaAnalog: boolean } | null;
+  model: { nameRu: string; nameEn: string; viaAnalog: boolean; byTitle: boolean } | null;
   mismatches: { key: string; text: string }[];
   declineReason: string | null; voidReason: string | null; chatId: string | null;
+  source: 'SYSTEM' | 'OPERATOR'; operatorComment: string | null; operatorConditionsChanged: boolean;
 };
 type Match = MatchSummary & {
   side: 'SELL' | 'BUY'; mine: Summary;
   counterpart: {
     listing: MatchListing;
-    owner: { nickname: string; accountType: string; country: string; city: string; rating: number | null; ratingCount: number };
+    owner: { nickname: string; accountType: string; country: string; city: string | null; rating: number | null; ratingCount: number };
     trust: ListingTrust | null;
   };
   gap: { rows: { id: string; tool: string; partner: string }[] } | null;
@@ -44,7 +46,7 @@ type AdminSide = {
   listing: { id: string; title: string };
   owner: { nickname: string; companyName: string | null; email: string; telegram: string | null };
 };
-type AdminMatch = MatchSummary & { seller: AdminSide; buyer: AdminSide };
+type AdminMatch = MatchSummary & { seller: AdminSide; buyer: AdminSide; proposedBy: { nickname: string } | null };
 type Page<Item> = { items: Item[]; total: number; page: number; limit: number };
 type FxRate = { currency: string; usdPerUnit: string | null; updatedAt: string };
 
@@ -68,6 +70,7 @@ function MatchCard({ match, busy, onChat, onDecline }: {
       <span className={match.type === 'FULL' ? 'match-badge match-full' : 'match-badge match-partial'}>
         {t(match.type === 'FULL' ? 'Полное совпадение' : 'Частичное совпадение')}
       </span>
+      {match.source === 'OPERATOR' && <span className="match-badge">{t('Предложено модератором')}</span>}
       <span className="muted">№ {match.number}</span>
     </header>
     <div className="match-card-listings">
@@ -78,7 +81,8 @@ function MatchCard({ match, busy, onChat, onDecline }: {
       <div>
         <span className="muted">{t(listing.kind === 'SELL' ? 'Предложение' : 'Заявка')}</span>
         <h2>{match.status === 'VOID' ? listing.title : <Link to={'/listings/' + listing.id}>{listing.title}</Link>}</h2>
-        {modelName && <p>{modelName}{match.model?.viaAnalog && <span className="match-badge">{t('По аналогу')}</span>}</p>}
+        {modelName && <p>{modelName}{match.model?.viaAnalog && <span className="match-badge">{t('По аналогу')}</span>}
+          {match.model?.byTitle && <span className="match-badge">{t('По названию')}</span>}</p>}
       </div>
     </div>
     <dl className="match-specs">
@@ -106,6 +110,10 @@ function MatchCard({ match, busy, onChat, onDecline }: {
     {match.gap && <div className="match-explanation">
       <h3>{t('Варианты согласования оплаты')}</h3>
       <ul>{match.gap.rows.map(row => <li key={row.id}>{t(row.tool)} · {t(partnerLabels[row.partner] ?? row.partner)}</li>)}</ul>
+    </div>}
+    {match.operatorComment && <div className="match-explanation">
+      <h3>{t('Комментарий модератора')}</h3><p>{match.operatorComment}</p>
+      {match.operatorConditionsChanged && <small>{t('Условия могли измениться после предложения модератора')}</small>}
     </div>}
     {(match.voidReason || match.declineReason) && <Notice>{t(match.voidReason ?? match.declineReason!)}</Notice>}
     {(match.status === 'NEW' || match.status === 'CHAT') && <div className="match-actions">
@@ -250,9 +258,22 @@ function MatchPagination({ data, onPage }: { data: Page<unknown>; onPage: (value
 
 export function MatchAdminPanel() {
   const { t } = useI18n();
+  const [near, setNear] = useState(false);
+  return <div className="match-results">
+    <nav aria-label={t('Разделы совпадений')} className="match-filters">
+      <Button aria-pressed={!near} variant={!near ? 'primary' : 'secondary'} onClick={() => setNear(false)}>{t('Все совпадения')}</Button>
+      <Button aria-pressed={near} variant={near ? 'primary' : 'secondary'} onClick={() => setNear(true)}>{t('Почти совпадения')}</Button>
+    </nav>
+    {near ? <NearMisses /> : <AdminMatchList />}
+  </div>;
+}
+
+function AdminMatchList() {
+  const { t } = useI18n();
   const [search, setSearch] = useState('');
   const [q, setQuery] = useState('');
   const [status, setStatus] = useState('');
+  const [source, setSource] = useState('');
   const [page, setPage] = useState(1);
   const [data, setData] = useState<Page<AdminMatch>>();
   const [loading, setLoading] = useState(true);
@@ -264,12 +285,13 @@ export function MatchAdminPanel() {
     setError('');
     const query = new URLSearchParams({ page: String(page) });
     if (status) query.set('status', status);
+    if (source) query.set('source', source);
     if (q) query.set('q', q);
     void api<Page<AdminMatch>>('/admin/matches?' + query, { signal: controller.signal }).then(setData).catch(cause => {
       if (!controller.signal.aborted) setError(requestError(cause, 'Не удалось загрузить совпадения.'));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [page, q, status]);
+  }, [page, q, source, status]);
 
   return <section className="match-results" aria-label={t('Совпадения')}>
     <form className="panel match-card match-admin-filters" onSubmit={event => {
@@ -287,6 +309,13 @@ export function MatchAdminPanel() {
           {Object.entries(statuses).map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}
         </select>
       </Field>
+      <Field label={t('Источник совпадения')}>
+        <select value={source} onChange={event => { setPage(1); setSource(event.target.value); }}>
+          <option value="">{t('Все источники')}</option>
+          <option value="SYSTEM">{t('Автоматически')}</option>
+          <option value="OPERATOR">{t('Вручную')}</option>
+        </select>
+      </Field>
       <Button type="submit">{t('Найти')}</Button>
     </form>
     {error && <Notice tone="error">{t(error)}</Notice>}
@@ -295,6 +324,7 @@ export function MatchAdminPanel() {
       {data.items.map(match => <article key={match.id} className="panel match-card">
         <header className="match-card-header">
           <strong>№ {match.number} · {t(match.type === 'FULL' ? 'Полное совпадение' : 'Частичное совпадение')}</strong>
+          {match.source === 'OPERATOR' && <span className="match-badge">{t('Вручную')}{match.proposedBy && ` · ${match.proposedBy.nickname}`}</span>}
           <span>{t(statuses[match.status])}</span>
         </header>
         <div className="match-card-listings">
@@ -305,6 +335,7 @@ export function MatchAdminPanel() {
           </div>)}
         </div>
         {match.mismatches.length > 0 && <ul>{match.mismatches.map(item => <li key={item.key}>{t(item.text)}</li>)}</ul>}
+        {match.operatorComment && <p><strong>{t('Комментарий модератора')}</strong> · {match.operatorComment}</p>}
         {(match.declineReason || match.voidReason) && <p>{t(match.declineReason ?? match.voidReason!)}</p>}
       </article>)}
       <MatchPagination data={data} onPage={setPage} />

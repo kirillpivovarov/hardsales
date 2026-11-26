@@ -7,6 +7,10 @@ import { PlatformModule } from './exchange/platform.module';
 import { DisclosuresModule } from './exchange/disclosures.module';
 import { RepresentationModule } from './exchange/representation.module';
 import { ModelsModule } from './models/models.module';
+import { ContactGuardModule } from './contact-guard/contact-guard.module';
+import { LotGroupsModule } from './lots/lots.module';
+import { PilotModule } from './pilot/pilot.module';
+import { TelegramModule } from './telegram/telegram.module';
 
 @Controller('health')
 class HealthController {
@@ -20,7 +24,8 @@ class HealthController {
 }
 
 @Module({
-  imports: [DatabaseModule, PlatformModule, AuthModule, MarketModule, DisclosuresModule, RepresentationModule, ModelsModule],
+  imports: [DatabaseModule, PlatformModule, AuthModule, MarketModule, DisclosuresModule, RepresentationModule, ModelsModule,
+    ContactGuardModule, LotGroupsModule, PilotModule, TelegramModule],
   controllers: [HealthController],
 })
 export class AppModule {}

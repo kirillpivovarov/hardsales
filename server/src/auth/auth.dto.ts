@@ -4,6 +4,7 @@ import {
 } from 'class-validator';
 import { isPublicProfileText, isSingleLine } from '../contact';
 import { INVALID_INVITE } from '../exchange/invites.service';
+import { CONSENT_REQUIRED } from '../privacy/policy';
 
 export const USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$/;
 export const TELEGRAM_PATTERN = /^@?[A-Za-z][A-Za-z\d_]{4,31}$/;
@@ -26,7 +27,21 @@ function SingleLineText(field: 'private' | 'public' = 'private') {
   });
 }
 
-export class RegisterDto {
+export class AcceptPolicyDto {
+  @Transform(trimText)
+  @IsString({ message: 'Укажите версию политики обработки данных' })
+  @Length(1, 32, { message: 'Укажите версию политики обработки данных' })
+  pdPolicyVersion!: string;
+
+  @ValidateIf(defined)
+  @IsBoolean({ message: 'Укажите согласие на информационные письма' })
+  infoEmailConsent?: boolean;
+}
+
+export class RegisterDto extends AcceptPolicyDto {
+  @IsIn([true], { message: CONSENT_REQUIRED })
+  pdConsent!: true;
+
   @ValidateIf(defined)
   @IsString({ message: INVALID_INVITE })
   @Length(4, 20, { message: INVALID_INVITE })
@@ -103,6 +118,10 @@ export class VerifyDto extends ChallengeDto {
 
 export class ProfileDto {
   @ValidateIf(defined)
+  @IsBoolean({ message: 'Укажите согласие на информационные письма' })
+  infoEmailConsent?: boolean;
+
+  @ValidateIf(defined)
   @IsBoolean({ message: 'Выберите, хотите ли получать уведомления по почте.' })
   notifyEmail?: boolean;
 
@@ -110,7 +129,7 @@ export class ProfileDto {
   @ValidateIf(defined)
   @IsString({ message: 'Введите отображаемое имя.' })
   @Length(2, 80, { message: 'Отображаемое имя должно содержать от 2 до 80 символов.' })
-  @SingleLineText('public')
+  @SingleLineText()
   displayName?: string;
 
   @Transform(trimText)
@@ -124,7 +143,7 @@ export class ProfileDto {
   @ValidateIf(defined)
   @IsString({ message: 'Введите название города.' })
   @Length(2, 80, { message: 'Название города должно содержать от 2 до 80 символов.' })
-  @SingleLineText('public')
+  @SingleLineText()
   city?: string;
 
   @Transform(countryCode)

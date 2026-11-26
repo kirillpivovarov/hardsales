@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
 import { test } from 'node:test';
 import sharp from 'sharp';
-import { solveCaptcha } from './captcha-helper.mjs';
+import { demoRegistrationConsent, solveCaptcha } from './captcha-helper.mjs';
 
 const origin = process.env.HWFORAI_MODERATOR_TEST_URL?.replace(/\/$/, '');
 const mailOrigin = process.env.MAILPIT_URL?.replace(/\/$/, '');
@@ -122,6 +122,7 @@ test('moderator authentication, contextual resources, role boundaries and audit'
     peerId = peer.data.user.id;
     await api('/auth/register', {
       method: 'POST', status: 400, body: {
+        ...demoRegistrationConsent,
         username: 'public-' + tag, email: 'public-' + tag + '@example.test', password: temporaryPassword,
         role: 'MODERATOR', participantType: 'INDIVIDUAL', city: 'Томск', country: 'RU', telegram: 'public_' + tag,
         captchaToken: await solveCaptcha(origin),

@@ -1,0 +1,18 @@
+.lot-catalog-card { display: flex; flex-direction: column; min-width: 0; gap: .4rem; }
+.lot-catalog-card .listing-card { flex: 1; }
+.lot-catalog-options { display: grid; min-width: 0; gap: .35rem; align-items: start; padding: 0 .4rem .4rem; }
+.lot-tag {
+  display: inline-block; width: fit-content; font-size: .78rem; line-height: 1.3;
+  padding: .3rem .55rem; border-radius: .45rem; background: var(--surface-raised); color: var(--blue-strong);
+  overflow-wrap: anywhere;
+}
+.lot-tag-restricted { color: var(--danger); background: var(--danger-bg); }
+.lot-more { text-align: start; padding: .2rem 0; border: 0; background: transparent; font: inherit; cursor: pointer; }
+.lot-alternatives { display: grid; gap: .5rem; padding: 0; margin: 0; list-style: none; overflow-wrap: anywhere; }
+.lot-alternatives li { padding: .5rem; border: 1px solid var(--line); border-radius: .45rem; }
+.lot-alternatives p { margin: .25rem 0; font-size: .8rem; }
+.lot-request-form { margin-top: .7rem; }
+.lot-table-scroll { width: 100%; overflow: auto; }
+.lot-members-table { border-collapse: collapse; min-width: 44rem; text-align: start; width: 100%; }
+.lot-members-table :is(th,td) { vertical-align: top; border-bottom: 1px solid var(--line); padding: .55rem; overflow-wrap: anywhere; min-width: 9rem; max-width: 16rem; }
+.lot-members-table p { margin: .3rem 0; }

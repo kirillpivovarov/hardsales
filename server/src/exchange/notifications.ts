@@ -4,19 +4,26 @@ import { MailService } from '../auth/mail.service';
 import { appOrigin, port } from '../config';
 import { DatabaseService, type Queryable } from '../database/database.service';
 import { boolean, integer, pageParams } from '../market/market.inputs';
+import { telegramToken } from '../telegram/telegram-config';
 import { ExchangeJobs } from './jobs';
 
 type DeliveryChannel = 'EMAIL' | 'TELEGRAM';
-type NotificationAction = { label: string; token?: string; href?: string; action?: string };
-type Notification = {
+export type NotificationAction = { label: string; token?: string; href?: string; action?: string; telegramLabel?: string };
+export type Notification = {
   kind: string; title: string; body: string; payload?: Record<string, unknown>;
   actions?: NotificationAction[]; dedupeKey?: string; channels?: DeliveryChannel[];
 };
 type Delivery = {
   id: string; channel: DeliveryChannel; attempts: number; userId: string; email: string; notifyEmail: boolean;
-  status: string; title: string; body: string; actions: NotificationAction[];
+  status: string; title: string; body: string; actions: NotificationAction[]; kind: string;
+  infoEmailConsent: boolean; fallbackStatus: string | null;
 };
-const RETRY_MINUTES = [1, 5, 15, 60];
+export const RETRY_MINUTES = [1, 5, 15, 60];
+export const TELEGRAM_KINDS = new Set([
+  'actuality.ask', 'actuality.remind', 'actuality.hidden', 'actuality.suspended', 'actuality.announced', 'actuality.bot_status',
+  'match.new', 'disclosure.request', 'disclosure.first', 'disclosure.already_known', 'representation.request',
+  'representation.answered', 'deal.followup', 'deal.agreed',
+]);
 
 @Injectable()
 export class ExchangeNotifications implements OnModuleInit {
@@ -37,20 +44,33 @@ export class ExchangeNotifications implements OnModuleInit {
     `, [userId, input.kind, input.title, input.body, JSON.stringify(input.payload ?? {}),
       JSON.stringify(input.actions ?? []), input.dedupeKey ?? null]);
     if (!notification) return null;
-    if (input.channels?.length) {
-      await client.query(`
+    const email = input.channels?.includes('EMAIL') ?? false;
+    const telegram = Boolean(telegramToken()) && (TELEGRAM_KINDS.has(input.kind) || input.kind.startsWith('verification.'));
+    if (!email && !telegram) return notification.id;
+    await client.query(`
+      WITH eligible AS (
+        SELECT $2 AND (NOT $4::boolean OR u.info_email_consent) AS email,
+          $3 AND u.telegram_chat_id IS NOT NULL AND u.status='ACTIVE' AND u.role IN ('BUYER','SELLER') AND EXISTS (
+            SELECT 1 FROM platform_settings WHERE key='feature_telegram' AND value='true'::jsonb
+          ) AS telegram FROM users u WHERE u.id=$5
+      ), created AS (
         INSERT INTO notification_deliveries(notification_id,channel)
-        SELECT $1, channel FROM unnest($2::text[]) channel ON CONFLICT DO NOTHING
-      `, [notification.id, input.channels]);
-    }
+        SELECT $1,'TELEGRAM' FROM eligible WHERE telegram RETURNING id
+      )
+      INSERT INTO notification_deliveries(notification_id,channel,next_attempt_at,fallback_for)
+      SELECT $1,'EMAIL',now()+CASE WHEN c.id IS NULL THEN interval '0' ELSE interval '30 minutes' END,c.id
+      FROM eligible e LEFT JOIN created c ON true WHERE e.email
+    `, [notification.id, email, telegram, input.kind.startsWith('info.'), userId]);
     return notification.id;
   }
 
-  async queueEmail(client: Queryable, input: { to: string; subject: string; body: string; dedupeKey?: string }): Promise<string | null> {
+  async queueEmail(client: Queryable, input: {
+    to: string; subject: string; body: string; dedupeKey?: string; respectsOptOut?: boolean;
+  }): Promise<string | null> {
     const { rows: [row] } = await client.query<{ id: string }>(`
-      INSERT INTO exchange_email_outbox(recipient,subject,body,dedupe_key) VALUES ($1,$2,$3,$4)
+      INSERT INTO exchange_email_outbox(recipient,subject,body,dedupe_key,respects_opt_out) VALUES ($1,$2,$3,$4,$5)
       ON CONFLICT(dedupe_key) DO NOTHING RETURNING id
-    `, [input.to, input.subject, input.body, input.dedupeKey ?? null]);
+    `, [input.to, input.subject, input.body, input.dedupeKey ?? null, input.respectsOptOut ?? false]);
     return row?.id ?? null;
   }
 
@@ -81,9 +101,11 @@ export class ExchangeNotifications implements OnModuleInit {
 
   private async deliverNotifications(client: PoolClient, timezone: string) {
     const { rows } = await client.query<Delivery>(`
-      SELECT d.id,d.channel,d.attempts,u.id AS "userId",u.email,u.notify_email AS "notifyEmail",u.status,n.title,n.body,n.actions
+      SELECT d.id,d.channel,d.attempts,u.id AS "userId",u.email,u.notify_email AS "notifyEmail",u.status,n.title,n.body,n.actions,n.kind,
+        u.info_email_consent AS "infoEmailConsent", t.status AS "fallbackStatus"
       FROM notification_deliveries d JOIN notifications n ON n.id=d.notification_id JOIN users u ON u.id=n.user_id
-      WHERE d.status='PENDING' AND d.next_attempt_at <= now() ORDER BY d.id LIMIT 20 FOR UPDATE OF d SKIP LOCKED
+      LEFT JOIN notification_deliveries t ON t.id=d.fallback_for
+      WHERE d.channel='EMAIL' AND d.status='PENDING' AND d.next_attempt_at <= now() ORDER BY d.id LIMIT 20 FOR UPDATE OF d SKIP LOCKED
     `);
     for (const row of rows) {
       const { rows: [quota] } = await client.query<{ sent: number }>(`
@@ -91,7 +113,8 @@ export class ExchangeNotifications implements OnModuleInit {
         WHERE n.user_id=$1 AND channel='EMAIL' AND d.status='SENT'
           AND (d.sent_at AT TIME ZONE $2)::date=(now() AT TIME ZONE $2)::date
       `, [row.userId, timezone]);
-      if (row.channel !== 'EMAIL' || !row.notifyEmail || row.status !== 'ACTIVE' || quota.sent >= 30) {
+      if (row.fallbackStatus === 'SENT' || !row.notifyEmail || row.status !== 'ACTIVE' || quota.sent >= 30 ||
+        (row.kind.startsWith('info.') && !row.infoEmailConsent)) {
         await client.query("UPDATE notification_deliveries SET status='SKIPPED' WHERE id=$1", [row.id]);
         continue;
       }
@@ -106,6 +129,12 @@ export class ExchangeNotifications implements OnModuleInit {
   }
 
   private async deliverExternal(client: PoolClient) {
+    await client.query(`
+      UPDATE exchange_email_outbox e SET status='SKIPPED'
+      WHERE e.status='PENDING' AND e.respects_opt_out AND EXISTS (
+        SELECT 1 FROM email_suppressions s WHERE s.email_hash=encode(sha256(convert_to(lower(e.recipient),'UTF8')),'hex')
+      )
+    `);
     const { rows } = await client.query<{ id: string; recipient: string; subject: string; body: string; attempts: number }>(`
       SELECT id,recipient,subject,body,attempts FROM exchange_email_outbox
       WHERE status='PENDING' AND next_attempt_at <= now() ORDER BY id LIMIT 20 FOR UPDATE SKIP LOCKED

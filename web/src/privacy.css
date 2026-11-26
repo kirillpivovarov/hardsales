@@ -1,0 +1,19 @@
+.privacy-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: .55rem;
+  overflow-wrap: anywhere;
+}
+.privacy-choice input[type="checkbox"] {
+  flex: none;
+  margin-block-start: .19rem;
+}
+.privacy-choice label {
+  cursor: pointer;
+}
+.privacy-break, .privacy-preview {
+  overflow-wrap: anywhere;
+}
+.privacy-preview {
+  white-space: pre-wrap;
+}

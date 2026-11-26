@@ -32,6 +32,9 @@ export interface UserRow {
   onboarding_submitted_at: Date | null;
   rules_accepted_version: string | null;
   notify_email: boolean;
+  pd_consent_version: string | null;
+  pd_consent_at: Date | null;
+  info_email_consent: boolean;
 }
 
 export interface SessionUser<R extends Role = Role> {
@@ -54,12 +57,17 @@ export interface SessionUser<R extends Role = Role> {
   rulesVersion: string;
   rulesRequired: boolean;
   notifyEmail: boolean;
+  pdPolicyVersion: string;
+  pdConsentVersion: string | null;
+  pdConsentAt: Date | null;
+  pdConsentRequired: boolean;
+  infoEmailConsent: boolean;
 }
 
 /** Server-side authorization context; never return this through a public response. */
 export type StaffSession<R extends StaffRole = StaffRole> = SessionUser<R> & { sessionHash: string };
 
-export function sessionUser(row: UserRow, rulesVersion: string, rulesEnabled: boolean): SessionUser {
+export function sessionUser(row: UserRow, rulesVersion: string, rulesEnabled: boolean, pdPolicyVersion: string): SessionUser {
   return {
     id: row.id,
     username: row.username,
@@ -80,5 +88,10 @@ export function sessionUser(row: UserRow, rulesVersion: string, rulesEnabled: bo
     rulesVersion,
     rulesRequired: rulesEnabled && !isStaffRole(row.role) && row.rules_accepted_version !== rulesVersion,
     notifyEmail: row.notify_email,
+    pdPolicyVersion,
+    pdConsentVersion: row.pd_consent_version,
+    pdConsentAt: row.pd_consent_at,
+    pdConsentRequired: !isStaffRole(row.role) && row.pd_consent_version !== pdPolicyVersion,
+    infoEmailConsent: row.info_email_consent,
   };
 }

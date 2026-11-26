@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import sharp from 'sharp';
-import { solveCaptcha } from './captcha-helper.mjs';
+import { demoRegistrationConsent, solveCaptcha } from './captcha-helper.mjs';
 
 const api = process.env.HWFORAI_MEDIA_TEST_URL?.replace(/\/$/, '');
 const mail = process.env.MAILPIT_URL?.replace(/\/$/, '');
@@ -52,7 +52,7 @@ async function anotherSeller() {
   const email = username + '@example.test';
   const auth = await request('/auth/register', {
     method: 'POST', status: 201,
-    body: { username, email, password, role: 'SELLER', participantType: 'INDIVIDUAL', city: 'Томск', country: 'RU', telegram: username, captchaToken: await solveCaptcha(api) },
+    body: { ...demoRegistrationConsent, username, email, password, role: 'SELLER', participantType: 'INDIVIDUAL', city: 'Томск', country: 'RU', telegram: username, captchaToken: await solveCaptcha(api) },
   });
   const { challengeId } = await auth.json();
   const inbox = await fetch(mail + '/api/v1/messages').then(response => response.json());

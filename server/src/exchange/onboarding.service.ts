@@ -8,6 +8,7 @@ import { object, oneOf, str, uuid } from '../market/market.inputs';
 import { ExchangeNotifications } from './notifications';
 import { onboardingAnswerMaxLength, onboardingGroups, onboardingOptionalHeading } from './onboarding.questions';
 import { PlatformSettings } from './platform-settings';
+import { policyVersion } from '../privacy/policy';
 import type { PoolClient } from 'pg';
 
 const modes = ['DIRECT', 'AGENT', 'BOTH'] as const;
@@ -27,8 +28,8 @@ export class OnboardingService {
   ) {}
 
   async presentUser(row: UserRow, db: Queryable = this.db): Promise<SessionUser> {
-    const { version, enabled } = await this.rules(db);
-    return sessionUser(row, version, enabled);
+    const [{ version, enabled }, policy] = await Promise.all([this.rules(db), policyVersion(db)]);
+    return sessionUser(row, version, enabled, policy);
   }
 
   async assertOnboardingComplete(userId: string, db: Queryable = this.db): Promise<void> {
@@ -91,7 +92,7 @@ export class OnboardingService {
         WHERE id = $1 RETURNING *
       `, [user.id, answers, mode, version]);
       if (!current.onboarding_submitted_at) await this.notifyAdmin(client, updated);
-      return sessionUser(updated, version, rules.enabled);
+      return sessionUser(updated, version, rules.enabled, await policyVersion(client));
     });
   }
 
@@ -101,12 +102,12 @@ export class OnboardingService {
       const rules = await this.lockRules(client);
       const current = await this.lockParticipant(client, user.id);
       if (version !== rules.version) throw new ConflictException(staleRules);
-      if (current.rules_accepted_version === version) return sessionUser(current, version, rules.enabled);
+      if (current.rules_accepted_version === version) return sessionUser(current, version, rules.enabled, await policyVersion(client));
       const { rows: [updated] } = await client.query<UserRow>(`
         UPDATE users SET rules_accepted_version = $2, rules_accepted_at = now(), updated_at = now()
         WHERE id = $1 RETURNING *
       `, [user.id, version]);
-      return sessionUser(updated, version, rules.enabled);
+      return sessionUser(updated, version, rules.enabled, await policyVersion(client));
     });
   }
 

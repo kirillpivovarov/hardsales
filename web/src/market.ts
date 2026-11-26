@@ -78,7 +78,7 @@ export interface Listing {
   counterparty: string;
   paymentMethods: string[];
   specs: Record<string, string>;
-  owner: { id?: string; nickname?: string; displayName?: string; city: string; country: string; accountType?: string; participantType?: string; rating: number | null; ratingCount: number };
+  owner: { id?: string; nickname?: string; displayName?: string; city: string | null; country: string; accountType?: string; participantType?: string; rating: number | null; ratingCount: number };
   status: string;
   imageKey?: string | null;
   images?: ListingImage[];
@@ -103,6 +103,10 @@ export interface Listing {
   priceChanges14?: number;
   trust?: import('./Trust').ListingTrust | null;
   hiddenByRatingBelow?: number | null;
+  lotGroup?: { id: string; participants: number; primary: boolean; collapsedCount: number } | null;
+  similarLot?: boolean;
+  isDuplicate?: boolean;
+  duplicateAppealed?: boolean;
 }
 
 export const categoryIcons: Record<string, string> = {

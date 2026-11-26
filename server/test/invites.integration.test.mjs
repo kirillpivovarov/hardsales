@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import pg from 'pg';
-import { solveCaptcha } from './captcha-helper.mjs';
+import { demoRegistrationConsent, solveCaptcha } from './captcha-helper.mjs';
 
 const api = process.env.HWFORAI_INVITES_TEST_URL?.replace(/\/$/, '');
 const mailpit = process.env.MAILPIT_URL?.replace(/\/$/, '');
@@ -42,7 +42,9 @@ test('invite concurrency, questionnaire and rules gate', {
   const id = randomBytes(5).toString('hex');
   const password = randomBytes(18).toString('base64url');
 
-  assert.deepEqual((await request('/auth/me')).data, { user: null });
+  const guest = (await request('/auth/me')).data;
+  assert.equal(guest.user, null);
+  assert.equal(guest.pdPolicyVersion, demoRegistrationConsent.pdPolicyVersion);
   const initial = await request('/auth/login', { method: 'POST', body: { login: 'admin', password: 'admin' }, status: 200 });
   const { cookie: admin } = await request('/auth/credentials', {
     method: 'PATCH', cookie: initial.cookie, body: { currentPassword: 'admin', newPassword: password }, status: 200,
@@ -62,6 +64,7 @@ test('invite concurrency, questionnaire and rules gate', {
     const username = name + id;
     const email = username + '@example.test';
     const result = await request('/auth/register', { method: 'POST', body: {
+      ...demoRegistrationConsent,
       username, email, password, role, participantType: 'INDIVIDUAL', city: 'Омск', country: 'RU',
       telegram: username, captchaToken: await solveCaptcha(api), ...(inviteCode === undefined ? {} : { inviteCode }),
     } });

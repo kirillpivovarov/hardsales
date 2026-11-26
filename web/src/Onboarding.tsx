@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, isStaff, type User } from './api';
 import { useI18n } from './i18n';
+import { useExchange } from './Exchange';
+import { TelegramProfile, type TelegramState } from './Telegram';
 import { Button, Field, Notice } from './ui';
 import './onboarding.css';
 
@@ -35,6 +37,7 @@ function message(cause: unknown, fallback: string) {
 
 export function OnboardingPage({ user, onUser }: UserUpdateProps) {
   const { t, locale } = useI18n();
+  const { features } = useExchange();
   const navigate = useNavigate();
   const [data, setData] = useState<OnboardingData>();
   const [mode, setMode] = useState<RepresentationMode>('DIRECT');
@@ -44,6 +47,7 @@ export function OnboardingPage({ user, onUser }: UserUpdateProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
+  const [telegramInvite, setTelegramInvite] = useState(false);
   const loadedFor = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -89,7 +93,10 @@ export function OnboardingPage({ user, onUser }: UserUpdateProps) {
       });
       onUser(updated);
       if (user.onboardingState === 'REQUIRED') {
-        navigate('/catalog', { replace: true });
+        const telegram = features.feature_telegram === true
+          ? await api<TelegramState>('/me/telegram').catch(() => undefined) : undefined;
+        if (telegram?.enabled && !telegram.linked) setTelegramInvite(true);
+        else navigate('/catalog', { replace: true });
       } else {
         if (principalRequired) setData({ ...data, principalRequired: false, hasPrincipal: true });
         setSuccess(true);
@@ -120,6 +127,12 @@ export function OnboardingPage({ user, onUser }: UserUpdateProps) {
       </Field>
     );
   }
+
+  if (telegramInvite) return <div className="container workflow-page workflow-stack">
+    <h1>{t('Подключите Telegram')}</h1>
+    <div className="panel workflow-section"><TelegramProfile /></div>
+    <Link className="text-link" to="/catalog" replace>{t('Позже')}</Link>
+  </div>;
 
   return (
     <div className="container workflow-page">

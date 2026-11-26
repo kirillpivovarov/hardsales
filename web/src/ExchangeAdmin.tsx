@@ -7,6 +7,11 @@ import { FxRatesPanel, MatchAdminPanel } from './Matches';
 import { CatalogModelsPage } from './Models';
 import { AdminPrincipals } from './Representation';
 import { PriceCorridorsAdmin, VerificationAdmin } from './Verification';
+import { ContactBlocksAdmin } from './ContactBlocks';
+import { DataRequestsPanel, UserConsents } from './Consent';
+import { AdminLotsPanel } from './LotGroups';
+import { PilotMetrics } from './PilotMetrics';
+import { TelegramAdmin } from './Telegram';
 import { useI18n } from './i18n';
 
 const sections = {
@@ -20,7 +25,13 @@ const sections = {
   settings: 'Настройки биржи',
   rates: 'Курсы валют',
   corridors: 'Ценовые ориентиры',
+  pilot: 'Показатели пробы',
+  lots: 'Дубли лотов',
+  'contact-blocks': 'Попытки обхода',
+  telegram: 'Telegram',
+  'data-requests': 'Запросы по данным',
   onboarding: 'Анкета участника',
+  'user-consents': 'История согласий',
 } as const;
 
 type Section = keyof typeof sections;
@@ -31,11 +42,9 @@ export default function ExchangeAdministration({ user }: { user: User }) {
   const administrator = user.role === 'ADMIN';
   const requested = query.get('part');
   const participant = query.get('userId');
-  const navigation: Section[] = ['models', 'disclosures', 'principals'];
-  if (administrator) navigation.push('matching');
-  navigation.push('verification', 'jobs');
-  if (administrator) navigation.push('invites', 'settings', 'rates', 'corridors');
-  const section = administrator && requested === 'onboarding' && participant ? 'onboarding' :
+  const navigation: Section[] = ['models', 'disclosures', 'principals', 'matching', 'verification', 'jobs', 'pilot', 'lots'];
+  if (administrator) navigation.push('invites', 'settings', 'rates', 'corridors', 'contact-blocks', 'telegram', 'data-requests');
+  const section = administrator && participant && (requested === 'onboarding' || requested === 'user-consents') ? requested :
     navigation.find(key => key === requested) ?? navigation[0];
 
   return <div className="workflow-stack">
@@ -49,11 +58,20 @@ export default function ExchangeAdministration({ user }: { user: User }) {
     {section === 'principals' && <AdminPrincipals />}
     {section === 'matching' && <MatchAdminPanel />}
     {section === 'verification' && <VerificationAdmin isAdmin={administrator} />}
-    {section === 'jobs' && <ExchangeJobRuns />}
+    {section === 'jobs' && <ExchangeJobRuns administrator={administrator} />}
     {section === 'invites' && <InvitesPanel />}
     {section === 'settings' && <ExchangeSettings />}
     {section === 'rates' && <FxRatesPanel />}
     {section === 'corridors' && <PriceCorridorsAdmin />}
+    {section === 'pilot' && <PilotMetrics isAdmin={administrator} />}
+    {section === 'lots' && <AdminLotsPanel />}
+    {section === 'contact-blocks' && <ContactBlocksAdmin />}
+    {section === 'telegram' && <TelegramAdmin />}
+    {section === 'data-requests' && <DataRequestsPanel />}
+    {section === 'user-consents' && participant && <>
+      <Link to="/admin?section=users" className="text-link">{t('К списку участников')}</Link>
+      <UserConsents userId={participant} />
+    </>}
     {section === 'onboarding' && participant && <>
       <Link to="/admin?section=users" className="text-link">{t('К списку участников')}</Link>
       <UserOnboardingAnswers userId={participant} />

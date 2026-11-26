@@ -1,7 +1,9 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common'
 import type { SessionUser } from '../auth/auth.types'
+import { publicListingTitle, publicNickname } from '../contact-guard/public-text'
 import { DatabaseService, type Queryable } from '../database/database.service'
 import { calendarDate, object, pageParams, Parameters, str, uuid } from '../market/market.inputs'
+import { ExchangeActions } from './actions'
 import { auditExchange } from './audit'
 import { ExchangeNotifications } from './notifications'
 import { PlatformSettings } from './platform-settings'
@@ -41,13 +43,31 @@ export function disclosureNumber(value: string | number) {
   return 'R-' + String(value).padStart(6, '0')
 }
 
+export const disclosureTerms = [
+  'Контакты, полученные через раскрытие, используются только для переговоров по этой позиции и не передаются третьим лицам.',
+  'Сделка с раскрытым собеседником в течение 12 месяцев по той же или аналогичной позиции считается сделкой, которую свела площадка.',
+  'При споре вы передаёте модератору переписку по сделке.',
+]
+
 @Injectable()
-export class DisclosuresService {
+export class DisclosuresService implements OnModuleInit {
   constructor(
     private readonly db: DatabaseService,
     private readonly settings: PlatformSettings,
     private readonly notifications: ExchangeNotifications,
+    private readonly actions: ExchangeActions,
   ) {}
+
+  onModuleInit() {
+    this.actions.register('disclosure.already_known', {
+      describe: async () => ({ title: 'Отметить, что уже знакомы' }),
+      execute: (client, token) => this.markAlreadyKnown(client, token.userId!, token.subjectId),
+      lockSubjects: async (client, token) => {
+        await client.query(`SELECT u.id FROM users u JOIN disclosures d ON u.id IN (d.user_a_id,d.user_b_id)
+          WHERE d.id=$1 AND $2 IN (d.user_a_id,d.user_b_id) ORDER BY u.id FOR UPDATE OF u`, [token.subjectId, token.userId])
+      },
+    })
+  }
 
   async assertRules(db: Queryable, actor: string, partner: string, accepted: unknown, requestedVersion?: string | null) {
     const min = await this.settings.get<number>('disclosure_min_level', db)
@@ -77,10 +97,14 @@ export class DisclosuresService {
       JOIN users u ON u.id = $1 WHERE c.id = $2
     `, [actor, chatId])
     if (!row) return
+    const token = await this.actions.issue(db, {
+      purpose: 'chat.reveal', subjectId: chatId, userId: partner, payload: { requestId },
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    })
     await this.notifications.notify(db, partner, {
       kind: 'disclosure.request', title: 'Запрос обмена контактами',
-      body: `${row.nickname} предлагает обменяться контактами по объявлению «${row.title}».`,
-      actions: [{ label: 'Открыть чат', href: '/chats/' + chatId, action: 'open' }],
+      body: `${publicNickname(row.nickname)} предлагает обменяться контактами по объявлению «${publicListingTitle(row.title)}».`,
+      actions: [{ label: 'Ответить на запрос', token, action: 'chat.reveal' }, { label: 'Открыть чат', href: '/chats/' + chatId, action: 'open' }],
       dedupeKey: 'disclosure.request:' + requestId, channels: ['EMAIL'],
     })
   }
@@ -111,6 +135,8 @@ export class DisclosuresService {
     const first = row.kind === 'FIRST'
     for (const [id, partner] of [[row.user_a_id, row.party_b], [row.user_b_id, row.party_a]] as const) {
       // The record and the chat are authorization-checked. Email is only an alert.
+      const token = first ? await this.actions.issue(db, { purpose: 'disclosure.already_known', subjectId: row.id, userId: id,
+        expiresAt: new Date(row.accepted_at.getTime() + 24 * 60 * 60 * 1000) }) : undefined
       await this.notifications.notify(db, id, {
         kind: first ? 'disclosure.first' : 'disclosure.repeat',
         title: first ? `Раскрытие ${number} зафиксировано` : 'Обмен Telegram обновлён после смены ника',
@@ -120,7 +146,7 @@ export class DisclosuresService {
         payload: { disclosureId: row.id, chatId: row.chat_id, number },
         actions: [
           { label: 'Открыть чат', href: '/chats/' + row.chat_id, action: 'open' },
-          ...(first ? [{ label: 'Уже знакомы', href: '/disclosures/' + row.id, action: 'open' }] : []),
+          ...(token ? [{ label: 'Уже знакомы', token, action: 'disclosure.already_known' }] : []),
         ],
         dedupeKey: 'disclosure.accept:' + row.id,
         channels: first ? ['EMAIL'] : [],
@@ -191,32 +217,54 @@ export class DisclosuresService {
     }
   }
 
+  async participantExport(client: Queryable, userId: string) {
+    const { rows } = await client.query<DisclosureRow & { known: string[]; events: {
+      type: string; by: 'mine' | 'partner' | 'system'; at: Date;
+    }[] }>(`
+      SELECT d.*,
+        ARRAY(SELECT actor_user_id::text FROM disclosure_events e
+          WHERE e.disclosure_id=d.id AND e.type='ALREADY_KNOWN') AS known,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('type',e.type,'at',e.created_at,'by',
+          CASE WHEN e.actor_user_id=$1 THEN 'mine' WHEN e.actor_user_id IS NOT NULL THEN 'partner' ELSE 'system' END)
+          ORDER BY e.id) FROM disclosure_events e WHERE e.disclosure_id=d.id AND e.type<>'ADMIN_NOTE'),'[]') AS events
+      FROM disclosures d WHERE d.user_a_id=$1 OR d.user_b_id=$1 ORDER BY number
+    `, [userId])
+    return rows.map(row => ({
+      ...this.participantSummary(row, userId, row.known),
+      partner: this.partner(row, userId, true), listing: row.listing_snapshot, counterListing: row.counter_listing_snapshot,
+      matchId: row.match_id, requestedAt: row.requested_at, rulesVersion: row.rules_version, events: row.events,
+    }))
+  }
+
   async alreadyKnown(user: SessionUser, idInput: string) {
-    return this.db.transaction(async client => {
-      const row = await this.get(client, idInput, user.id)
+    return this.db.transaction(client => this.markAlreadyKnown(client, user.id, idInput))
+  }
+
+  private async markAlreadyKnown(client: Queryable, userId: string, idInput: string) {
+      const row = await this.get(client, idInput, userId)
+      await client.query('SELECT id FROM users WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE', [[row.user_a_id, row.user_b_id]])
       const { rows: [event] } = await client.query<{ at: Date }>(`
         INSERT INTO disclosure_events (disclosure_id, actor_user_id, type)
         SELECT id, $2, 'ALREADY_KNOWN' FROM disclosures
         WHERE id = $1 AND kind = 'FIRST' AND accepted_at >= now() - interval '24 hours'
         ON CONFLICT DO NOTHING RETURNING created_at AS at
-      `, [row.id, user.id])
+      `, [row.id, userId])
       if (!event) {
         const known = await client.query(`
           SELECT 1 FROM disclosure_events WHERE disclosure_id = $1 AND actor_user_id = $2 AND type = 'ALREADY_KNOWN'
-        `, [row.id, user.id])
+        `, [row.id, userId])
         if (known.rowCount) throw new ConflictException('Уже отмечено')
         throw new ConflictException('Отметить «Уже знакомы» можно в течение 24 часов после первого раскрытия')
       }
-      const partner = row.user_a_id === user.id ? row.user_b_id : row.user_a_id
+      const partner = row.user_a_id === userId ? row.user_b_id : row.user_a_id
       const number = disclosureNumber(row.number)
       await this.notifications.notify(client, partner, {
         kind: 'disclosure.already_known', title: 'Отметка о знакомстве',
         body: `Собеседник отметил, что вы знакомы до площадки (запись ${number}).`,
         actions: [{ label: 'Открыть запись', href: '/disclosures/' + row.id, action: 'open' }],
-        dedupeKey: 'disclosure.already-known:' + row.id + ':' + user.id, channels: [],
+        dedupeKey: 'disclosure.already-known:' + row.id + ':' + userId, channels: [],
       })
       return { type: 'ALREADY_KNOWN', by: 'mine', at: event.at }
-    })
   }
 
   async note(user: SessionUser, idInput: string, raw: unknown) {

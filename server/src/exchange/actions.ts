@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { hashToken } from '../auth/auth.crypto';
 import { DatabaseService, type Queryable } from '../database/database.service';
+import { policyRequired, policyVersion } from '../privacy/policy';
 
 export interface ExchangeAction {
   purpose: string;
@@ -14,6 +15,7 @@ export interface ExchangeAction {
 type ActionHandler = {
   describe: (client: PoolClient, token: ExchangeAction) => Promise<object>;
   execute: (client: PoolClient, token: ExchangeAction, input: unknown) => Promise<object>;
+  lockSubjects?: (client: PoolClient, token: ExchangeAction) => Promise<void>;
 };
 
 @Injectable()
@@ -38,37 +40,67 @@ export class ExchangeActions {
   }
 
   async open(token: string, ip: string, input?: { body: unknown }): Promise<object> {
-    await this.limit(ip);
-    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new NotFoundException('Ссылка не найдена');
-    return this.db.transaction(async client => {
-      const hash = hashToken(token);
-      const { rows: [action] } = await client.query<ExchangeAction & { used: boolean; expired: boolean }>(`
-        SELECT purpose,user_id AS "userId", subject_id AS "subjectId",payload,
-          expires_at AS "expiresAt", used_at IS NOT NULL AS used, expires_at <= now() AS expired
-        FROM action_tokens WHERE token_hash=$1 ${input ? 'FOR UPDATE' : ''}
-      `, [hash]);
-      const handler = action && this.handlers.get(action.purpose);
-      if (!handler) throw new NotFoundException('Ссылка не найдена');
-      if (action.used) throw new ConflictException('Ссылка уже использована');
-      if (action.expired) throw new GoneException('Срок ссылки истёк');
-      if (action.userId) {
-        const active = await client.query("SELECT id FROM users WHERE id=$1 AND status='ACTIVE'", [action.userId]);
-        if (!active.rows[0]) throw new ForbiddenException('Профиль недоступен');
-      }
-      if (!input) return { ...await handler.describe(client, action), purpose: action.purpose, expiresAt: action.expiresAt, used: false };
-      const result = await handler.execute(client, action, input.body);
-      await client.query('UPDATE action_tokens SET used_at=now() WHERE token_hash=$1', [hash]);
-      return result;
-    });
+    await this.limit(this.db, 'action-ip:' + hashToken(ip), 15, 60);
+    return this.db.transaction(client => this.use(client, token, input));
   }
 
-  private async limit(ip: string): Promise<void> {
-    const { rows: [entry] } = await this.db.query<{ count: number }>(`
-      INSERT INTO auth_rate_limits(bucket,count,expires_at) VALUES ($1,1,now()+interval '15 minutes')
-      ON CONFLICT(bucket) DO UPDATE SET count=CASE WHEN auth_rate_limits.expires_at <= now() THEN 1 ELSE least(auth_rate_limits.count,61)+1 END,
+  async limitTelegram(client: Queryable, actorUserId: string): Promise<void> {
+    await this.limit(client, 'telegram-callback:' + hashToken(actorUserId), 1, 30);
+  }
+
+  async runForUser(token: string, body: unknown, actorUserId: string, client?: PoolClient, telegramChatId?: string): Promise<object> {
+    if (client) return this.use(client, token, { body }, actorUserId, telegramChatId);
+    await this.limitTelegram(this.db, actorUserId);
+    return this.db.transaction(transaction => this.use(transaction, token, { body }, actorUserId, telegramChatId));
+  }
+
+  inspectForUser(client: PoolClient, token: string, actorUserId: string): Promise<object> {
+    return this.use(client, token, undefined, actorUserId);
+  }
+
+  private async use(client: PoolClient, token: string, input?: { body: unknown }, actorUserId?: string, telegramChatId?: string): Promise<object> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new NotFoundException('Ссылка не найдена');
+    const hash = hashToken(token);
+    const load = async (lock = false) => (await client.query<ExchangeAction & { used: boolean; expired: boolean }>(`
+      SELECT purpose,user_id AS "userId", subject_id AS "subjectId",payload,
+        expires_at AS "expiresAt", used_at IS NOT NULL AS used, expires_at <= now() AS expired
+      FROM action_tokens WHERE token_hash=$1 ${lock ? 'FOR UPDATE' : ''}
+    `, [hash])).rows[0];
+    let action = await load();
+    const handler = action && this.handlers.get(action.purpose);
+    if (!handler) throw new NotFoundException('Ссылка не найдена');
+    if (actorUserId !== undefined && action.userId !== actorUserId) throw new ForbiddenException('Эта кнопка не для вас');
+    if (action.used) throw new ConflictException('Ссылка уже использована');
+    if (action.expired) throw new GoneException('Срок ссылки истёк');
+    if (input && handler.lockSubjects) await handler.lockSubjects(client, action);
+    if (action.userId) {
+      const { rows: [active] } = await client.query<{ role: string; pd_consent_version: string | null; telegram_chat_id: string | null }>(
+        "SELECT role,pd_consent_version,telegram_chat_id FROM users WHERE id=$1 AND status='ACTIVE'" + (input ? ' FOR UPDATE' : ''), [action.userId],
+      );
+      if (!active) throw new ForbiddenException('Профиль недоступен');
+      if (telegramChatId !== undefined && active.telegram_chat_id !== telegramChatId) throw new ForbiddenException('Telegram отвязан от профиля');
+      if (input && (active.role === 'BUYER' || active.role === 'SELLER') && active.pd_consent_version !== await policyVersion(client)) {
+        throw policyRequired();
+      }
+    }
+    if (!input) return { ...await handler.describe(client, action), purpose: action.purpose, expiresAt: action.expiresAt, used: false };
+    // Erasure holds the user lock before deleting action tokens. Recheck the token with the same lock order.
+    action = await load(true);
+    if (!action) throw new NotFoundException('Ссылка не найдена');
+    if (action.used) throw new ConflictException('Ссылка уже использована');
+    if (action.expired) throw new GoneException('Срок ссылки истёк');
+    const result = await handler.execute(client, action, input.body);
+    await client.query('UPDATE action_tokens SET used_at=now() WHERE token_hash=$1', [hash]);
+    return result;
+  }
+
+  private async limit(client: Queryable, bucket: string, minutes: number, max: number): Promise<void> {
+    const { rows: [entry] } = await client.query<{ count: number }>(`
+      INSERT INTO auth_rate_limits(bucket,count,expires_at) VALUES ($1,1,now()+$2::int*interval '1 minute')
+      ON CONFLICT(bucket) DO UPDATE SET count=CASE WHEN auth_rate_limits.expires_at <= now() THEN 1 ELSE least(auth_rate_limits.count,$3::int)+1 END,
         expires_at=CASE WHEN auth_rate_limits.expires_at <= now() THEN EXCLUDED.expires_at ELSE auth_rate_limits.expires_at END
       RETURNING count
-    `, ['action-ip:' + hashToken(ip)]);
-    if (entry.count > 60) throw new HttpException('Слишком много запросов, повторите позже.', 429);
+    `, [bucket, minutes, max + 1]);
+    if (entry.count > max) throw new HttpException('Слишком много запросов, повторите позже.', 429);
   }
 }

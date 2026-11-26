@@ -118,6 +118,8 @@ def registration_test(page: Page):
     field(page, "password").fill(PASSWORD)
     submit = button(page, "Получить код")
     expect(submit).to_be_disabled()
+    page.locator('input[name="pdConsent"]').check()
+    expect(submit).to_be_disabled()
     captcha.press("Space")
     expect(submit).to_be_enabled(timeout=15000)
     submit.click()

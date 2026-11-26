@@ -11,6 +11,8 @@ import { DisclosureDetailPage, DisclosuresPage } from './Disclosures';
 import { PrincipalAnswerPage, RepresentationAccount, RepresentationAction } from './Representation';
 import { PaymentsPage, TrustAccount } from './Trust';
 import { DealsPage } from './Deals';
+import { AccountPrivacy, ConsentPage } from './Consent';
+import { TelegramActionForm } from './Telegram';
 import { AdminPage } from './AdminPage';
 import { AccountPage, AuthPage, authDestination } from './Auth';
 import { CatalogPage } from './Catalog';
@@ -111,6 +113,7 @@ function Footer() {
     <Brand /><p>{t('Площадка для закупки и продажи серверного оборудования')}</p>
     <nav aria-label={t('Документы')}>
       <Link to="/info/rules">{t('Правила')}</Link><Link to="/info/privacy">{t('Конфиденциальность')}</Link>
+      <Link to="/info/pd_policy">{t('Политика обработки данных')}</Link>
     </nav>
   </div></footer>;
 }
@@ -162,15 +165,28 @@ function AppRoutes() {
   const [checking, setChecking] = useState(true);
   const [notificationRevision, setNotificationRevision] = useState(0);
   const [registrationMode, setRegistrationMode] = useState<'INVITE' | 'OPEN'>('OPEN');
+  const [registrationPolicy, setRegistrationPolicy] = useState<{ version?: string; available?: boolean }>({});
 
   useEffect(() => {
-    const controller = new AbortController();
-    void api<{ user: User; registrationMode?: 'INVITE' | 'OPEN' }>('/auth/me', { signal: controller.signal }).then(data => {
-      if (!controller.signal.aborted) { setUser(data.user); setRegistrationMode(data.registrationMode ?? 'OPEN'); }
-    }).catch((err: Error) => {
-      if (err.name !== 'AbortError') setUser(null);
-    }).finally(() => { if (!controller.signal.aborted) setChecking(false); });
-    return () => controller.abort();
+    let active: AbortController | undefined;
+    function loadSession() {
+      active?.abort();
+      const controller = new AbortController();
+      active = controller;
+      void api<{ user: User | null; registrationMode?: 'INVITE' | 'OPEN'; pdPolicyVersion?: string; pdRegistrationAvailable?: boolean }>(
+        '/auth/me', { signal: controller.signal },
+      ).then(data => {
+        if (controller.signal.aborted) return;
+        setUser(data.user);
+        setRegistrationMode(data.registrationMode ?? 'OPEN');
+        setRegistrationPolicy({ version: data.pdPolicyVersion, available: data.pdRegistrationAvailable });
+      }).catch(() => {
+        if (!controller.signal.aborted) setUser(null);
+      }).finally(() => { if (!controller.signal.aborted) setChecking(false); });
+    }
+    loadSession();
+    window.addEventListener('hwforai:consent-required', loadSession);
+    return () => { active?.abort(); window.removeEventListener('hwforai:consent-required', loadSession); };
   }, []);
 
   useEffect(() => {
@@ -187,20 +203,32 @@ function AppRoutes() {
     return child;
   }
 
+  const pendingConsent = !isStaff(user) && user?.pdConsentRequired === true;
+  const allowedBeforeConsent = location.pathname === '/consent' || location.pathname.startsWith('/info/') || location.pathname.startsWith('/a/');
+  const consentReturn = `/consent?next=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
+  function afterConsent(member: User) {
+    const requested = new URLSearchParams(location.search);
+    if (/^\/consent(?:[/?#]|$)/i.test(requested.get('next') ?? '')) requested.delete('next');
+    return authDestination(member, requested);
+  }
   const logout = async () => { await api('/auth/logout', { method: 'POST' }); setUser(null); };
   return <>
     <a href="#main" className="skip-link">{t('Перейти к содержимому')}</a>
     <Header user={user} onLogout={logout} notificationRevision={notificationRevision} />
     <main id="main" tabIndex={-1}>
-      {location.pathname !== '/info/rules' && <div className="container"><RulesBanner user={user} /></div>}
-      <Routes>
+      {!pendingConsent && location.pathname !== '/info/rules' && <div className="container"><RulesBanner user={user} /></div>}
+      {pendingConsent && !allowedBeforeConsent ? <Navigate replace to={consentReturn} /> : <Routes>
         <Route path="/" element={<CatalogPage user={user} home />} />
         <Route path="/catalog" element={<CatalogPage user={user} />} />
         <Route path="/login" element={checking ? <Spinner /> : user ? <Navigate to={authDestination(user, location.search)} replace /> : <AuthPage mode="login" onUser={setUser} />} />
         <Route path="/register" element={checking ? <Spinner /> : user ? <Navigate to={authDestination(user, location.search)} replace /> : <AuthPage mode="register" onUser={setUser}
+          pdPolicyVersion={registrationPolicy.version} pdRegistrationAvailable={registrationPolicy.available}
           registrationMode={Object.hasOwn(features, 'feature_invites')
             ? features.feature_invites && features.registration_mode === 'INVITE' ? 'INVITE' : 'OPEN' : registrationMode} />} />
+        <Route path="/consent" element={secure(user && (pendingConsent ? <ConsentPage user={user} onUser={setUser} onLogout={logout} />
+          : <Navigate to={afterConsent(user)} replace />), 'MEMBER')} />
         <Route path="/account" element={secure(user && <AccountPage user={user} onUser={setUser} onboardingAvailable={features.feature_invites === true}>
+          {!isStaff(user) && <AccountPrivacy user={user} onUser={setUser} />}
           {!isStaff(user) && features.feature_actuality === true && <AccountActuality />}
           {!isStaff(user) && features.feature_representation === true && <RepresentationAccount user={user} />}
           {!isStaff(user) && features.feature_trust_rating === true && <TrustAccount />}
@@ -217,6 +245,7 @@ function AppRoutes() {
         <Route path="/payments" element={<PaymentsPage />} />
         <Route path="/info/payments" element={<PaymentsPage />} />
         <Route path="/a/:token" element={<ActionPage renderForm={(action, submit, pending) => {
+          if (pendingConsent && action.purpose !== 'email.optout') return <Navigate to={consentReturn} replace />;
           switch (action.purpose) {
             case 'principal.confirm':
             case 'company_email.confirm':
@@ -226,6 +255,15 @@ function AppRoutes() {
             case 'listing.actuality-all':
             case 'listing.extend':
               return <Button disabled={pending} onClick={() => void submit({ answer: 'ACTUAL' })}>{t('Подтвердить')}</Button>;
+            case 'email.optout':
+              return <Button disabled={pending} onClick={() => void submit({})}>{t('Отказаться от писем')}</Button>;
+            case 'chat.reveal':
+            case 'match.chat':
+            case 'match.decline':
+            case 'disclosure.already_known':
+            case 'principal.answer':
+            case 'deal.status':
+              return <TelegramActionForm key={action.purpose} purpose={action.purpose} fields={action.fields} onSubmit={submit} pending={pending} />;
             default:
               return <Notice tone="error">{t('Действие недоступно.')}</Notice>;
           }
@@ -239,7 +277,7 @@ function AppRoutes() {
         <Route path="/admin" element={secure(user && <AdminPage user={user} />, 'STAFF')} />
         <Route path="/info/:key" element={<InfoPage user={user} onUser={setUser} />} />
         <Route path="*" element={<div className="container workflow-page"><h1>{t('Страница не найдена')}</h1><Link to="/catalog" className="button button-primary">{t('К каталогу')}</Link></div>} />
-      </Routes>
+      </Routes>}
     </main>
     <Footer />
   </>;

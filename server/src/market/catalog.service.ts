@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { PoolClient } from 'pg'
 import { isStaffRole, type ParticipantRole, type SessionUser } from '../auth/auth.types'
+import { withoutLegacyListingContacts, type PublicListingText } from '../contact-guard/public-text'
 import { DatabaseService, type Queryable } from '../database/database.service'
 import { ActualityService } from '../exchange/actuality.service'
 import { OnboardingService } from '../exchange/onboarding.service'
@@ -10,6 +11,7 @@ import { TrustService } from '../exchange/trust.service'
 import { listingRepresentation, representationEnabled, verifiedPrincipal } from '../exchange/representation.rules'
 import { listingModelFilter, lockHardwareModelReferences, validateListingModels } from '../models/model-listings'
 import { MatchingService } from '../matching/matching.service'
+import { lotMembershipJoin } from '../lots/lot-public'
 import { ListingMediaService, type ListingImage, type ListingImageData, type ListingImageUpdate, type ListingImageUpload } from './listing-media.service'
 import {
   accountTypes, availability, boolean, conditions, counterparties, country, currencies, escapedSearch,
@@ -21,7 +23,7 @@ import {
   visibleCategories,
 } from './market.queries'
 
-type ListingRow = Record<string, unknown> & {
+type ListingRow = Record<string, unknown> & PublicListingText & {
   id: string
   ownerId: string
   kind: typeof kinds[number]
@@ -159,10 +161,13 @@ export class CatalogService {
       'price-asc': 'l.currency, l.price ASC NULLS LAST, l.created_at DESC, l.id',
       'price-desc': 'l.currency, l.price DESC NULLS LAST, l.created_at DESC, l.id',
     }
-    return {
-      ...await this.listPage(this.db, filters, params, paging, orders[sort], visibleCategories, search, false, lowRating),
-      locked: false,
-    }
+    const [page, maskLegacyContacts] = await Promise.all([
+      this.listPage(this.db, filters, params, paging, orders[sort], visibleCategories, search, false, lowRating,
+        user.role === 'BUYER' && await this.settings.enabled('feature_lot_groups')),
+      allowed !== null && this.settings.enabled('feature_disclosure_journal'),
+    ])
+    if (maskLegacyContacts) page.items = page.items.map(item => item.ownerId === user.id ? item : withoutLegacyListingContacts(item))
+    return { ...page, locked: false }
   }
 
   async mine(user: SessionUser<ParticipantRole>, query: Record<string, unknown>) {
@@ -193,7 +198,10 @@ export class CatalogService {
       SELECT ${listingColumnsFor('$2 OR l.owner_id = $3')} ${listingJoins}
       WHERE ${listingDetailWhere}
     `, this.detailParams(user, idInput))
-    return this.found(result.rows[0])
+    const listing = this.found(result.rows[0])
+    return listing.ownerId !== user.id && !isStaffRole(user.role) && await this.settings.enabled('feature_disclosure_journal')
+      ? withoutLegacyListingContacts(listing)
+      : listing
   }
 
   async image(user: SessionUser, idInput: string, imageIdInput: string) {
@@ -287,6 +295,9 @@ export class CatalogService {
       await this.activeUser(client, user.id)
       const existing = await this.lock(client, id)
       this.assertOwnership(existing, user)
+      if (restore && existing.isDuplicate) {
+        throw new ConflictException('Объявление помечено как дубль. Оспорить решение можно у модератора.')
+      }
       if (restore && existing.status !== 'ACTIVE') {
         await this.trust.assertPublishable(client, user.id, { creating: existing.status === 'ARCHIVED' })
         await this.onboarding.assertCanPublish(user.id, client)
@@ -430,9 +441,10 @@ export class CatalogService {
     search?: ListingSearch,
     privateFields = false,
     lowRating?: string,
+    collapseLots = false,
   ) {
     // Limit the lateral query to one score calculation per matched listing.
-    const preamble = search ? (withClause ? withClause + ',' : 'WITH ') + search.ctes : withClause
+    let preamble = search ? (withClause ? withClause + ',' : 'WITH ') + search.ctes : withClause
     const joins = listingJoins + (search ? `
       JOIN matching_candidates candidate ON candidate.id = l.id
       CROSS JOIN search_query
@@ -450,6 +462,35 @@ export class CatalogService {
     const countValues = [...params.values]
     const limitParam = params.add(limit)
     const offsetParam = params.add(offset)
+    if (collapseLots) {
+      // Rank only offers that match this search so grouping cannot hide a matching alternative.
+      preamble += `, lot_ranked AS (
+        SELECT l.id,lg.id AS group_id,row_number() OVER (
+          PARTITION BY coalesce(lg.id,l.id) ORDER BY l.trust_score DESC NULLS LAST,l.created_at,l.id
+        ) AS position
+        ${joins} ${lotMembershipJoin} ${itemsWhere}
+      )`
+      const [items, count] = await Promise.all([
+        db.query<ListingRow>(`
+          ${preamble} SELECT ${listingColumnsFor()},CASE WHEN group_size.participants > 1 THEN jsonb_build_object(
+            'id',lot.group_id,'participants',group_size.participants,'primary',true,'collapsedCount',group_size.participants-1
+          ) END AS "lotGroup"
+          ${joins} JOIN lot_ranked lot ON lot.id=l.id AND lot.position=1
+          LEFT JOIN LATERAL (
+            SELECT count(DISTINCT l.owner_id)::int AS participants
+            FROM lot_group_members peer JOIN lot_groups grp ON grp.id=peer.group_id
+            JOIN listings l ON l.id=peer.listing_id AND l.lot_key=grp.lot_key JOIN users u ON u.id=l.owner_id
+            WHERE peer.group_id=lot.group_id AND peer.role='MEMBER' AND ${listingPublicWhere}
+          ) group_size ON lot.group_id IS NOT NULL
+          ORDER BY ${order} LIMIT ${limitParam} OFFSET ${offsetParam}
+        `, params.values),
+        db.query<{ total: number; hiddenLowRating?: number }>(`
+          ${preamble} SELECT (SELECT count(*)::int FROM lot_ranked WHERE position=1) AS total
+          ${lowRating ? `, (SELECT count(*)::int ${joins} ${where}${where ? ' AND ' : 'WHERE '}${lowRating}) AS "hiddenLowRating"` : ''}
+        `, countValues),
+      ])
+      return { items: items.rows.map(row => this.found(row)), ...count.rows[0], page, limit }
+    }
     const [items, count] = await Promise.all([
       db.query<ListingRow>(`
         ${preamble} SELECT ${listingColumnsFor(privateFields ? 'true' : 'false')} ${joins} ${itemsWhere}

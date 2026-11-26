@@ -5,6 +5,7 @@ import type { PoolClient } from 'pg'
 import type { StaffSession } from '../auth/auth.types'
 import { DatabaseService, type Queryable } from '../database/database.service'
 import { boolean, currencies, integer, object, oneOf, pageParams, priceValue, str, uuid } from '../market/market.inputs'
+import { ExchangeActions } from './actions'
 import { auditExchange } from './audit'
 import { ExchangeJobs } from './jobs'
 import { ExchangeNotifications } from './notifications'
@@ -13,7 +14,7 @@ import { lockTrustStaff } from './trust-access'
 import { TrustService } from './trust.service'
 
 const statuses = ['NEGOTIATING', 'AGREED', 'FAILED', 'EXECUTED'] as const
-const reasons = ['Цена', 'Оплата', 'Сроки', 'Товар', 'Документы', 'Контрагент пропал', 'Другое'] as const
+export const dealFailureReasons = ['Цена', 'Оплата', 'Сроки', 'Товар', 'Документы', 'Контрагент пропал', 'Другое'] as const
 type Agreement = { amount: number; quantity: number; currency: string }
 type Deal = {
   id: string; disclosure_id: string; seller_id: string; buyer_id: string
@@ -28,7 +29,7 @@ const projection = `
   d.status, d.seller_agreed AS "sellerAgreed", d.buyer_agreed AS "buyerAgreed", d.amount_mismatch AS "amountMismatch",
   d.failed_reason AS "failedReason", d.seller_executed_at AS "sellerExecutedAt", d.buyer_executed_at AS "buyerExecutedAt",
   d.admin_verified_at AS "adminVerifiedAt", d.admin_rejected_at AS "adminRejectedAt", d.admin_note AS "adminNote",
-  d.created_at AS "createdAt", d.updated_at AS "updatedAt"
+  d.created_at AS "createdAt", d.updated_at AS "updatedAt", d.agreed_at AS "agreedAt"
 `
 const joins = `FROM deals d JOIN disclosures s ON s.id = d.disclosure_id
   LEFT JOIN listings a ON a.id = d.sell_listing_id LEFT JOIN listings b ON b.id = d.buy_listing_id`
@@ -41,9 +42,18 @@ export class DealsService implements OnApplicationBootstrap {
     private readonly settings: PlatformSettings,
     private readonly notify: ExchangeNotifications,
     private readonly trust: TrustService,
+    private readonly actions: ExchangeActions,
   ) {}
 
   onApplicationBootstrap() {
+    this.actions.register('deal.status', {
+      describe: async () => ({ title: 'Уточните статус сделки', fields: { reasons: dealFailureReasons } }),
+      lockSubjects: async (client, token) => {
+        await client.query(`SELECT u.id FROM users u JOIN deals d ON u.id IN (d.seller_id,d.buyer_id)
+          WHERE d.id=$1 AND $2 IN (d.seller_id,d.buyer_id) ORDER BY u.id FOR UPDATE OF u`, [token.subjectId, token.userId])
+      },
+      execute: (client, token, raw) => this.changeStatus(token.userId!, token.subjectId, raw, client),
+    })
     this.jobs.register({ name: 'deals.followups', lock: 13, run: client => this.followups(client) })
   }
 
@@ -76,8 +86,8 @@ export class DealsService implements OnApplicationBootstrap {
     return { ...deal, events }
   }
 
-  async changeStatus(userId: string, requested: string, raw: unknown) {
-    await this.trust.requireEnabled()
+  async changeStatus(userId: string, requested: string, raw: unknown, transaction?: PoolClient) {
+    await this.trust.requireEnabled(transaction)
     const id = uuid(requested)
     const data = object(raw)
     const status = oneOf(data.status, statuses, 'Статус сделки')
@@ -85,16 +95,16 @@ export class DealsService implements OnApplicationBootstrap {
       amount: priceValue(data.amount, 'Сумма'), quantity: integer(data.quantity, 'Количество', 1, 1_000_000),
       currency: oneOf(data.currency, currencies, 'Валюта'),
     } : null
-    const reasonCodes: Record<string, typeof reasons[number]> = {
+    const reasonCodes: Record<string, typeof dealFailureReasons[number]> = {
       PRICE: 'Цена', PAYMENT: 'Оплата', TIMING: 'Сроки', GOODS: 'Товар', DOCUMENTS: 'Документы',
       NO_RESPONSE: 'Контрагент пропал', OTHER: 'Другое',
     }
     const reason = status === 'FAILED' ? oneOf(
       typeof data.reason === 'string' && Object.hasOwn(reasonCodes, data.reason) ? reasonCodes[data.reason] : data.reason,
-      reasons, 'Причина',
+      dealFailureReasons, 'Причина',
     ) : null
 
-    return this.db.transaction(async client => {
+    const change = async (client: PoolClient) => {
       const { rows: [membership] } = await client.query<Pick<Deal, 'seller_id' | 'buyer_id'>>(`
         SELECT seller_id,buyer_id FROM deals WHERE id = $1 AND $2 IN (seller_id,buyer_id)
       `, [id, userId])
@@ -123,7 +133,8 @@ export class DealsService implements OnApplicationBootstrap {
         mismatch = Boolean(other && (other.amount !== agreement.amount || other.quantity !== agreement.quantity || other.currency !== agreement.currency))
         await client.query(`
           UPDATE deals SET ${seller ? 'seller_agreed' : 'buyer_agreed'} = $2::jsonb,
-            status = $3, amount_mismatch = $4, updated_at = now() WHERE id = $1
+            status = $3, amount_mismatch = $4, updated_at = now(),
+            agreed_at = CASE WHEN $3 = 'AGREED' THEN COALESCE(agreed_at, now()) ELSE agreed_at END WHERE id = $1
         `, [id, JSON.stringify(agreement), result, mismatch])
         await this.notify.notify(client, partner, {
           kind: 'deal.agreed', title: 'Контрагент указал условия сделки',
@@ -156,7 +167,8 @@ export class DealsService implements OnApplicationBootstrap {
 
       await this.event(client, deal.disclosure_id, userId, 'DEAL_STATUS', { status, resultingStatus: result, agreement, reason, amountMismatch: mismatch })
       return this.read(client, id, userId)
-    })
+    }
+    return transaction ? change(transaction) : this.db.transaction(change)
   }
 
   async check(actor: StaffSession, requested: string, raw: unknown) {
@@ -237,13 +249,15 @@ export class DealsService implements OnApplicationBootstrap {
         if (deal.elapsed < day || current.followups[day]) continue
         for (const user of [deal.seller_id, deal.buyer_id]) {
           const title = current.status === 'AGREED' ? 'Исполнена ли сделка?' : 'Уточните статус сделки'
+          const token = await this.actions.issue(client, { purpose: 'deal.status', userId: user, subjectId: deal.id,
+            expiresAt: new Date(Date.now() + 7 * 86_400_000) })
           await this.notify.notify(client, user, {
             kind: 'deal.followup', title, body: `После обмена контактами R-${deal.number.padStart(6, '0')} прошло ${day} дней. Если статус изменился, обновите его в карточке сделки.`,
             payload: { dealId: deal.id, day }, actions: [
               ...(current.status === 'AGREED' ? [{ label: 'Подтвердить исполнение', href: '/deals/' + deal.id + '?status=EXECUTED' }]
                 : [{ label: 'Указать условия', href: '/deals/' + deal.id + '?status=AGREED' }]),
-              { label: 'Идут переговоры', href: '/deals/' + deal.id + '?status=NEGOTIATING' },
-              { label: 'Сделка не состоялась', href: '/deals/' + deal.id + '?status=FAILED' },
+              { label: 'Ответить', token, action: 'deal.status' },
+              { label: 'Открыть сделку', href: '/deals/' + deal.id },
             ],
             dedupeKey: `deal-followup:${deal.id}:${day}`, channels: ['EMAIL'],
           })

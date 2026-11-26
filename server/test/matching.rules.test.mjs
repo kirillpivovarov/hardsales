@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { addWorkDays, evaluatePair } from '../dist/matching/matching.rules.js';
+import { addWorkDays, evaluatePair, explainPair } from '../dist/matching/matching.rules.js';
 
 const compatibility = JSON.parse(readFileSync(new URL('../seeds/exchange_data/payment_compatibility.json', import.meta.url)));
 const day = '2026-11-27';
@@ -69,4 +69,44 @@ test('falls back to methods until both sides select terms, applying dataset rule
     .gap.rows.map(row => row.id), ['c8']);
   assert.deepEqual(pair({ payment_methods: ['CARD'] }).gap.rows.map(row => row.id), ['c0']);
   assert.deepEqual(pair(above, above).commonTerms, ['PREPAY_100']);
+});
+
+test('operator explanations agree with the automatic eligibility and price decision across 200 pairs', () => {
+  let state = 157091;
+  const sample = options => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return options[(state >>> 16) % options.length];
+  };
+  for (let index = 0; index < 200; index++) {
+    const sell = { ...seller,
+      model_id: sample(['h100-sxm', 'h200-sxm']), quantity: sample([2, 4, 6, 8]), min_lot: 2,
+      price: sample(['305.00', '430.00', '440.00', '500.00']), currency: 'USD',
+      condition: sample(['NEW', 'USED', 'REFURBISHED']), origin_country: sample(['RU', 'KZ']),
+      destination_country: sample([null, 'RU', 'KZ']), ship_days: sample([null, 0, 2, 3]),
+      counterparty: sample(['ANY', 'COMPANY']), payment_methods: sample([['BANK_TRANSFER'], ['CASH']]),
+    };
+    const buy = { ...buyer, price: '400.00', currency: 'USD', min_lot: sample([1, 2, 3]),
+      analog_model_ids: sample([[], ['h200-sxm']]), participant_type: sample(['COMPANY', 'INDIVIDUAL']),
+      condition: sample(['NEW', 'REFURBISHED', 'USED']), origin_scope: sample(['DOMESTIC', 'ANY']),
+      delivery_by: sample(['2026-12-01', '2026-12-08']),
+    };
+    const automatic = evaluatePair(sell, buy, day, rates, compatibility);
+    const explanation = explainPair(sell, buy, day, rates, compatibility);
+    assert.equal(explanation.failures.length === 0, automatic !== null, JSON.stringify({ sell, buy }));
+    assert.deepEqual(explanation.evaluation, automatic);
+  }
+});
+
+test('near-miss explanation preserves numeric excess and distinguishes an inferred model from an unselected analog', () => {
+  const sell = { ...seller, model_id: 'hgx-h200-8', price: '896.00', currency: 'USD' };
+  const buy = { ...buyer, model_id: 'dgx-h200', price: '400.00', currency: 'USD' };
+  const models = { sell: { id: sell.model_id, nameRu: 'HGX H200', groups: ['h200-server'] },
+    buy: { id: buy.model_id, nameRu: 'DGX H200', groups: ['h200-server'] } };
+  const analog = explainPair(sell, buy, day, rates, compatibility, models);
+  assert.deepEqual(analog.failures.map(reason => reason.key), ['MODEL_ANALOG', 'PRICE_OVER']);
+  assert.equal(analog.priceOver, 0.12);
+  assert.equal(analog.failures[1].text, 'Цена выше бюджета на 12,0 %');
+  const inferred = explainPair({ ...sell, model_id: null, price: '800.00' }, buy, day, rates, compatibility, models);
+  assert.deepEqual(inferred.failures.map(reason => reason.key), ['MODEL_MISSING']);
+  assert.equal(inferred.failures[0].detail.modelId, sell.model_id);
 });

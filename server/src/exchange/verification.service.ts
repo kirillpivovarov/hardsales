@@ -99,11 +99,17 @@ export class VerificationService implements OnApplicationBootstrap {
         throw new NotFoundException('Принципал не найден')
       }
       if (listingId) {
-        const { rows: [listing] } = await client.query<{ kind: 'SELL' | 'BUY' }>(`
-          SELECT kind FROM listings WHERE id = $1 AND owner_id = $2 FOR UPDATE
+        const { rows: [listing] } = await client.query<{ kind: 'SELL' | 'BUY'; representation: string; principal_id: string | null }>(`
+          SELECT kind,representation,principal_id FROM listings WHERE id = $1 AND owner_id = $2 FOR UPDATE
         `, [listingId, userId])
         if (!listing) throw new NotFoundException('Объявление не найдено')
-        oneOf(kind, listing.kind === 'SELL' ? salesProof : buyProof, 'Подтверждение объявления')
+        if (kind === 'MANDATE') {
+          if (listing.kind !== 'SELL' || listing.representation !== 'AGENT' || listing.principal_id !== principalId) {
+            throw new BadRequestException('Укажите принципала этого предложения.')
+          }
+        } else {
+          oneOf(kind, listing.kind === 'SELL' ? salesProof : buyProof, 'Подтверждение объявления')
+        }
       }
       if (dealId && !(await client.query('SELECT 1 FROM deals WHERE id = $1 AND $2 IN (buyer_id,seller_id)', [dealId, userId])).rowCount) {
         throw new NotFoundException('Сделка не найдена')
@@ -125,7 +131,7 @@ export class VerificationService implements OnApplicationBootstrap {
       if (code && kind === 'SERIAL_PHOTO' && (!code.spot_check || code.timely)) {
         await client.query("UPDATE day_codes SET result = 'PASSED', result_at = now() WHERE id = $1 AND result IS NULL", [code.id])
       }
-      if (listingId) await client.query(`
+      if (listingId && kind !== 'MANDATE') await client.query(`
         UPDATE listings SET proof_status = 'PENDING', proof_document_id = $2
         WHERE id = $1 AND proof_status <> 'VERIFIED'
       `, [listingId, document.id])
@@ -183,7 +189,7 @@ export class VerificationService implements OnApplicationBootstrap {
         UPDATE verification_documents AS d SET status = $2, note = $3, reviewed_at = now(), reviewed_by = $4
         WHERE id = $1 RETURNING ${documentColumns}
       `, [id, status, note, actor.id])
-      if (document.listingId && approved) await client.query(`
+      if (document.listingId && document.kind !== 'MANDATE' && approved) await client.query(`
         UPDATE listings SET proof_status = 'VERIFIED', proof_verified_at = now(), proof_document_id = $2 WHERE id = $1
       `, [document.listingId, id])
       if (document.listingId && !approved) await client.query(`

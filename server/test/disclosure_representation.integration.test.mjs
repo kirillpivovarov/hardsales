@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import pg from 'pg';
-import { solveCaptcha } from './captcha-helper.mjs';
+import { demoRegistrationConsent, solveCaptcha } from './captcha-helper.mjs';
 
 const origin = process.env.HWFORAI_DISCLOSURE_TEST_URL?.replace(/\/$/, '');
 const mail = process.env.MAILPIT_URL?.replace(/\/$/, '');
@@ -32,6 +32,7 @@ async function registerObserver() {
   const username = 'exchange_observer_' + suffix;
   const email = username + '@example.test';
   const start = await call('/auth/register', { method: 'POST', status: 201, body: {
+    ...demoRegistrationConsent,
     username, email, password: fixturePassword, role: 'BUYER', captchaToken: await solveCaptcha(origin),
     participantType: 'INDIVIDUAL', country: 'RU', city: 'Пермь', telegram: username,
   } });
@@ -62,6 +63,13 @@ test('disclosure journal, company confirmation and principal privacy', {
       ['feature_representation', true], ['feature_trust_rating', false], ['disclosure_min_level', 0],
     ]) {
       await call('/admin/settings/' + key, { method: 'PUT', body: { value }, cookie: admin.cookie });
+    }
+    const letterTemplate = {
+      subject: 'Подтверждение полномочий по запросу участника',
+      body: 'Проверьте запрос участника и полномочия по ссылке {link}. Политика обработки данных {policyUrl}. Отказ от писем {optOutUrl}.',
+    };
+    for (const approved of [false, true]) {
+      await call('/admin/settings/third_party_letter', { method: 'PUT', cookie: admin.cookie, body: { value: { ...letterTemplate, approved } } });
     }
 
     const seller = await login('test1');

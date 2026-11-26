@@ -5,6 +5,7 @@ import {
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { Request } from 'express'
 import { AuthService } from '../auth/auth.service'
+import { ContactGuardService } from '../contact-guard/contact-guard.service'
 import { DatabaseService } from '../database/database.service'
 import { AdminService } from './admin.service'
 import { CatalogService } from './catalog.service'
@@ -20,6 +21,7 @@ export class AdminController {
     private readonly admin: AdminService,
     private readonly catalog: CatalogService,
     private readonly db: DatabaseService,
+    private readonly contactGuard: ContactGuardService,
   ) {}
 
   @Get('users')
@@ -57,9 +59,10 @@ export class AdminController {
   @Patch('listings/:id')
   @UseGuards(ListingStaffGuard)
   @UseInterceptors(ListingUploadCapacity, ListingMultipart)
-  editListing(@Req() request: StaffListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
+  async editListing(@Req() request: StaffListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
     @UploadedFiles() files?: ListingImageUpload[]) {
     const { data, uploads } = listingMutation(request, body, files)
+    await this.contactGuard.assertListing(data, uploads.length)
     return this.admin.editListing(request.listingEditor, id, data, uploads)
   }
 

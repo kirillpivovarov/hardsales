@@ -18,8 +18,8 @@ from contextual_moderation_e2e import activate_staff
 BASE = os.getenv('HWFORAI_QA_BASE', 'http://127.0.0.1:3000').rstrip('/')
 CHROMIUM = os.getenv('CHROMIUM_PATH') or os.getenv('HWFORAI_QA_CHROMIUM')
 TAG = uuid4().hex[:8]
-COMMON = ['Модели оборудования', 'Журнал раскрытий', 'Принципалы', 'Проверки и сделки', 'Фоновые задачи']
-ADMIN_ONLY = ['Совпадения', 'Приглашения', 'Настройки биржи', 'Курсы валют', 'Ценовые ориентиры']
+COMMON = ['Модели оборудования', 'Журнал раскрытий', 'Принципалы', 'Совпадения', 'Проверки и сделки', 'Фоновые задачи', 'Показатели пробы', 'Дубли лотов']
+ADMIN_ONLY = ['Приглашения', 'Настройки биржи', 'Курсы валют', 'Ценовые ориентиры', 'Попытки обхода', 'Telegram', 'Запросы по данным']
 GENERATED_MODEL_CODE_HINT = 'Можно оставить пустым, чтобы сформировать код из названия.'
 
 
@@ -406,12 +406,13 @@ def run(browser):
         expect(heading(tablet, 'Модели оборудования')).to_be_visible()
         check_sections(tablet, COMMON)
         shared_sections(tablet, moderator, administrator=False, buyer=buyer)
-        for part in ['settings', 'matching', 'rates', 'corridors', 'onboarding']:
+        for part in ['settings', 'rates', 'corridors', 'onboarding', 'contact-blocks', 'telegram', 'data-requests', 'user-consents']:
             tablet.goto(BASE + base_path + '&part=' + part + '&userId=' + participant_user['id'])
             expect(heading(tablet, 'Модели оборудования')).to_be_visible()
             check_layout(tablet)
-        for route in ['invites', 'settings', 'matches', 'fx-rates', 'corridors']:
+        for route in ['invites', 'settings', 'fx-rates', 'corridors', 'contact-blocks', 'telegram', 'data-requests']:
             api(moderator, 'admin/' + route, status=403)
+        api(moderator, 'admin/matches')
         api(moderator, f'admin/users/{participant_user["id"]}/onboarding', status=403)
         api(moderator, 'admin/invites', 'POST', {'count': 1}, 403)
         api(moderator, f'admin/invites/{invite_id}/revoke', 'PATCH', {'reason': 'Проверка границы роли'}, 403)

@@ -4,12 +4,14 @@ import {
 } from '@nestjs/common'
 import type { Request } from 'express'
 import { AuthService } from '../auth/auth.service'
+import { ContactGuardService } from '../contact-guard/contact-guard.service'
 import { AdminService } from './admin.service'
 import { CatalogService } from './catalog.service'
 import { ChatsService } from './chats.service'
 import type { ListingImageUpload } from './listing-media.service'
 import { ListingMemberGuard, ListingMultipart, ListingUploadCapacity, listingMutation } from './listing-upload'
 import type { ListingMutationRequest } from './listing-upload'
+import { object, uuid } from './market.inputs'
 
 @Controller()
 export class MarketController {
@@ -17,6 +19,7 @@ export class MarketController {
     private readonly auth: AuthService,
     private readonly catalog: CatalogService,
     private readonly admin: AdminService,
+    private readonly contactGuard: ContactGuardService,
   ) {}
 
   @Get('categories')
@@ -58,17 +61,20 @@ export class MarketController {
   @Post('listings')
   @UseGuards(ListingMemberGuard)
   @UseInterceptors(ListingUploadCapacity, ListingMultipart)
-  create(@Req() request: ListingMutationRequest, @Body() body: unknown, @UploadedFiles() files?: ListingImageUpload[]) {
+  async create(@Req() request: ListingMutationRequest, @Body() body: unknown, @UploadedFiles() files?: ListingImageUpload[]) {
     const { data, uploads } = listingMutation(request, body, files)
+    await this.contactGuard.assertListing(data, uploads.length, request.listingEditor.id)
     return this.catalog.create(request.listingEditor, data, uploads)
   }
 
   @Patch('listings/:id')
   @UseGuards(ListingMemberGuard)
   @UseInterceptors(ListingUploadCapacity, ListingMultipart)
-  edit(@Req() request: ListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
+  async edit(@Req() request: ListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
     @UploadedFiles() files?: ListingImageUpload[]) {
     const { data, uploads } = listingMutation(request, body, files)
+    if (!request.is('multipart/form-data')) await this.catalog.assertEditableBy(request.listingEditor, id)
+    await this.contactGuard.assertListing(data, uploads.length, request.listingEditor.id, uuid(id))
     return this.catalog.change(request.listingEditor, id, data, uploads)
   }
 
@@ -81,6 +87,14 @@ export class MarketController {
   @HttpCode(200)
   async restore(@Req() request: Request, @Param('id') id: string) {
     return this.catalog.archive(await this.auth.participant(request), id, true)
+  }
+
+  @Post('listings/:id/reports')
+  async reportPhoto(@Req() request: Request, @Param('id') id: string, @Body() payload: unknown) {
+    const user = await this.auth.participant(request)
+    const listing = await this.catalog.detail(user, id)
+    const body = object(payload)
+    return this.contactGuard.reportPhoto(user.id, listing.id, body.details)
   }
 }
 

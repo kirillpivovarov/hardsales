@@ -41,6 +41,20 @@ const parentsBySlug = `
     UNION ALL SELECT c.id, c.slug, c.parent_id FROM categories c JOIN parents p ON p.parent_id = c.id
   )`
 
+// Both the public suggestion endpoint and operator candidate selection use the same order.
+export function modelSuggestionsQuery(category: string, title: string, limit: string) {
+  return `
+    ${parentsBySlug.replace('$1', category)}, search AS (SELECT market_search_words(${title}) AS words)
+    SELECT id, "nameRu", "matchedAlias", score FROM (
+      SELECT DISTINCT ON (m.id) m.id, m.name_ru AS "nameRu", a.alias AS "matchedAlias",
+        cardinality(a.words) AS score, m.sort_order
+      FROM hardware_model_aliases a JOIN hardware_models m ON m.id = a.model_id CROSS JOIN search
+      WHERE m.status = 'ACTIVE' AND (${category}::text IS NULL OR m.category_slug IN (SELECT slug FROM parents)) AND ${aliasesMatch}
+      ORDER BY m.id, cardinality(a.words) DESC, a.alias
+    ) matched ORDER BY score DESC, sort_order, id LIMIT ${limit}
+  `
+}
+
 function familyGroups(models: HardwareModelRow[]) {
   const groups = new Map<string, { key: string; label: string; models: HardwareModelRow[] }>()
   for (const model of models) {
@@ -126,16 +140,7 @@ export class ModelsService {
   }
 
   async suggestions(client: Queryable, text: string, category: string | null, limit = 5) {
-    const { rows } = await client.query<ModelSuggestion>(`
-      ${parentsBySlug}, search AS (SELECT market_search_words($2) AS words)
-      SELECT id, "nameRu", "matchedAlias", score FROM (
-        SELECT DISTINCT ON (m.id) m.id, m.name_ru AS "nameRu", a.alias AS "matchedAlias",
-          cardinality(a.words) AS score, m.sort_order
-        FROM hardware_model_aliases a JOIN hardware_models m ON m.id = a.model_id CROSS JOIN search
-        WHERE m.status = 'ACTIVE' AND ($1::text IS NULL OR m.category_slug IN (SELECT slug FROM parents)) AND ${aliasesMatch}
-        ORDER BY m.id, cardinality(a.words) DESC, a.alias
-      ) matched ORDER BY score DESC, sort_order, id LIMIT $3
-    `, [category, text, limit])
+    const { rows } = await client.query<ModelSuggestion>(modelSuggestionsQuery('$1', '$2', '$3'), [category, text, limit])
     return rows
   }
 

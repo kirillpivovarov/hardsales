@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
 import { test } from 'node:test';
 import pg from 'pg';
-import { solveCaptcha } from './captcha-helper.mjs';
+import { demoRegistrationConsent, solveCaptcha } from './captcha-helper.mjs';
 
 const api = process.env.HWFORAI_AUTH_TEST_URL;
 const mailpit = process.env.MAILPIT_URL;
@@ -59,14 +59,16 @@ test('registration, SMTP verification, session revocation and admin bootstrap ga
   t.after(async () => {
     try {
       await db.query('DELETE FROM email_challenges WHERE email = $1', [email]);
-      await db.query('DELETE FROM users WHERE username = $1 AND email = $2', [username, email]);
     } finally {
       await db.end();
     }
   });
 
   assert.deepEqual((await request('/health')).data, { status: 'ok' });
-  assert.deepEqual((await request('/auth/me')).data, { user: null });
+  const guest = (await request('/auth/me')).data;
+  assert.equal(guest.user, null);
+  assert.equal(guest.pdPolicyVersion, demoRegistrationConsent.pdPolicyVersion);
+  assert.equal(guest.pdRegistrationAvailable, true);
 
   const adminLogin = await request('/auth/login', {
     method: 'POST', body: { login: 'admin', password: 'admin' },
@@ -94,6 +96,7 @@ test('registration, SMTP verification, session revocation and admin bootstrap ga
 
   const password = 'Test account password 41!';
   const registration = {
+    ...demoRegistrationConsent,
     username, email, password, role: 'BUYER', participantType: 'COMPANY', city: 'Пермь',
     country: 'ru', telegram: '@example_check',
   };
@@ -200,7 +203,6 @@ test('registration races cannot reserve or duplicate account identifiers', async
   t.after(async () => {
     try {
       await db.query('DELETE FROM email_challenges WHERE email = ANY($1::text[])', [addresses]);
-      await db.query('DELETE FROM users WHERE lower(email) = ANY($1::text[])', [addresses]);
     } finally {
       await db.end();
     }
@@ -209,6 +211,7 @@ test('registration races cannot reserve or duplicate account identifiers', async
   const password = 'Registration test password 76!';
   const telegram = 'example_check';
   const registration = {
+    ...demoRegistrationConsent,
     username, password, telegram,
     role: 'SELLER', participantType: 'INDIVIDUAL', city: 'Томск', country: 'RU',
   };

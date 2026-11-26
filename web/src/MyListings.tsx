@@ -5,12 +5,16 @@ import {
   type ActualityAnswer, type ActualityListingFields,
 } from './ActualityWidgets';
 import { api } from './api';
+import { useExchange } from './Exchange';
 import { useI18n } from './i18n';
+import { LotAppeal, MyLotRequests, OwnLotBadges } from './LotGroups';
+import { TelegramHint } from './Telegram';
 import { formatMoney, type Listing } from './market';
 import { Button, Notice, Spinner } from './ui';
 import './workflows.css';
 
-type OwnListing = Pick<Listing, 'id' | 'kind' | 'title' | 'status' | 'priceMode' | 'price' | 'currency' | 'deliveryBy' | 'quantity' | 'hiddenByRatingBelow'> & ActualityListingFields;
+type OwnListing = Pick<Listing, 'id' | 'kind' | 'title' | 'status' | 'priceMode' | 'price' | 'currency' | 'deliveryBy' | 'quantity' |
+  'hiddenByRatingBelow' | 'similarLot' | 'isDuplicate' | 'duplicateAppealed'> & ActualityListingFields;
 
 interface ListingPage {
   items: OwnListing[];
@@ -24,6 +28,7 @@ const statuses: Record<string, string> = {
 };
 const hiddenLabels: Record<string, string> = {
   NO_ANSWER: 'Скрыто: нет ответа', MISSED3: 'Скрыто: три пропуска', PAUSE: 'Скрыто: пауза', SPOT_CHECK: 'Скрыто: до завершения проверки',
+  DUPLICATE: 'Скрыто как дубль лота',
 };
 const publications = [
   ['current', 'Активные'], ['archive', 'Архив'], ['restricted', 'Ограниченные'],
@@ -32,6 +37,7 @@ const dayMs = 24 * 60 * 60 * 1000;
 
 export function MyListingsPage() {
   const { t, locale } = useI18n();
+  const { features } = useExchange();
   const navigate = useNavigate();
   const today = new Date().toISOString().slice(0, 10);
   const [query, setQuery] = useSearchParams();
@@ -123,14 +129,17 @@ export function MyListingsPage() {
         <Link className="button button-primary" to="/listings/new">{t('Разместить объявление')}</Link>
       </div>
       <div className="workflow-stack">
+        <MyLotRequests />
         <ActualityStartNotice summary={summary} />
         <ActualitySuspension summary={summary} onChanged={refresh} />
+        {!pendingCount && <TelegramHint enabled={features.feature_telegram === true} />}
         {summary?.enabled && pendingCount > 0 && summary.deadlineAt && <section className="actuality-banner" aria-label={t('Подтверждение актуальности')}>
           <div>
             <strong>{t('Ждут ответа «Актуально?»: {n}', { n: pendingCount })}</strong>
             <p>{t('Ответьте до {deadline} ({timezone}), иначе объявления скроются.', {
               deadline: actualityDate(summary.deadlineAt, locale, summary.timezone), timezone: summary.timezone,
             })}</p>
+            <TelegramHint enabled={features.feature_telegram === true} />
           </div>
           <Button type="button" disabled={busy} onClick={() => void confirmAll()}>{t('Все актуальны')}</Button>
         </section>}
@@ -159,7 +168,7 @@ export function MyListingsPage() {
                   : isExpired ? 'Срок истёк, объявление скрыто из каталога'
                   : hiddenLabels[listing.hiddenReason ?? ''] ?? statuses[listing.status] ?? listing.status;
                 const hiddenDays = listing.hiddenAt ? Math.max(0, 7 - Math.floor((Date.now() - new Date(listing.hiddenAt).getTime()) / dayMs)) : 0;
-                const restoreHidden = isHidden && !summary?.suspended && !summary?.pause && (
+                const restoreHidden = isHidden && !listing.isDuplicate && !summary?.suspended && !summary?.pause && (
                   (listing.hiddenReason === 'NO_ANSWER' && hiddenDays > 0) || listing.hiddenReason === 'PAUSE'
                 );
                 return (
@@ -182,8 +191,10 @@ export function MyListingsPage() {
                         </p>}
                       </div>
                       <ActualityBadges listing={listing} />
+                      <OwnLotBadges listing={listing} />
                     </div>
                     <div className="workflow-actions">
+                      <LotAppeal listing={listing} onSaved={refresh} />
                       {(isLive || isArchived || isHidden) && <Link className="button button-ghost" to={`/listings/${listing.id}`}>{t('Открыть')}</Link>}
                       {(isLive || isArchived) && <Link className="button button-secondary" to={`/listings/${listing.id}/edit`}>{t('Редактировать')}</Link>}
                       {summary?.enabled && isLive && <>{(listing.askedAt || !listing.freshness?.today) && <Button type="button" variant="secondary" disabled={busy}
@@ -199,7 +210,7 @@ export function MyListingsPage() {
                         onClick={() => void changePublication(listing.id, 'restore')}>{t('Вернуть')}</Button>}
                       {(isLive || isHidden) && <Button type="button" variant="ghost" disabled={busy}
                         onClick={() => { setConfirm(listing.id); setNotice(''); setError(''); }}>{t('В архив')}</Button>}
-                      {isArchived && !listing.spotCheckHold && <Button type="button" variant="secondary" disabled={busy}
+                      {isArchived && !listing.spotCheckHold && !listing.isDuplicate && <Button type="button" variant="secondary" disabled={busy}
                         onClick={() => void changePublication(listing.id, 'restore')}>{t('Опубликовать снова')}</Button>}
                     </div>
                     {confirm === listing.id && (

@@ -26,6 +26,24 @@ export class DatabaseService implements Queryable, OnApplicationShutdown {
     return this.pool.query<T>(sql, params);
   }
 
+  async withSessionLock<T>(lock: number, run: (client: PoolClient) => Promise<T>): Promise<T | undefined> {
+    const client = await this.pool.connect();
+    let locked = false;
+    let discard = false;
+    try {
+      const { rows: [row] } = await client.query<{ locked: boolean }>(
+        'SELECT pg_try_advisory_lock(18403, $1) AS locked', [lock],
+      );
+      locked = row.locked;
+      if (locked) return await run(client);
+    } finally {
+      try {
+        if (locked) await client.query('SELECT pg_advisory_unlock(18403, $1)', [lock]);
+      } catch { discard = true; }
+      client.release(discard);
+    }
+  }
+
   async transaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     let unusable = false;
