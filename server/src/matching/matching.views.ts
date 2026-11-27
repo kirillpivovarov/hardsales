@@ -1,7 +1,8 @@
 import { representationLabels } from '../exchange/representation.rules';
 import { publicProfile, trustEnabledSql } from '../market/market.queries';
+import { totalPriceUsdSql } from '../market/listing-price';
 
-function publicMatchListing(alias: 's' | 'b', owner: 'seller' | 'buyer', rate: string) {
+function publicMatchListing(alias: 's' | 'b', owner: 'seller' | 'buyer') {
   return `jsonb_build_object(
     'id', ${alias}.id, 'kind', ${alias}.kind, 'title', ${alias}.title, 'quantity', ${alias}.quantity,
     'minLot', ${alias}.min_lot, 'condition', ${alias}.condition,
@@ -9,8 +10,8 @@ function publicMatchListing(alias: 's' | 'b', owner: 'seller' | 'buyer', rate: s
     'destinationCountry', ${alias}.destination_country, 'stockCity', ${alias}.stock_city,
     'shipDays', ${alias}.ship_days, 'deliveryBy', ${alias}.delivery_by,
     'price', ${alias}.price, 'currency', ${alias}.currency,
-    'unitPrice', round(${alias}.price / ${alias}.quantity, 2),
-    'unitPriceUsd', round(${alias}.price * ${rate}.usd_per_unit / ${alias}.quantity, 2),
+    'unitPrice', ${alias}.price, 'totalPrice', ${alias}.price * ${alias}.quantity,
+    'unitPriceUsd', ${alias}.price_usd, 'totalPriceUsd', ${totalPriceUsdSql(alias)},
     'paymentMethods', ${alias}.payment_methods, 'paymentTerms', ${alias}.payment_terms,
     'labels', (SELECT ${representationLabels()} FROM (SELECT ${alias}.*) l CROSS JOIN (SELECT ${owner}.*) u)
   )`;
@@ -21,7 +22,6 @@ export const matchJoins = `
   JOIN listings b ON b.id = m.buy_listing_id
   JOIN users seller ON seller.id = m.seller_id JOIN users buyer ON buyer.id = m.buyer_id
   LEFT JOIN hardware_models h ON h.id = coalesce(m.operator_model_id, s.model_id)
-  LEFT JOIN fx_rates sf ON sf.currency = s.currency LEFT JOIN fx_rates bf ON bf.currency = b.currency
 `;
 export const matchColumns = `
   m.id, m.number::float8 AS number, m.type, m.status, m.created_at AS "createdAt", m.updated_at AS "updatedAt",
@@ -38,8 +38,8 @@ export const matchColumns = `
       ))) END AS model
 `;
 
-function counterpart(listing: 's' | 'b', owner: 'seller' | 'buyer', rate: string) {
-  return `jsonb_build_object('listing', ${publicMatchListing(listing, owner, rate)}, 'owner', ${publicProfile(owner)},
+function counterpart(listing: 's' | 'b', owner: 'seller' | 'buyer') {
+  return `jsonb_build_object('listing', ${publicMatchListing(listing, owner)}, 'owner', ${publicProfile(owner)},
     'trust', CASE WHEN ${trustEnabledSql} THEN listing_trust_projection(${listing}, ${owner}) END)`;
 }
 
@@ -49,8 +49,8 @@ export const participantMatchColumns = `
   jsonb_build_object('id', CASE WHEN m.seller_id = $1 THEN s.id ELSE b.id END,
     'title', CASE WHEN m.seller_id = $1 THEN s.title ELSE b.title END,
     'kind', CASE WHEN m.seller_id = $1 THEN 'SELL' ELSE 'BUY' END) AS mine,
-  CASE WHEN m.seller_id = $1 THEN ${counterpart('b', 'buyer', 'bf')}
-    ELSE ${counterpart('s', 'seller', 'sf')} END AS counterpart
+  CASE WHEN m.seller_id = $1 THEN ${counterpart('b', 'buyer')}
+    ELSE ${counterpart('s', 'seller')} END AS counterpart
 `;
 export const member = '(m.seller_id = $1 OR m.buyer_id = $1)';
 

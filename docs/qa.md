@@ -174,3 +174,37 @@ HWFORAI_URL="$QA_ORIGIN" HWFORAI_LOTS_TEST_DATABASE_URL="$QA_DATABASE_URL" \
 HWFORAI_QA_BASE=http://127.0.0.1:3100 HWFORAI_QA_MAILPIT_URL=http://127.0.0.1:8125 \
   python tests/catalog_staff_ux_e2e.py
 ```
+
+### Проба v3
+
+Для каждого сценария используйте отдельное приложение и базу. Для операционных маршрутов запустите демостенд с SMTP Mailpit и `OPS_MONITOR_TOKEN`, затем передайте те же параметры тесту.
+
+```sh
+HWFORAI_OPS_TEST_URL="$QA_API" HWFORAI_OPS_TEST_DATABASE_URL="$QA_DATABASE_URL" \
+  MAILPIT_URL="$QA_MAILPIT" node --test server/test/ops.integration.test.mjs
+HWFORAI_NOTIFICATIONS_TEST_URL="$QA_API" HWFORAI_NOTIFICATIONS_TEST_DATABASE_URL="$QA_DATABASE_URL" \
+  node --test server/test/notifications.integration.test.mjs
+```
+
+Для проверки цены выделите пустую базу для прогона миграций и отдельную базу демостенда. В тесте миграций создаются объявления старого формата и проверяется пересчёт. Тест демостенда проверяет цены в каталоге и одновременную публикацию объявления со сменой курса.
+
+```sh
+HWFORAI_PRICE_TEST_DATABASE_URL="$QA_EMPTY_DATABASE_URL" HWFORAI_PRICE_TEST_URL="$QA_API" \
+  HWFORAI_PRICE_HTTP_DATABASE_URL="$QA_DATABASE_URL" node --test server/test/pricing.integration.test.mjs
+HWFORAI_URL="$QA_ORIGIN" python tests/pricing_e2e.py
+```
+
+```sh
+HWFORAI_ONBOARDING_BALANCE_TEST_URL="$QA_API" DATABASE_URL="$QA_DATABASE_URL" MAILPIT_URL="$QA_MAILPIT" \
+  node --test server/test/onboarding-balance.integration.test.mjs
+HWFORAI_DEAL_PAIRS_TEST_URL="$QA_API" HWFORAI_DEAL_PAIRS_DATABASE_URL="$QA_DATABASE_URL" MAILPIT_URL="$QA_MAILPIT" \
+  node --test server/test/deal-pairs.integration.test.mjs
+HWFORAI_DISPUTES_TEST_URL="$QA_API" HWFORAI_DISPUTES_TEST_DATABASE_URL="$QA_DATABASE_URL" \
+  node --test server/test/disputes.integration.test.mjs
+HWFORAI_PRICE_TEST_URL="$QA_API" HWFORAI_PRICE_HTTP_DATABASE_URL="$QA_DATABASE_URL" \
+  HWFORAI_PRICE_TEST_DATABASE_URL="$QA_EMPTY_DATABASE_URL" node --test server/test/pricing.integration.test.mjs
+```
+
+Для миграции цен выделите отдельную пустую базу `QA_EMPTY_DATABASE_URL`. Браузерные наборы запускаются с локальными адресами `HWFORAI_QA_BASE`, `HWFORAI_TEST_URL`, `HWFORAI_QA_MAILPIT_URL` и установленным Chromium. Сценарии `tests/onboarding_balance_e2e.py`, `tests/notifications_e2e.py`, `tests/pricing_e2e.py`, `tests/deal_pairs_e2e.py`, `tests/disputes_e2e.py` и `tests/ops_e2e.py` охватывают мобильный и настольный интерфейс. Выделяйте каждой проверке свой демостенд.
+
+Запустите оба скрипта из `deploy/backup` на отдельном VPS-стенде или на изолированном проекте Compose с тестовым удалённым хранилищем. Проверьте восстановление в отдельную базу, удаление временного каталога и отказ при испорченной контрольной сумме.

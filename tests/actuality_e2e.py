@@ -22,7 +22,7 @@ def exercise(browser, width, height):
         change.click()
         dialog = page.get_by_role("dialog")
         expect(dialog).to_be_visible()
-        price = dialog.get_by_label("Новая цена за всё количество")
+        price = dialog.get_by_label("Новая цена за шт.")
         first_field = price if price.count() else dialog.get_by_label("Новое количество")
         expect(first_field).to_be_focused()
         check_no_overflow(page)

@@ -11,6 +11,8 @@ import { ContactGuardModule } from './contact-guard/contact-guard.module';
 import { LotGroupsModule } from './lots/lots.module';
 import { PilotModule } from './pilot/pilot.module';
 import { TelegramModule } from './telegram/telegram.module';
+import { DisputesModule } from './disputes/disputes.module';
+import { OpsModule } from './ops/ops.module';
 
 @Controller('health')
 class HealthController {
@@ -25,7 +27,7 @@ class HealthController {
 
 @Module({
   imports: [DatabaseModule, PlatformModule, AuthModule, MarketModule, DisclosuresModule, RepresentationModule, ModelsModule,
-    ContactGuardModule, LotGroupsModule, PilotModule, TelegramModule],
+    ContactGuardModule, LotGroupsModule, PilotModule, TelegramModule, DisputesModule, OpsModule],
   controllers: [HealthController],
 })
 export class AppModule {}

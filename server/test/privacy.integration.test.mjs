@@ -160,7 +160,7 @@ test('policy evidence, reacceptance, principal approval and opt-out, export, era
   const categoryId = (await call('/categories')).data.find(category => category.slug === 'gpu').id;
   const ownListing = (await call('/listings', { method: 'POST', cookie, status: 201, body: {
     kind: 'BUY', title: 'Заявка для проверки выгрузки', description: 'Нужен ускоритель с поставкой по договорённости.',
-    categoryId, quantity: 1, destinationCountry: 'RU', originScope: 'ANY',
+    categoryId, modelId: 'h100-sxm', quantity: 1, destinationCountry: 'RU', originScope: 'ANY',
     deliveryBy: new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10),
   } })).data;
   await call('/admin/data-requests/' + exportRequest.id + '/export', { method: 'POST', cookie: admin, status: 201 });

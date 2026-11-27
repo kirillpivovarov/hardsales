@@ -93,6 +93,12 @@ function contactText(text: string) {
     .replace(/\.c0m(?![\p{L}\p{N}_])/gu, '.com')
 }
 
+export function hasExternalLinks(body: string): boolean {
+  const text = contactText(normalize(body))
+  const independent = text.replace(new RegExp(email.source, 'gu'), ' ')
+  return telegramUri.test(independent) || messengerUri.test(independent) || links.test(independent)
+}
+
 export function detectContacts(body: string): ContactKind[] {
   const raw = normalize(body)
   const text = contactText(raw)

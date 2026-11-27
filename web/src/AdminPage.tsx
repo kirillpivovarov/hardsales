@@ -6,7 +6,7 @@ import { ListingForm } from './ListingForm'
 import { StaffDialog } from './StaffDialog'
 import { TelegramUserControl } from './Telegram'
 import { CountrySelect } from './CountrySelect'
-import { categoryIcons, countryName } from './market'
+import { categoryIcons, countryName, reportReasonNames } from './market'
 import { Button, Field, Notice, Spinner } from './ui'
 import './admin.css'
 
@@ -33,7 +33,7 @@ type Translator = ReturnType<typeof useI18n>['t']
 const statuses: Partial<Record<PagedTab, readonly string[]>> = {
   users: ['ACTIVE', 'FROZEN', 'BANNED'],
   moderators: ['ACTIVE', 'FROZEN', 'BANNED'],
-  listings: ['ACTIVE', 'FROZEN', 'BANNED', 'ARCHIVED'],
+  listings: ['PENDING_REVIEW', 'PENDING_OWNER', 'ACTIVE', 'FROZEN', 'BANNED', 'ARCHIVED'],
   reviews: ['ACTIVE', 'HIDDEN', 'BANNED'],
   reports: ['OPEN', 'RESOLVED', 'REJECTED'],
 }
@@ -44,6 +44,8 @@ const labels: Record<string, string> = {
   HIDDEN: 'Скрыт',
   BANNED: 'Заблокирован навсегда',
   ARCHIVED: 'В архиве',
+  PENDING_REVIEW: 'На проверке',
+  PENDING_OWNER: 'Ждёт владельца',
   OPEN: 'Открыта',
   RESOLVED: 'Решена',
   REJECTED: 'Отклонена',
@@ -56,11 +58,9 @@ const labels: Record<string, string> = {
   AGENT: 'Агент модерации',
   COMPANY: 'Компания',
   INDIVIDUAL: 'Частное лицо',
-  FRAUD: 'Подозрение на мошенничество',
-  ABUSE: 'Оскорбления или угрозы',
+  ...reportReasonNames,
   CONTACT_BYPASS: 'Попытки обхода защиты контактов',
   CONTACT_PHOTO: 'Контакты на фото',
-  OTHER: 'Другая причина',
   ON_PLATFORM: 'Чат площадки',
   VERIFIED_TELEGRAM: 'Привязанный Telegram',
   edited: 'Редактирование',
@@ -185,6 +185,7 @@ type Page<T> = { items: T[]; total: number; page: number; limit: number }
 type Editor =
   | { type: 'user'; id: string; row?: UserRow }
   | { type: 'listing'; id: string }
+  | { type: 'listing-review'; id: string; name: string }
   | { type: 'status'; tab: StatusTab; id: string; name: string; status: string; report?: ReportRow }
   | { type: 'category'; row?: CategoryRow; categories: CategoryRow[]; locales: LocaleRow[] }
   | { type: 'content'; row?: ContentRow; locales: LocaleRow[]; existingKeys?: string[] }
@@ -265,22 +266,29 @@ function PagedRecords<T extends { id: string | number; status?: string }>({
   subjectId?: string
 }) {
   const { t } = useI18n()
+  const [routeQuery] = useSearchParams()
+  const initialStatus = tab === 'listings' ? routeQuery.get('status') ?? '' : ''
   const [page, setPage] = useState(1)
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
-  const [status, setStatus] = useState('')
+  const [status, setStatus] = useState(initialStatus)
+  const [reviewSignal, setReviewSignal] = useState('')
   const [actorRole, setActorRole] = useState('')
+  const [withoutModel, setWithoutModel] = useState(false)
   const [retry, setRetry] = useState(0)
   const limit = 20
   const params = new URLSearchParams({ page: String(page), limit: String(limit) })
   if (query) params.set('q', query)
   if (status) params.set('status', status)
+  if (reviewSignal) params.set('reviewSignal', reviewSignal)
   if (tab === 'audit' && actorRole) params.set('actorRole', actorRole)
+  if (tab === 'listings' && withoutModel) params.set('withoutModel', 'true')
   if (tab === 'moderators') params.set('role', 'MODERATOR')
   if (subjectId) params.set('subjectId', subjectId)
   const path = tab === 'moderators' ? 'users' : tab
   const { data, loading, error } = useAdminData<Page<T>>('/admin/' + path + '?' + params.toString(), version + retry)
   const pages = Math.max(1, Math.ceil((data?.total ?? 0) / limit))
+  useEffect(() => { setStatus(initialStatus); setPage(1) }, [initialStatus, tab])
   useEffect(() => {
     if (data && page > pages) setPage(pages)
   }, [data, page, pages])
@@ -307,6 +315,19 @@ function PagedRecords<T extends { id: string | number; status?: string }>({
         <select value={actorRole} onChange={event => { setActorRole(event.target.value); setPage(1) }}>
           <option value="">{t('Все роли')}</option>
           {['ADMIN', 'MODERATOR', 'AGENT', 'BUYER', 'SELLER'].map(role => <option key={role} value={role}>{statusLabel(t, role)}</option>)}
+        </select>
+      </Field>}
+      {tab === 'listings' && <label className="admin-check"><input type="checkbox" checked={withoutModel}
+        onChange={event => { setWithoutModel(event.target.checked); setPage(1) }} />{t('Без модели')}</label>}
+      {tab === 'listings' && <Field label={t('Сигнал для проверки')}>
+        <select value={reviewSignal} onChange={event => { setReviewSignal(event.target.value); setPage(1) }}>
+          <option value="">{t('Все объявления')}</option>
+          <option value="RECENT">{t('Новые и изменённые')}</option>
+          <option value="UNVERIFIED">{t('Участник не проверен')}</option>
+          <option value="PRICE_OUTSIDE">{t('Цена вне рыночного коридора')}</option>
+          <option value="PRICE_DROPS">{t('Цена снижалась 3 раза за 14 дней')}</option>
+          <option value="NEW_MODEL">{t('Модель добавлена за последние 14 дней')}</option>
+          <option value="POSSIBLE_DUPLICATE">{t('Похожее предложение')}</option>
         </select>
       </Field>}
       <Button variant="secondary" type="submit">{t('Найти')}</Button>
@@ -345,7 +366,11 @@ function Users({ version, edit, administrator }: PagedProps & { administrator: b
     { label: t('Действия'), render: row => isMarketProfile(row) && <div className="admin-actions">
       <Button variant="secondary" type="button" onClick={() => edit({ type: 'user', id: row.id })}>{t('Редактировать')}</Button>
       {row.status !== 'BANNED' && <Button variant="ghost" type="button" onClick={() => edit({ type: 'status', tab: 'users', id: row.id, name: row.displayName, status: row.status })}>{t('Статус')}</Button>}
-      {administrator && <Link className="button button-ghost" to={'/admin?section=exchange&part=onboarding&userId=' + row.id}>{t('Анкета')}</Link>}
+      <Link className="button button-ghost" to={'/admin?section=exchange&part=onboarding&userId=' + row.id}>{t('Анкета')}</Link>
+      <Link className="button button-ghost" to={'/admin?section=exchange&part=verification&userId=' + row.id}>{t('Проверка')}</Link>
+      {row.status === 'ACTIVE' && row.emailVerified && <Link className="button button-ghost" to={`/admin/users/${row.id}/listing/new`}>
+        {t('Завести объявление за участника')}
+      </Link>}
       {administrator && <Link className="button button-ghost" to={'/admin?section=exchange&part=user-consents&userId=' + row.id}>{t('История согласий')}</Link>}
     </div> },
   ]} />
@@ -370,7 +395,11 @@ function Listings({ version, edit }: PagedProps) {
     { label: t('Статус'), render: row => <RecordLabel title={statusLabel(t, row.status)} detail={formatDate(locale, row.createdAt)} /> },
     { label: t('Действия'), render: row => <div className="admin-actions">
       <Button variant="secondary" type="button" onClick={() => edit({ type: 'listing', id: row.id })}>{t('Редактировать')}</Button>
-      {row.status !== 'BANNED' && <Button variant="ghost" type="button" onClick={() => edit({ type: 'status', tab: 'listings', id: row.id, name: row.title, status: row.status })}>{t('Статус')}</Button>}
+      {row.status === 'PENDING_REVIEW' && <Button type="button" onClick={() => edit({ type: 'listing-review', id: row.id, name: row.title })}>
+        {t('Рассмотреть')}
+      </Button>}
+      {row.status !== 'BANNED' && !row.status.startsWith('PENDING_') &&
+        <Button variant="ghost" type="button" onClick={() => edit({ type: 'status', tab: 'listings', id: row.id, name: row.title, status: row.status })}>{t('Статус')}</Button>}
     </div> },
   ]} />
 }
@@ -408,7 +437,7 @@ function Audit({ version }: { version: number }) {
   ]} />
 }
 
-function ReferenceRecords({ tab, version, edit }: { tab: 'categories' | 'content' | 'locales'; version: number; edit: (editor: Editor) => void }) {
+function ReferenceRecords({ tab, version, edit, administrator }: { tab: 'categories' | 'content' | 'locales'; version: number; edit: (editor: Editor) => void; administrator: boolean }) {
   const { t, locale } = useI18n()
   const [retry, setRetry] = useState(0)
   const records = useAdminData<CategoryRow[] | ContentRow[] | LocaleRow[]>('/admin/' + tab, version + retry)
@@ -434,15 +463,22 @@ function ReferenceRecords({ tab, version, edit }: { tab: 'categories' | 'content
   }
   if (tab === 'content') {
     const pages = records.data as ContentRow[]
+    const adminPages = new Set(['rules', 'rules_draft', 'pd_policy'])
     return <>
       <div className="admin-toolbar">
         <h2>{t(tabs.content)}</h2>
         <Button type="button" onClick={() => edit({ type: 'content', locales: locales.data ?? [], existingKeys: pages.map(row => row.key) })}>{t('Добавить страницу')}</Button>
       </div>
       <AdminTable identify={row => row.key} items={pages} columns={[
-      { label: t('Страница'), render: row => <RecordLabel title={<Link className="text-link" to={'/info/' + row.key}>{row.translations[locale]?.title ?? row.translations.ru?.title ?? row.key}</Link>} detail={'/info/' + row.key} /> },
+        { label: t('Страница'), render: row => {
+          const title = row.translations[locale]?.title ?? row.translations.ru?.title ?? row.key
+          return <RecordLabel title={row.active ? <Link className="text-link" to={'/info/' + row.key}>{title}</Link> : title}
+            detail={'/info/' + row.key} />
+        } },
         { label: t('Статус'), render: row => <RecordLabel title={row.active ? t('Опубликована') : t('Скрыта')} detail={formatDate(locale, row.updatedAt)} /> },
-        { label: t('Действия'), render: row => <Button variant="secondary" type="button" onClick={() => edit({ type: 'content', row, locales: locales.data ?? [] })}>{t('Редактировать')}</Button> },
+        { label: t('Действия'), render: row => row.key !== 'rules_upcoming' && (administrator || !adminPages.has(row.key))
+          ? <Button variant="secondary" type="button" onClick={() => edit({ type: 'content', row, locales: locales.data ?? [] })}>{t('Редактировать')}</Button>
+          : <span className="muted">{t('Управляет администратор')}</span> },
       ]} />
     </>
   }
@@ -582,7 +618,7 @@ function StatusForm({
   onSaved: () => void
 }) {
   const { t } = useI18n()
-  const options = (statuses[editor.tab] ?? []).filter(status => status !== editor.status)
+  const options = (statuses[editor.tab] ?? []).filter(status => status !== editor.status && !status.startsWith('PENDING_'))
   const [status, setStatus] = useState('')
   return <MutationForm onClose={onClose} onSaved={onSaved} buttonLabel={t('Применить статус')} save={data => api('/admin/' + editor.tab + '/' + editor.id + '/status', {
     method: 'PATCH', body: { status, reason: formText(data, 'reason') },
@@ -713,7 +749,7 @@ function CategoryForm({
         <input name="shortName" defaultValue={row?.shortName} minLength={2} maxLength={120} />
       </Field>
       <Field label={t('Код в каталоге')} hint={t('Строчные латинские буквы, цифры и дефисы.')}>
-        <input name="slug" defaultValue={row?.slug} required pattern="[a-z](?:[a-z0-9]|-){1,47}" maxLength={48} />
+        <input name="slug" defaultValue={row?.slug} required pattern="[a-z][a-z0-9_\-]{1,47}" maxLength={48} />
       </Field>
       <Field label={t('Родительская категория')}>
         <select name="parentId" defaultValue={row?.parentId ?? ''}>
@@ -768,14 +804,15 @@ function ContentForm({
   }
   return <MutationForm onClose={onClose} onSaved={onSaved} save={save}>
     <Field label={t('Адрес страницы')} hint={t('Этот код используется после /info/ в адресе страницы.')}>
-      <input name="key" defaultValue={row?.key} required readOnly={Boolean(row)} pattern="[a-z](?:[a-z0-9]|-){1,47}" maxLength={48} />
+      <input name="key" defaultValue={row?.key} required readOnly={Boolean(row)} pattern="[a-z][a-z0-9_\-]{1,47}" maxLength={48} />
     </Field>
     {languages.map(([code, language]) => <fieldset key={code}>
       <legend>{language}</legend>
       <Field label={t('Заголовок')}><input name={'title.' + code} defaultValue={row?.translations[code]?.title} required={code === 'ru'} minLength={2} maxLength={140} /></Field>
       <Field label={t('Текст страницы')}><textarea name={'body.' + code} rows={6} defaultValue={row?.translations[code]?.body} required={code === 'ru'} maxLength={20000} /></Field>
     </fieldset>)}
-    <label className="admin-check"><input type="checkbox" name="active" defaultChecked={row?.active ?? false} />{t('Опубликовать страницу')}</label>
+    {row?.key === 'rules_draft' ? <p>{t('Замените значения в квадратных скобках. Новую версию можно запланировать в настройках биржи.')}</p> :
+      <label className="admin-check"><input type="checkbox" name="active" defaultChecked={row?.active ?? false} />{t('Опубликовать страницу')}</label>}
   </MutationForm>
 }
 
@@ -815,6 +852,7 @@ function editorTitle(editor: Editor, t: Translator) {
   switch (editor.type) {
     case 'user': return t('Редактирование профиля')
     case 'listing': return t('Редактирование объявления')
+    case 'listing-review': return t('Проверка объявления')
     case 'status': return t('Модерация')
     case 'category': return t(editor.row ? 'Редактирование категории' : 'Новая категория')
     case 'content': return t(editor.row ? 'Редактирование страницы' : 'Новая страница')
@@ -825,6 +863,25 @@ function editorTitle(editor: Editor, t: Translator) {
 
 type EditorActions = { close: () => void; saved: (result?: unknown) => void }
 
+function ListingReviewForm({ editor, close, saved }: { editor: Extract<Editor, { type: 'listing-review' }> } & EditorActions) {
+  const { t } = useI18n()
+  const [decision, setDecision] = useState('PUBLISH')
+  return <MutationForm onClose={close} onSaved={saved} buttonLabel={t(decision === 'PUBLISH' ? 'Опубликовать' : 'Вернуть на доработку')}
+    save={data => api('/admin/listings/' + editor.id + '/review', {
+      method: 'POST', body: { decision, ...(decision === 'RETURN' && { reason: formText(data, 'reason') }) },
+    })}>
+    <p>{editor.name}</p>
+    <Field label={t('Решение')}>
+      <select value={decision} onChange={event => setDecision(event.target.value)}>
+        <option value="PUBLISH">{t('Опубликовать')}</option><option value="RETURN">{t('Вернуть на доработку')}</option>
+      </select>
+    </Field>
+    {decision === 'RETURN' && <Field label={t('Что исправить')}>
+      <textarea name="reason" required minLength={5} maxLength={500} rows={3} />
+    </Field>}
+  </MutationForm>
+}
+
 function EditorFields({ editor, close, saved, administrator = false }: { editor: Editor; administrator?: boolean } & EditorActions) {
   const actions = { onClose: close, onSaved: saved }
   switch (editor.type) {
@@ -833,6 +890,7 @@ function EditorFields({ editor, close, saved, administrator = false }: { editor:
       {administrator && <TelegramUserControl userId={editor.id} />}
     </>
     case 'listing': return <ListingForm listingId={editor.id} admin onSaved={saved} />
+    case 'listing-review': return <ListingReviewForm editor={editor} close={close} saved={saved} />
     case 'status': return editor.tab === 'reports' ? <ReportStatusForm editor={editor} close={close} saved={saved} /> : <StatusForm editor={editor} {...actions} />
     case 'category': return <CategoryForm {...editor} {...actions} />
     case 'content': return <ContentForm {...editor} {...actions} />
@@ -995,7 +1053,7 @@ export function AdminPage({ user }: { user?: User | null }) {
         {tab === 'moderators' && <Moderators {...props} />}
         {tab === 'exchange' && user && <Suspense fallback={<Spinner />}><ExchangeAdministration user={user} /></Suspense>}
         {tab === 'audit' && <Audit version={version} />}
-        {(tab === 'categories' || tab === 'content' || tab === 'locales') && <ReferenceRecords tab={tab} {...props} />}
+        {(tab === 'categories' || tab === 'content' || tab === 'locales') && <ReferenceRecords tab={tab} {...props} administrator={user?.role === 'ADMIN'} />}
       </section>
     </div>
     {editor && <StaffDialog title={editorTitle(editor, t)} onClose={close}>

@@ -1,4 +1,4 @@
-export type LotOffer = { id: string; ownerId: string; usdTotal: string; modelId: string }
+export type LotOffer = { id: string; ownerId: string; usdPerUnit: string; modelId: string }
 export type PrincipalEvidence = {
   listingId: string
   ownerId: string
@@ -16,14 +16,14 @@ export type PrincipalEvidence = {
 export const lotResolutions = ['EXCLUSIVE_MANDATE', 'FIRST_CONFIRMED', 'PRINCIPAL_OWN', 'OPERATOR'] as const
 const sameKey = (name: string | null) => name?.trim().toLowerCase().replaceAll('ё', 'е').replace(/\s+/g, ' ') || null
 
-function fixedTotal(input: string) {
+function fixedPrice(input: string) {
   const [whole, fractional = ''] = input.split('.')
   return BigInt(whole + fractional.padEnd(10, '0'))
 }
 
 export function lotComponents(offers: LotOffer[], exclusions: { listingA: string; listingB: string }[], tolerance: number) {
-  const indexed = offers.map(offer => ({ offer, total: fixedTotal(offer.usdTotal) })).sort((a, b) =>
-    a.total < b.total ? -1 : a.total > b.total ? 1 : a.offer.id.localeCompare(b.offer.id))
+  const indexed = offers.map(offer => ({ offer, price: fixedPrice(offer.usdPerUnit) })).sort((a, b) =>
+    a.price < b.price ? -1 : a.price > b.price ? 1 : a.offer.id.localeCompare(b.offer.id))
   const forbidden = new Map<string, Set<string>>()
   for (const { listingA, listingB } of exclusions) {
     for (const [a, b] of [[listingA, listingB], [listingB, listingA]]) {
@@ -38,7 +38,7 @@ export function lotComponents(offers: LotOffer[], exclusions: { listingA: string
     const a = indexed[index]
     for (let right = index + 1; right < indexed.length; right++) {
       const b = indexed[right]
-      if ((b.total - a.total) * scale > a.total * limit) break
+      if ((b.price - a.price) * scale > a.price * limit) break
       if (a.offer.ownerId === b.offer.ownerId) continue
       const leftCluster = clusters.get(a.offer.id)!
       const rightCluster = clusters.get(b.offer.id)!

@@ -118,6 +118,7 @@ input[type=checkbox], input[type=radio] { width: 17px; min-height: 17px; flex: n
 .notice > svg { flex: none; margin-top: 3px; }
 .notice-error { background: var(--danger-bg); color: var(--danger); border-color: #f1c1c7; }
 .notice-success { background: var(--success-bg); color: var(--success); border-color: #bedfcf; }
+.telegram-verified { color: var(--success); }
 .spinner { display: flex; gap: 10px; align-items: center; padding: 22px 0; color: var(--muted); }
 .spinner svg { animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

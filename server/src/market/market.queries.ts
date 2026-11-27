@@ -1,5 +1,6 @@
 import { representationLabels, representationListingColumns, representationOwnerColumns } from '../exchange/representation.rules'
 import { listingModelColumns } from '../models/model-listings'
+import { totalPriceUsdSql } from './listing-price'
 import { ownLotFields } from '../lots/lot-public'
 
 // Explicit projections keep private account fields out of marketplace responses.
@@ -34,6 +35,8 @@ export function listingColumnsFor(privateActuality = 'false') {
   return `
   l.id, l.owner_id AS "ownerId", l.category_id AS "categoryId", l.kind, l.title, l.description,
   l.quantity, l.condition, l.price_mode AS "priceMode", l.price::float8 AS price, l.currency,
+  l.price_usd::float8 AS "priceUsd", (l.price * l.quantity)::float8 AS "totalPrice",
+  ${totalPriceUsdSql('l')}::float8 AS "totalPriceUsd", listing_model_required(l.category_id) AS "requiresModel",
   l.availability, l.origin_scope AS "originScope", l.origin_country AS "originCountry",
   l.destination_country AS "destinationCountry", l.stock_city AS "stockCity", l.delivery_by::text AS "deliveryBy",
   l.delivery_included AS "deliveryIncluded", l.customs_included AS "customsIncluded", l.vat, l.counterparty,
@@ -55,7 +58,7 @@ export function listingColumnsFor(privateActuality = 'false') {
   CASE WHEN ${privateActuality} THEN l.hidden_reason END AS "hiddenReason",
   CASE WHEN ${privateActuality} THEN l.spot_check_hold END AS "spotCheckHold",
   CASE WHEN ${privateActuality} THEN l.archived_reason END AS "archivedReason",
-  CASE WHEN ${actualityEnabledSql} AND l.confirmed_at IS NOT NULL THEN (
+  CASE WHEN ${actualityEnabledSql} AND l.confirmed_at IS NOT NULL AND l.asked_at IS NULL THEN (
     SELECT jsonb_build_object('today', f.today, 'hoursAgo', f.hours,
       'label', CASE WHEN f.today THEN 'подтверждено сегодня' ELSE 'подтверждено ' || f.hours || ' ч назад' END)
     FROM (SELECT (l.confirmed_at AT TIME ZONE ${actualityTimezoneSql})::date =
@@ -73,6 +76,8 @@ export function listingColumnsFor(privateActuality = 'false') {
   CASE WHEN (${privateActuality}) THEN (SELECT to_jsonb(fields) FROM (
     SELECT ${representationOwnerColumns()},
       ${ownLotFields},
+      l.created_by_staff AS "createdByStaff", l.owner_confirmed_at AS "ownerConfirmedAt",
+      l.review_reasons AS "reviewReasons", l.review_return_note AS "reviewReturnNote",
       CASE WHEN ${trustEnabledSql} THEN l.trust_factors END AS "trustFactors",
       CASE WHEN ${trustEnabledSql} AND l.status = 'ACTIVE' THEN (
         SELECT (s.value #>> '{}')::int FROM platform_settings s
@@ -104,7 +109,7 @@ export const listingPublicWhere = `
 
 // Both the listing and its images enforce visibility in the same database snapshot.
 export const listingDetailWhere = `
-  l.id = $1 AND ($2 OR l.owner_id = $3 OR (l.kind = $4 AND ${listingPublicWhere}))
+  l.id = $1 AND ($2 OR l.owner_id = $3 OR (l.kind = ANY($4::text[]) AND ${listingPublicWhere}))
 `
 
 export const listingEditableColumns = [

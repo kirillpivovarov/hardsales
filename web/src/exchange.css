@@ -153,3 +153,17 @@
     margin-inline-start: 0;
   }
 }
+.exchange-notice-kinds {
+  display: grid;
+  gap: .5rem;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.exchange-notice-kinds legend {
+  padding: 0;
+  margin-bottom: .5rem;
+  font-weight: 600;
+}

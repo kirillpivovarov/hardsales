@@ -4,17 +4,19 @@ import {
   ActualityBadges, ActualityDialog, ActualityEditForm, ActualityStartNotice, ActualitySuspension, actualityDate, useActuality,
   type ActualityAnswer, type ActualityListingFields,
 } from './ActualityWidgets';
-import { api } from './api';
+import { api, tradeSidesFor, type User } from './api';
 import { useExchange } from './Exchange';
 import { useI18n } from './i18n';
 import { LotAppeal, MyLotRequests, OwnLotBadges } from './LotGroups';
 import { TelegramHint } from './Telegram';
-import { formatMoney, type Listing } from './market';
+import type { Listing } from './market';
+import { ListingPrice } from './ListingPrice';
 import { Button, Notice, Spinner } from './ui';
 import './workflows.css';
 
 type OwnListing = Pick<Listing, 'id' | 'kind' | 'title' | 'status' | 'priceMode' | 'price' | 'currency' | 'deliveryBy' | 'quantity' |
-  'hiddenByRatingBelow' | 'similarLot' | 'isDuplicate' | 'duplicateAppealed'> & ActualityListingFields;
+  'priceUsd' | 'totalPrice' | 'requiresModel' | 'modelId' | 'hiddenByRatingBelow' | 'similarLot' | 'isDuplicate' |
+  'duplicateAppealed' | 'reviewReasons' | 'reviewReturnNote'> & ActualityListingFields;
 
 interface ListingPage {
   items: OwnListing[];
@@ -25,17 +27,18 @@ interface ListingPage {
 
 const statuses: Record<string, string> = {
   ACTIVE: 'Активно', HIDDEN: 'Скрыто', FROZEN: 'Заморожено', BANNED: 'Заблокировано', ARCHIVED: 'В архиве',
+  PENDING_OWNER: 'Ждёт вашего решения', PENDING_REVIEW: 'На проверке',
 };
 const hiddenLabels: Record<string, string> = {
   NO_ANSWER: 'Скрыто: нет ответа', MISSED3: 'Скрыто: три пропуска', PAUSE: 'Скрыто: пауза', SPOT_CHECK: 'Скрыто: до завершения проверки',
   DUPLICATE: 'Скрыто как дубль лота',
 };
 const publications = [
-  ['current', 'Активные'], ['archive', 'Архив'], ['restricted', 'Ограниченные'],
+  ['current', 'Активные'], ['pending', 'На подтверждении'], ['archive', 'Архив'], ['restricted', 'Ограниченные'],
 ] as const;
 const dayMs = 24 * 60 * 60 * 1000;
 
-export function MyListingsPage() {
+export function MyListingsPage({ user }: { user: User }) {
   const { t, locale } = useI18n();
   const { features } = useExchange();
   const navigate = useNavigate();
@@ -53,14 +56,17 @@ export function MyListingsPage() {
   const [notice, setNotice] = useState('');
   const requestedTab = query.get('tab');
   const tab = publications.find(([value]) => value === requestedTab)?.[0] ?? 'current';
-  const publication = summary?.enabled ? '&publication=' + tab : '';
+  const publication = summary?.enabled || tab === 'pending' ? '&publication=' + tab : '';
+  const dual = tradeSidesFor(user).length === 2;
+  const side = dual ? query.get('kind') === 'BUY' ? 'BUY' : 'SELL' : undefined;
+  const url = `/listings/mine?page=${page}&limit=12${publication}${side ? '&kind=' + side : ''}`;
   const pendingCount = summary?.pending.length ?? 0;
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setError('');
-    api<ListingPage>(`/listings/mine?page=${page}&limit=12${publication}`, { signal: controller.signal })
+    api<ListingPage>(url, { signal: controller.signal })
       .then(result => {
         if (!controller.signal.aborted) setData(result);
       })
@@ -71,7 +77,7 @@ export function MyListingsPage() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [page, revision, publication]);
+  }, [url, revision]);
 
   const refresh = () => setRevision(previous => previous + 1);
 
@@ -119,7 +125,11 @@ export function MyListingsPage() {
 
   function selectTab(value: string) {
     setPage(1);
-    setQuery(value === 'current' ? {} : { tab: value });
+    setQuery(next => {
+      if (value === 'current') next.delete('tab');
+      else next.set('tab', value);
+      return next;
+    });
   }
 
   return (
@@ -129,6 +139,14 @@ export function MyListingsPage() {
         <Link className="button button-primary" to="/listings/new">{t('Разместить объявление')}</Link>
       </div>
       <div className="workflow-stack">
+        {dual && <nav className="workflow-actions" aria-label={t('Виды моих объявлений')}>
+          {([['SELL', 'Предложения'], ['BUY', 'Заявки']] as const).map(([kind, label]) =>
+            <Button key={kind} type="button" variant={side === kind ? 'primary' : 'secondary'} aria-pressed={side === kind}
+              onClick={() => {
+                setPage(1);
+                setQuery(next => { next.set('kind', kind); return next; });
+              }}>{t(label)}</Button>)}
+        </nav>}
         <MyLotRequests />
         <ActualityStartNotice summary={summary} />
         <ActualitySuspension summary={summary} onChanged={refresh} />
@@ -159,11 +177,8 @@ export function MyListingsPage() {
                 const isLive = listing.status === 'ACTIVE';
                 const isHidden = listing.status === 'HIDDEN';
                 const isArchived = listing.status === 'ARCHIVED';
+                const waiting = listing.status === 'PENDING_OWNER' || listing.status === 'PENDING_REVIEW';
                 const isExpired = isLive && listing.deliveryBy !== null && listing.deliveryBy < today;
-                const price = listing.price == null ? '' : formatMoney(listing.price, listing.currency, locale);
-                const amount = listing.priceMode === 'FIXED' && listing.price != null
-                  ? listing.kind === 'BUY' ? t('До {price}', { price }) : price
-                  : t('По договорённости');
                 const status = isArchived && listing.spotCheckHold ? 'В архиве до завершения проверки'
                   : isExpired ? 'Срок истёк, объявление скрыто из каталога'
                   : hiddenLabels[listing.hiddenReason ?? ''] ?? statuses[listing.status] ?? listing.status;
@@ -177,8 +192,17 @@ export function MyListingsPage() {
                       <div>
                         <h2>{listing.title}</h2>
                         <p className="workflow-muted-line">
-                          {t(listing.kind === 'SELL' ? 'Продажа' : 'Покупка')} · {amount} · {t(status)}
+                          {t(listing.kind === 'SELL' ? 'Продажа' : 'Покупка')} · {t(status)}
                         </p>
+                        <ListingPrice listing={listing} />
+                        {listing.reviewReasons?.length ? <p className="workflow-muted-line">
+                          {listing.reviewReasons.map(reason => t(reason === 'PRICE_OUTSIDE' ?
+                            'Цена вне рыночного коридора' : 'Найдено похожее предложение')).join(' · ')}
+                        </p> : null}
+                        {listing.reviewReturnNote && <p className="workflow-muted-line">{listing.reviewReturnNote}</p>}
+                        {listing.requiresModel && !listing.modelId && <p className="workflow-muted-line">
+                          {t('Укажите модель, чтобы площадка искала совпадения.')}
+                        </p>}
                         {listing.hiddenByRatingBelow != null && <p className="workflow-muted-line">
                           {t('Объявление скрыто в обычной выдаче из-за рейтинга ниже {threshold}.', { threshold: listing.hiddenByRatingBelow })}
                         </p>}
@@ -195,8 +219,8 @@ export function MyListingsPage() {
                     </div>
                     <div className="workflow-actions">
                       <LotAppeal listing={listing} onSaved={refresh} />
-                      {(isLive || isArchived || isHidden) && <Link className="button button-ghost" to={`/listings/${listing.id}`}>{t('Открыть')}</Link>}
-                      {(isLive || isArchived) && <Link className="button button-secondary" to={`/listings/${listing.id}/edit`}>{t('Редактировать')}</Link>}
+                      {(isLive || isArchived || isHidden || waiting) && <Link className="button button-ghost" to={`/listings/${listing.id}`}>{t('Открыть')}</Link>}
+                      {(isLive || isArchived || waiting) && <Link className="button button-secondary" to={`/listings/${listing.id}/edit`}>{t('Редактировать')}</Link>}
                       {summary?.enabled && isLive && <>{(listing.askedAt || !listing.freshness?.today) && <Button type="button" variant="secondary" disabled={busy}
                         onClick={() => void changePublication(listing.id, 'confirm')}>{t(listing.askedAt ? 'Актуально' : 'Подтвердить сегодня')}</Button>}
                         {listing.askedAt && <Button type="button" variant="secondary" disabled={busy}

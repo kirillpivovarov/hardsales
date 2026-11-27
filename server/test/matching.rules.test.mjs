@@ -18,19 +18,21 @@ const seller = {
 const buyer = {
   ...seller, id: 'b', title: 'Заявка на NVIDIA H100 SXM', kind: 'BUY', owner_id: 'buyer', quantity: 4,
   min_lot: 1, origin_scope: 'DOMESTIC', destination_country: 'RU', delivery_by: '2026-12-01',
-  price: '1000000.00',
+  price: '2000000.00',
 };
 const pair = (sell = {}, buy = {}) => evaluatePair({ ...seller, ...sell }, { ...buyer, ...buy }, day, rates, compatibility);
 
 test('compares unit prices across quantities and currencies at exact five percent', () => {
   assert.equal(pair().type, 'FULL');
-  const usdSeller = { price: '208.00', quantity: 2, currency: 'USD' };
-  const usdBuyer = { price: '1000.00', quantity: 10, currency: 'USD' };
-  assert.deepEqual(pair(usdSeller, usdBuyer).mismatches, [
-    { key: 'PRICE', text: 'Цена выше бюджета покупателя на 4,0 % (в пределах 5 %)' },
+  const usdSeller = { price: '2000.00', quantity: 2, currency: 'USD' };
+  const usdBuyer = { price: '2050.00', quantity: 10, currency: 'USD' };
+  assert.equal(pair(usdSeller, usdBuyer).type, 'FULL');
+  assert.deepEqual(pair(usdSeller, { ...usdBuyer, price: '1950.00' }).mismatches, [
+    { key: 'PRICE', text: 'Цена выше бюджета покупателя на 2,6 % (в пределах 5 %)' },
   ]);
-  assert.equal(pair({ ...usdSeller, price: '210.00' }, usdBuyer).type, 'PARTIAL');
-  assert.equal(pair({ ...usdSeller, price: '210.01' }, usdBuyer), null);
+  assert.equal(pair(usdSeller, { ...usdBuyer, price: '1850.00' }), null);
+  assert.equal(pair({ ...usdSeller, price: '2100.00' }, { ...usdBuyer, price: '2000.00' }).type, 'PARTIAL');
+  assert.equal(pair({ ...usdSeller, price: '2100.01' }, { ...usdBuyer, price: '2000.00' }), null);
   assert.equal(pair({ currency: 'USD', price: '20000.00' }).type, 'FULL');
   assert.deepEqual(pair({ currency: 'KZT' }).mismatches.map(item => item.key), ['PRICE_UNKNOWN']);
   assert.deepEqual(pair({}, { price_mode: 'NEGOTIABLE', price: null }).mismatches.map(item => item.key), ['PRICE_UNKNOWN']);
@@ -98,7 +100,7 @@ test('operator explanations agree with the automatic eligibility and price decis
 });
 
 test('near-miss explanation preserves numeric excess and distinguishes an inferred model from an unselected analog', () => {
-  const sell = { ...seller, model_id: 'hgx-h200-8', price: '896.00', currency: 'USD' };
+  const sell = { ...seller, model_id: 'hgx-h200-8', price: '448.00', currency: 'USD' };
   const buy = { ...buyer, model_id: 'dgx-h200', price: '400.00', currency: 'USD' };
   const models = { sell: { id: sell.model_id, nameRu: 'HGX H200', groups: ['h200-server'] },
     buy: { id: buy.model_id, nameRu: 'DGX H200', groups: ['h200-server'] } };
@@ -106,7 +108,7 @@ test('near-miss explanation preserves numeric excess and distinguishes an inferr
   assert.deepEqual(analog.failures.map(reason => reason.key), ['MODEL_ANALOG', 'PRICE_OVER']);
   assert.equal(analog.priceOver, 0.12);
   assert.equal(analog.failures[1].text, 'Цена выше бюджета на 12,0 %');
-  const inferred = explainPair({ ...sell, model_id: null, price: '800.00' }, buy, day, rates, compatibility, models);
+  const inferred = explainPair({ ...sell, model_id: null, price: '400.00' }, buy, day, rates, compatibility, models);
   assert.deepEqual(inferred.failures.map(reason => reason.key), ['MODEL_MISSING']);
   assert.equal(inferred.failures[0].detail.modelId, sell.model_id);
 });

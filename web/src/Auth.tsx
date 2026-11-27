@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { api, ApiError, isStaff, type User } from './api';
+import { api, ApiError, isStaff, tradeSidesFor, type TradeSide, type User } from './api';
 import { useI18n } from './i18n';
 import { CountrySelect } from './CountrySelect';
 import { Button, Field, Notice } from './ui';
@@ -205,6 +205,7 @@ function AuthForm({
     <div className="workflow-page container">
       <section className={`panel workflow-auth ${isRegistering && !challenge ? 'workflow-auth-wide' : ''}`} aria-labelledby="auth-title">
         <div className="workflow-intro">
+          {isRegistering && requiresInvite && <p>{t(challenge ? 'Шаг 2 из 4' : 'Шаг 1 из 4')}</p>}
           <h1 id="auth-title">{t(challenge ? isRegistering ? 'Подтвердите почту' : 'Подтвердите вход' : isRegistering ? 'Регистрация' : 'Вход в аккаунт')}</h1>
           {challenge && <p>{t(isRegistering
             ? 'Если на {email} пришло письмо, введите шестизначный код. Проверьте папку «Спам».'
@@ -237,7 +238,7 @@ function AuthForm({
             <>
               {(requiresInvite || invitationFromLink) && (
                 <div className="workflow-span">
-                  <Field label={t('Код приглашения')} hint={t('Код выдаёт администратор площадки. Формат XXXX-XXXX.')}>
+                  <Field label={t('Код приглашения')} hint={t('Код выдаёт сотрудник площадки. Формат XXXX-XXXX.')}>
                     <input name="inviteCode" autoComplete="off" autoCapitalize="characters" inputMode="text"
                       spellCheck={false} defaultValue={draft?.inviteCode ?? invitationFromLink ?? ''}
                       minLength={4} maxLength={20} required={requiresInvite} />
@@ -246,8 +247,9 @@ function AuthForm({
               )}
               <Field label={t('Роль')}>
                 <select name="role" defaultValue={draft?.role ?? 'BUYER'}>
-                  <option value="BUYER">{t('Покупатель')}</option>
-                  <option value="SELLER">{t('Продавец')}</option>
+                  <option value="BUYER">{t('Покупаю')}</option>
+                  <option value="SELLER">{t('Продаю')}</option>
+                  <option value="BOTH">{t('Покупаю и продаю')}</option>
                 </select>
               </Field>
               <Field label={t('Тип участника')}>
@@ -331,6 +333,7 @@ export function AccountPage({ user, onUser, onboardingAvailable = false, childre
   const navigate = useNavigate();
   const [profileFeedback, setProfileFeedback] = useState({ error: '', notice: '', busy: false });
   const [profileFieldError, setProfileFieldError] = useState<ApiError>();
+  const [telegramField, setTelegramField] = useState(user.telegram ?? '');
   const [passwordFeedback, setPasswordFeedback] = useState({ error: '', notice: '', busy: false });
   const isAdmin = user.role === 'ADMIN';
   const staff = isStaff(user);
@@ -354,6 +357,7 @@ export function AccountPage({ user, onUser, onboardingAvailable = false, childre
         },
       });
       onUser(result.user);
+      setTelegramField(result.user.telegram ?? '');
       setProfileFeedback({ busy: false, error: '', notice: 'Профиль обновлён.' });
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === 'CONTACT_IN_FIELD' && cause.field) {
@@ -426,19 +430,25 @@ export function AccountPage({ user, onUser, onboardingAvailable = false, childre
                 </Field>
               )}
               <Field label={t('Имя пользователя в Telegram')} hint={t('Контакт открывается в чате по взаимному согласию. После смены имени пользователя нужно обменяться контактами заново.')}>
-                <input name="telegram" defaultValue={user.telegram ?? ''} pattern={telegramRules} minLength={5} maxLength={33} required />
+                <input id="telegram-account" name="telegram" value={telegramField} onChange={event => setTelegramField(event.target.value)}
+                  pattern={telegramRules} minLength={5} maxLength={33} required />
               </Field>
-              <TelegramProfile />
+              <TelegramProfile profileUsername={user.telegram} onUsernameChange={username => {
+                setTelegramField(draft => draft === (user.telegram ?? '') ? username : draft);
+                onUser({ ...user, telegram: username });
+              }} />
               <label className="workflow-span workflow-checkbox">
                 <input type="checkbox" name="notifyEmail" defaultChecked={user.notifyEmail ?? true} />
                 {t('Получать уведомления по электронной почте')}
               </label>
+              <p className="workflow-span muted">{t('Письма о новых сообщениях приходят не чаще раза в 15 минут на чат.')}</p>
               {profileFeedback.error && <div className="workflow-span"><Notice tone="error">{t(profileFeedback.error)}</Notice></div>}
               {profileFeedback.notice && <div className="workflow-span"><Notice tone="success">{t(profileFeedback.notice)}</Notice></div>}
               <div className="workflow-span"><Button type="submit" disabled={profileFeedback.busy}>{t('Сохранить профиль')}</Button></div>
             </form>
           </section>
         )}
+        {!user.mustChangePassword && !staff && <TradeSidesSettings user={user} onUser={onUser} />}
         {!staff && (onboardingAvailable || user.onboardingState === 'REQUIRED') && (
           <section className="panel workflow-section" aria-labelledby="account-onboarding-title">
             <h2 id="account-onboarding-title">{t('Анкета участника')}</h2>
@@ -479,4 +489,47 @@ export function AccountPage({ user, onUser, onboardingAvailable = false, childre
       </div>
     </div>
   );
+}
+
+function TradeSidesSettings({ user, onUser }: { user: User; onUser: (user: User) => void }) {
+  const { t } = useI18n();
+  const navigate = useNavigate();
+  const saved = tradeSidesFor(user);
+  const [sides, setSides] = useState(() => saved);
+  const [state, setState] = useState({ busy: false, error: '', saved: false });
+  const changed = sides.length !== saved.length || sides.some(side => !saved.includes(side));
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setState({ busy: true, error: '', saved: false });
+    try {
+      const result = await api<{ user: User }>('/me/trade-sides', { method: 'PATCH', body: { tradeSides: sides } });
+      onUser(result.user);
+      setSides(tradeSidesFor(result.user));
+      setState({ busy: false, error: '', saved: true });
+      if (result.user.onboardingState === 'REQUIRED') navigate('/onboarding');
+    } catch (cause) {
+      setState({ busy: false, error: (cause as Error).message, saved: false });
+    }
+  }
+
+  function toggle(side: TradeSide, selected: boolean) {
+    setSides(current => selected ? [...current, side] : current.filter(value => value !== side));
+    setState(current => ({ ...current, error: '', saved: false }));
+  }
+
+  return <section className="panel workflow-section" aria-labelledby="trade-sides-title">
+    <h2 id="trade-sides-title">{t('Покупка и продажа')}</h2>
+    <form className="workflow-stack" onSubmit={save} aria-busy={state.busy}>
+      {([{ side: 'BUY', label: 'Покупаю' }, { side: 'SELL', label: 'Продаю' }] as const).map(({ side, label }) =>
+        <label className="workflow-checkbox" key={side}>
+          <input type="checkbox" checked={sides.includes(side)} disabled={state.busy}
+            onChange={event => toggle(side, event.target.checked)} /> {t(label)}
+        </label>)}
+      {changed && !sides.length && <p className="muted">{t('Выберите хотя бы одну сторону.')}</p>}
+      {state.error && <Notice tone="error">{t(state.error)}</Notice>}
+      {state.saved && <Notice tone="success">{t('Настройки покупки и продажи сохранены.')}</Notice>}
+      <div><Button type="submit" disabled={state.busy || !changed || !sides.length}>{t('Сохранить стороны')}</Button></div>
+    </form>
+  </section>;
 }

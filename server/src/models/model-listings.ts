@@ -29,6 +29,17 @@ interface ExistingListingModels {
   categoryId?: unknown
 }
 
+export const modelRequiredMessage = 'Выберите модель из справочника. Без неё площадка не найдёт встречные объявления. Нет в списке: нажмите «Предложить модель».'
+
+async function assertModelMayBeOmitted(client: Queryable, categoryId: string) {
+  const { rows: [category] } = await client.query<{ required: boolean }>(
+    'SELECT listing_model_required($1) AS required', [categoryId],
+  )
+  if (category.required) {
+    throw new BadRequestException({ code: 'MODEL_REQUIRED', field: 'modelId', message: modelRequiredMessage })
+  }
+}
+
 export async function validateListingModels(
   client: Queryable, patch: Record<string, unknown>, existing: ExistingListingModels,
   categoryId: string, kind: 'BUY' | 'SELL', ownerId: string,
@@ -43,6 +54,7 @@ export async function validateListingModels(
   if (analogs.length > 10) throw new BadRequestException('Можно указать до 10 аналогов')
   if (kind === 'SELL' && input.length > 0) throw new BadRequestException('Аналоги можно указать только в заявке')
   if (!modelId) {
+    await assertModelMayBeOmitted(client, categoryId)
     if (analogs.length) throw new BadRequestException('Сначала выберите модель')
     return [null, []]
   }
@@ -60,7 +72,10 @@ export async function validateListingModels(
     throw new BadRequestException('Модели нет в справочнике')
   }
   if (!model.compatible) {
-    if (!explicitModel && !explicitAnalogs && categoryId !== existing.categoryId) return [null, []]
+    if (!explicitModel && !explicitAnalogs && categoryId !== existing.categoryId) {
+      await assertModelMayBeOmitted(client, categoryId)
+      return [null, []]
+    }
     throw new BadRequestException('Модель не из выбранной категории')
   }
   if (model.status === 'DISABLED' && modelId !== existing.modelId) {

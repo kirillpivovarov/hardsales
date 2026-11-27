@@ -15,6 +15,7 @@ import { lockTrustStaff } from './trust-access'
 import { documentFile, type DocumentUpload } from './trust-files'
 import { listingLimit } from './trust-score'
 import { TrustService } from './trust.service'
+import { verificationRequirements } from './verification-requirements'
 
 const companyKinds = ['COMPANY_CARD', 'SIGNATORY', 'MANDATE', 'PRINCIPAL_LETTER'] as const
 const salesProof = ['SERIAL_PHOTO', 'WAREHOUSE_CERT', 'INVOICE', 'WAREHOUSE_VIDEO'] as const
@@ -32,7 +33,7 @@ const documentColumns = `
 `
 const userColumns = `
   u.id, u.username, u.display_name AS "displayName", u.role, u.representation_mode AS "representationMode",
-  u.verification_level AS level, u.verification_requested_at AS "verificationRequestedAt",
+  u.verification_level AS level, u.verification_source AS source, u.verification_requested_at AS "verificationRequestedAt",
   u.verified_at AS "verifiedAt", u.verification_rejected_at AS "verificationRejectedAt",
   u.verification_note AS "verificationNote", u.publish_ban_at AS "publishBanAt", u.publish_ban_note AS "publishBanNote",
   u.actuality_suspended_at AS "actualitySuspendedAt", u.link_group AS "linkGroup",
@@ -43,7 +44,7 @@ const dayCodeColumns = `
   c.issued_at AS "issuedAt", c.expires_at AS "expiresAt", c.result, c.result_at AS "resultAt"
 `
 type AllowedStaff = StaffSession
-type Participant = { id: string; level: number; role: string; status: string }
+type Participant = { id: string; level: number; role: string; status: string; nickname: string }
 type Document = {
   id: string; userId: string; listingId: string | null; kind: string; status: string; fileName: string
 }
@@ -68,7 +69,7 @@ export class VerificationService implements OnApplicationBootstrap {
 
   private async member(client: PoolClient, id: string): Promise<Participant> {
     const { rows: [user] } = await client.query<Participant>(`
-      SELECT id, verification_level AS level, role, status
+      SELECT id, verification_level AS level, role, status, display_name AS nickname
       FROM users WHERE id = $1 AND role IN ('BUYER','SELLER') FOR UPDATE
     `, [id])
     if (!user) throw new NotFoundException('Профиль участника не найден')
@@ -121,6 +122,7 @@ export class VerificationService implements OnApplicationBootstrap {
           AND (listing_id IS NULL OR listing_id = $3)
         FOR UPDATE
       `, [userId, dayCode, listingId])).rows[0] : null
+      if (dayCode && !code) throw new BadRequestException('Код дня неверен, просрочен или относится к другому объявлению')
       const { rows: [document] } = await client.query<Document>(`
         INSERT INTO verification_documents AS d
           (user_id, listing_id, principal_id, deal_id, kind, file_name, mime_type, content, sha256,
@@ -139,6 +141,21 @@ export class VerificationService implements OnApplicationBootstrap {
         UPDATE users SET verification_requested_at = coalesce(verification_requested_at, now()),
           verification_rejected_at = NULL WHERE id = $1
       `, [userId])
+      const { rows: [waiting] } = await client.query<{ total: number }>(`
+        SELECT count(*)::int AS total FROM verification_documents WHERE user_id=$1 AND status='PENDING'
+      `, [userId])
+      const labels: Partial<Record<typeof documentKinds[number], string>> = {
+        COMPANY_CARD: 'Карточка компании', SIGNATORY: 'Документ о подписанте', MANDATE: 'Мандат',
+        PRINCIPAL_LETTER: 'Письмо принципала', SERIAL_PHOTO: 'Фото серийного номера',
+        WAREHOUSE_CERT: 'Справка со склада', INVOICE: 'Счёт или накладная', WAREHOUSE_VIDEO: 'Видео со склада',
+        LC_LETTER: 'Письмо об аккредитиве', FUNDS_PROOF: 'Подтверждение средств',
+        BANK_LETTER: 'Письмо банка', DEAL_DOC: 'Документ по сделке', OTHER: 'Другой документ',
+      }
+      await this.notify.notifyStaff(client, {
+        kind: 'verification.document_uploaded', title: `${user.nickname} загрузил документ «${labels[kind]}»`,
+        body: `Ждут проверки: ${waiting.total}`, channels: ['EMAIL'],
+        actions: [{ label: 'Открыть проверку', href: '/admin?section=exchange&part=verification' }],
+      })
       return document
     })
   }
@@ -218,17 +235,25 @@ export class VerificationService implements OnApplicationBootstrap {
       await lockTrustStaff(client, actor)
       const user = await this.member(client, id)
       if (action === 'verify') {
+        const strict = await this.settings.get<number>('disclosure_min_level', client) >= 1
+        if (strict && !(await verificationRequirements(client, id)).eligible && !note) {
+          throw new BadRequestException('Сначала подтвердите документы и полномочия или укажите причину исключения')
+        }
         await client.query(`
           UPDATE users SET verification_level = greatest(verification_level, 1), verified_at = now(),
+            verification_source = CASE WHEN verification_level=2 THEN 'DEAL' ELSE 'DOCUMENTS' END,
             verification_rejected_at = NULL, verification_note = $2, publish_ban_at = NULL, publish_ban_note = NULL
           WHERE id = $1
         `, [id, note])
-        const { rows: accepted } = await client.query<{ id: string }>(`
+        if (!strict) {
+          const { rows: accepted } = await client.query<{ id: string }>(`
           UPDATE verification_documents SET status = 'APPROVED', reviewed_by = $3, reviewed_at = now()
           WHERE user_id = $1 AND kind = ANY($2::text[]) AND status = 'PENDING' RETURNING id
-        `, [id, companyKinds, actor.id])
-        for (const document of accepted) await auditExchange(client, actor, 'documents', document.id, 'approved',
-          { status: 'PENDING' }, { status: 'APPROVED', userId: id })
+          `, [id, companyKinds, actor.id])
+          for (const document of accepted) await auditExchange(client, actor, 'documents', document.id, 'approved',
+            { status: 'PENDING' }, { status: 'APPROVED', userId: id })
+        }
+        if (user.level === 0) await this.notifyReadyPartners(client, id)
       } else if (action === 'reject') {
         await client.query("UPDATE users SET verification_rejected_at = now(), verification_note = $2 WHERE id = $1", [id, note])
       } else {
@@ -255,6 +280,54 @@ export class VerificationService implements OnApplicationBootstrap {
           : `Модератор не подтвердил документы. Причина — ${note}.`
       await this.notify.notify(client, id, { kind: 'verification.' + action, title, body, payload: { level }, channels: ['EMAIL'] })
       return (await client.query(`SELECT ${userColumns} FROM users u WHERE id = $1`, [id])).rows[0]
+    })
+  }
+
+  async self(userId: string) {
+    const { eligible: _eligible, ...state } = await verificationRequirements(this.db, userId)
+    return { ...state, canDisclose: state.level >= await this.settings.get<number>('disclosure_min_level') }
+  }
+
+  async revoke(actor: AllowedStaff, idValue: string, raw: unknown) {
+    const id = uuid(idValue)
+    const reason = str(object(raw).reason, 'Причина', 3, 500)
+    return this.db.transaction(async client => {
+      await lockTrustStaff(client, actor)
+      const before = await this.member(client, id)
+      if (!before.level) throw new ConflictException('У участника нет отметки проверки')
+      await client.query(`
+        UPDATE users SET verification_level=0, verification_source=NULL, verified_at=NULL,
+          verification_note=$2, verification_requested_at=NULL WHERE id=$1
+      `, [id, reason])
+      await this.trust.refresh(client, id)
+      await auditExchange(client, actor, 'verification', id, 'revoked', { level: before.level }, { level: 0 }, reason)
+      await this.notify.notify(client, id, {
+        kind: 'verification.revoked', title: 'Модератор снял отметку проверки',
+        body: `${reason}. Чтобы открывать контакты, загрузите документы.`, channels: ['EMAIL'],
+      })
+      return (await client.query(`SELECT ${userColumns} FROM users u WHERE id=$1`, [id])).rows[0]
+    })
+  }
+
+  private async notifyReadyPartners(client: PoolClient, userId: string) {
+    const { rows } = await client.query<{ partner: string; chat: string; request: string }>(`
+      SELECT target.id AS partner, dialog.id AS chat, p.request_id AS request
+      FROM telegram_consents p
+      JOIN users a ON a.id=p.user_a_id JOIN users b ON b.id=p.user_b_id
+      JOIN users target ON target.id=CASE WHEN a.id=$1 THEN b.id ELSE a.id END
+      JOIN LATERAL (
+        SELECT c.id FROM chats c WHERE
+          (c.owner_id=a.id AND c.visitor_id=b.id) OR (c.owner_id=b.id AND c.visitor_id=a.id)
+        ORDER BY c.created_at DESC,c.id LIMIT 1
+      ) dialog ON true
+      WHERE $1 IN (a.id,b.id) AND p.state='REQUESTED' AND target.status='ACTIVE'
+        AND p.requested_by=target.id AND p.a_version=a.telegram_version AND p.b_version=b.telegram_version
+        AND p.requested_rules_version=(SELECT value #>> '{}' FROM platform_settings WHERE key='rules_version')
+    `, [userId])
+    for (const { partner, chat, request } of rows) await this.notify.notify(client, partner, {
+      kind: 'verification.partner_ready', title: 'Собеседник прошёл проверку документов',
+      body: 'Теперь можно открыть контакты.', channels: ['EMAIL'], dedupeKey: `verification.partner_ready:${request}`,
+      actions: [{ label: 'Открыть чат', href: `/chats/${chat}` }],
     })
   }
 
@@ -308,6 +381,20 @@ export class VerificationService implements OnApplicationBootstrap {
       await lockTrustStaff(client, actor)
       const { rows: participants } = await client.query(`
         SELECT ${userColumns},
+          jsonb_build_object(
+            'companyCard', CASE WHEN EXISTS (
+              SELECT 1 FROM verification_documents d WHERE d.user_id=u.id AND d.kind='COMPANY_CARD'
+                AND d.status='APPROVED' AND d.listing_id IS NULL AND d.principal_id IS NULL
+            ) THEN 'PASSED' ELSE 'WAITING' END,
+            'signatory', CASE WHEN EXISTS (
+              SELECT 1 FROM verification_documents d WHERE d.user_id=u.id AND d.kind='SIGNATORY'
+                AND d.status='APPROVED' AND d.listing_id IS NULL AND d.principal_id IS NULL
+            ) THEN 'PASSED' ELSE 'WAITING' END,
+            'principalEmail', CASE WHEN u.representation_mode='DIRECT' THEN 'NOT_NEEDED'
+              WHEN EXISTS (
+                SELECT 1 FROM user_principals p WHERE p.user_id=u.id AND p.confirmed_via='EMAIL' AND p.removed_at IS NULL
+              ) THEN 'PASSED' ELSE 'WAITING' END
+          ) AS requirements,
           jsonb_build_object(
             'dayCode', CASE
               WHEN EXISTS (SELECT 1 FROM day_codes c JOIN verification_documents d ON d.day_code_id = c.id
@@ -374,6 +461,7 @@ export class VerificationService implements OnApplicationBootstrap {
       })
       return {
         participants, documents, principals, dealsToVerify, dayCodes,
+        requiresDocuments: await this.settings.get<number>('disclosure_min_level', client) > 0,
         suspended: participants.filter(user => user.actualitySuspendedAt),
       }
     })

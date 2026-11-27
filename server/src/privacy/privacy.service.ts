@@ -255,8 +255,9 @@ export class PrivacyService implements OnModuleInit, OnApplicationBootstrap {
     const { rows: [data] } = await client.query<Record<string, unknown>>(`
       SELECT
         jsonb_build_object('id',u.id,'username',u.username,'displayName',u.display_name,'email',u.email,'role',u.role,
-          'participantType',u.participant_type,'companyName',u.company_name,'country',u.country,'city',u.city,
-          'telegram',u.telegram,'telegramUsername',u.telegram_username,'companyEmail',u.company_email,
+          'participantType',u.participant_type,'tradeSides',u.trade_sides,'companyName',u.company_name,'country',u.country,'city',u.city,
+          'telegram',u.telegram,'telegramUsername',u.telegram_username,'telegramVerifiedAt',u.telegram_verified_at,
+          'companyEmail',u.company_email,
           'verificationLevel',u.verification_level,'notifyEmail',u.notify_email,
           'infoEmailConsent',u.info_email_consent,'createdAt',u.created_at) AS profile,
         u.onboarding_answers AS onboarding,
@@ -283,6 +284,10 @@ export class PrivacyService implements OnModuleInit, OnApplicationBootstrap {
         (SELECT COALESCE(jsonb_agg(jsonb_build_object('id',d.id,'fileName',d.file_name,'kind',d.kind,'status',d.status,
           'uploadedAt',d.uploaded_at) ORDER BY d.uploaded_at),'[]')
           FROM verification_documents d WHERE d.user_id=u.id) AS documents,
+        (SELECT COALESCE(jsonb_agg(jsonb_build_object('disputeId',m.dispute_id,'round',m.round,'note',m.note,
+          'fileName',m.file_name,'mimeType',m.mime_type,'contentBase64',encode(m.content,'base64'),
+          'uploadedAt',m.uploaded_at) ORDER BY m.uploaded_at,m.id),'[]')
+          FROM dispute_materials m WHERE m.user_id=u.id) AS "disputeMaterials",
         (SELECT COALESCE(jsonb_agg(jsonb_build_object('kind',n.kind,'title',n.title,'body',n.body,'createdAt',n.created_at,
           'readAt',n.read_at) ORDER BY n.id),'[]') FROM notifications n WHERE n.user_id=u.id) AS notifications
       FROM users u WHERE u.id=$1
@@ -325,6 +330,7 @@ export class PrivacyService implements OnModuleInit, OnApplicationBootstrap {
     await client.query('DELETE FROM lot_duplicate_appeals WHERE owner_id=$1', [id]);
     await client.query(`
       DELETE FROM action_tokens WHERE user_id=$1 OR
+        (purpose='dispute.review' AND payload->>'participantId'=$1::text) OR
         (purpose IN ('principal.confirm','company_email.confirm') AND subject_id IN (
           SELECT id::text FROM company_email_letters WHERE user_id=$1))
     `, [id]);
@@ -361,13 +367,15 @@ export class PrivacyService implements OnModuleInit, OnApplicationBootstrap {
         status=CASE WHEN kind='EXPORT' AND status='NEW' THEN 'REJECTED' ELSE status END
       WHERE user_id=$1
     `, [id]);
-    const { rows: [counts] } = await client.query<{ disclosure: number; document: number; message: number; consent: number }>(`
+    const { rows: [counts] } = await client.query<{ disclosure: number; document: number; message: number; consent: number; disputeMaterial: number }>(`
       SELECT (SELECT count(*)::int FROM disclosures WHERE $1 IN (user_a_id,user_b_id)) AS disclosure,
         (SELECT count(*)::int FROM verification_documents WHERE user_id=$1 AND deal_id IS NOT NULL) AS document,
         (SELECT count(*)::int FROM chat_messages WHERE sender_id=$1) AS message,
+        (SELECT count(*)::int FROM dispute_materials WHERE user_id=$1) AS "disputeMaterial",
         (SELECT count(*)::int FROM user_consents WHERE user_id=$1) AS consent
     `, [id]);
     return [`Раскрытия: ${counts.disclosure}`, `Документы сделок: ${counts.document}`,
-      `Сообщения у собеседников: ${counts.message}`, `Записи о согласии: ${counts.consent}`];
+      `Сообщения у собеседников: ${counts.message}`, `Записи о согласии: ${counts.consent}`,
+      `Материалы споров: ${counts.disputeMaterial}`];
   }
 }

@@ -8,6 +8,7 @@ import { AdminService } from './admin.service'
 import { CatalogService } from './catalog.service'
 import { ChatsService } from './chats.service'
 import { ListingMediaService } from './listing-media.service'
+import { ListingPublication } from './listing-publication'
 import { ListingStaffGuard, ListingMemberGuard, ListingUploadCapacity } from './listing-upload'
 import { ChatsController, MarketController } from './market.controller'
 
@@ -15,7 +16,7 @@ import { ChatsController, MarketController } from './market.controller'
   imports: [ActualityModule, TrustModule, DisclosuresModule, MatchingModule],
   controllers: [MarketController, ChatsController, AdminController, AgentModerationController],
   providers: [
-    CatalogService, ChatsService, AdminService, ListingMediaService,
+    CatalogService, ChatsService, AdminService, ListingMediaService, ListingPublication,
     ListingStaffGuard, ListingMemberGuard, ListingUploadCapacity,
   ],
 })

@@ -1,6 +1,7 @@
 import { ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { hashToken } from '../auth/auth.crypto';
+import { TELEGRAM_PATTERN } from '../auth/auth.dto';
 import type { StaffSession } from '../auth/auth.types';
 import { DatabaseService, type Queryable } from '../database/database.service';
 import { ExchangeActions } from '../exchange/actions';
@@ -14,8 +15,13 @@ import { telegramToken } from './telegram-config';
 
 type DisableReason = 'USER_STOP' | 'PROFILE_UNLINK' | 'BOT_BLOCKED' | 'CHAT_NOT_FOUND' | 'ADMIN';
 type LinkedMember = { id: string; status: string; chatId: string; name: string };
+type Nicknames = { profileUsername: string | null; username: string | null; verified: boolean };
 const oldLink = 'Ссылка устарела. Откройте профиль на сайте и нажмите «Подключить Telegram» ещё раз.';
 const linkTaken = 'Этот Telegram уже привязан к другому аккаунту площадки. Отвяжите его там командой /stop.';
+
+function observedUsername(from: TelegramPerson): string | null {
+  return typeof from.username === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(from.username) ? from.username : null;
+}
 
 export async function releaseTelegramFallbacks(client: Queryable, deliveryIds: string[], sent: boolean): Promise<void> {
   if (!deliveryIds.length) return;
@@ -34,16 +40,18 @@ export class TelegramLinks {
     private readonly actions: ExchangeActions, private readonly notifications: ExchangeNotifications) {}
 
   async state(userId: string) {
-    const { rows: [state] } = await this.db.query<{
-      linked: boolean; username: string | null; linkedAt: Date | null; disabledReason: DisableReason | null;
+    const { rows: [state] } = await this.db.query<Nicknames & {
+      linked: boolean; linkedAt: Date | null; disabledReason: DisableReason | null;
       botUsername: string | null; feature: boolean;
     }>(`SELECT u.telegram_chat_id IS NOT NULL AS linked, u.telegram_username AS username,
+      u.telegram AS "profileUsername", telegram_handle_verified(u) AS verified,
       u.telegram_linked_at AS "linkedAt", u.telegram_disabled_reason AS "disabledReason", t.bot_username AS "botUsername",
       (SELECT value='true'::jsonb FROM platform_settings WHERE key='feature_telegram') AS feature
       FROM users u CROSS JOIN telegram_state t WHERE u.id=$1`, [userId]);
     if (!state) throw new ForbiddenException('Привязка Telegram доступна участникам');
     const { feature, ...publicState } = state;
-    return { ...publicState, enabled: feature && Boolean(telegramToken()) };
+    const enabled = feature && Boolean(telegramToken());
+    return { ...publicState, enabled, verified: enabled && state.verified };
   }
 
   async issue(userId: string) {
@@ -84,7 +92,7 @@ export class TelegramLinks {
     const collision = await client.query(`SELECT 1 FROM users WHERE id<>$1 AND telegram_chat_id IS NOT NULL
       AND (telegram_chat_id=$2 OR telegram_user_id=$3)`, [tokenOwner.userId, chatId, String(from.id)]);
     if (collision.rowCount) return { text: linkTaken };
-    const username = typeof from.username === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(from.username) ? from.username : null;
+    const username = observedUsername(from);
     await client.query(`UPDATE users SET telegram_chat_id=$2,telegram_user_id=$3,telegram_username=$4,
       telegram_linked_at=now(),telegram_disabled_at=NULL,telegram_disabled_reason=NULL WHERE id=$1`,
     [tokenOwner.userId, chatId, String(from.id), username]);
@@ -101,6 +109,35 @@ export class TelegramLinks {
       WHERE telegram_chat_id=$1 AND telegram_user_id=$2 AND role IN ('BUYER','SELLER') ${lock ? 'FOR UPDATE' : ''}
     `, [chatId, String(user.id)]);
     return member;
+  }
+
+  async observeUsername(client: Queryable, chatId: string, from: TelegramPerson): Promise<Nicknames | undefined> {
+    const { rows: [result] } = await client.query<Nicknames>(`
+      UPDATE users AS u SET telegram_username=$3,
+        telegram_verified_at=CASE WHEN lower(u.telegram)=lower($3) THEN now() END,
+        telegram_verified_version=CASE WHEN lower(u.telegram)=lower($3) THEN u.telegram_version END
+      WHERE u.telegram_chat_id=$1 AND u.telegram_user_id=$2 AND u.status='ACTIVE' AND u.role IN ('BUYER','SELLER')
+      RETURNING u.telegram AS "profileUsername", u.telegram_username AS username, telegram_handle_verified(u) AS verified
+    `, [chatId, String(from.id), observedUsername(from)]);
+    return result;
+  }
+
+  async adoptUsername(client: PoolClient, chatId: string, from: TelegramPerson, expected: string) {
+    const username = observedUsername(from);
+    if (!username || !TELEGRAM_PATTERN.test(username) || username.toLowerCase() !== expected.toLowerCase()) {
+      return 'Имя пользователя изменилось. Используйте кнопку с актуальным именем.';
+    }
+    const { rows: [user] } = await client.query<{ id: string; telegram: string | null; consent: string | null }>(`
+      SELECT id,telegram,pd_consent_version AS consent FROM users
+      WHERE telegram_chat_id=$1 AND telegram_user_id=$2 AND status='ACTIVE' AND role IN ('BUYER','SELLER') FOR UPDATE
+    `, [chatId, String(from.id)]);
+    if (!user) return 'Telegram отвязан от профиля.';
+    if (user.consent !== await policyVersion(client)) return 'Примите актуальное согласие на обработку данных в профиле на сайте.';
+    if (user.telegram?.toLowerCase() !== username.toLowerCase()) {
+      // The profile trigger bumps the version and records the previous handle.
+      await client.query('UPDATE users SET telegram=$2,updated_at=now() WHERE id=$1', [user.id, username]);
+    }
+    return `Telegram @${username} подтверждён. Собеседники увидят этот ник после согласия на обмен.`;
   }
 
   async disable(client: PoolClient, userId: string, reason: DisableReason, expectedChat?: string): Promise<boolean> {

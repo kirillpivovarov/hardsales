@@ -1,11 +1,13 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import paymentForms from '../../server/seeds/exchange_data/payment_forms.json';
 import { api } from './api';
 import { useI18n } from './i18n';
-import { countryName, formatMoney, terms } from './market';
+import { countryName, terms } from './market';
+import { ListingPrice } from './ListingPrice';
 import { NearMisses } from './NearMisses';
+import { StaffDialog } from './StaffDialog';
 import { PaymentRisk, TrustBadges, type ListingTrust } from './Trust';
 import { Button, Field, Notice, Spinner } from './ui';
 import './matches.css';
@@ -23,7 +25,7 @@ type MatchListing = Summary & {
   quantity: number; minLot: number; condition: string; originCountry: string | null;
   originScope: string | null; destinationCountry: string | null; stockCity: string | null;
   shipDays: number | null; deliveryBy: string | null; price: number | null; currency: string;
-  unitPrice: number | null; unitPriceUsd: number | null; paymentMethods: string[]; paymentTerms: string[];
+  unitPrice: number | null; unitPriceUsd: number | null; totalPrice: number | null; paymentMethods: string[]; paymentTerms: string[];
   labels: { id: string; text: string; tone: string }[];
 };
 type MatchSummary = {
@@ -55,7 +57,7 @@ const partnerLabels = Object.fromEntries(paymentForms.partner_kinds.map(item => 
 const requestError = (cause: unknown, fallback: string) => cause instanceof Error ? cause.message : fallback;
 
 function MatchCard({ match, busy, onChat, onDecline }: {
-  match: Match; busy: boolean; onChat: () => void; onDecline: () => void;
+  match: Match; busy: boolean; onChat: () => void; onDecline: (trigger: HTMLElement) => void;
 }) {
   const { t, locale } = useI18n();
   const { listing, owner, trust } = match.counterpart;
@@ -92,8 +94,7 @@ function MatchCard({ match, busy, onChat, onDecline }: {
       {listing.destinationCountry && <div><dt>{t('Страна доставки')}</dt><dd>{countryName(listing.destinationCountry, locale)}</dd></div>}
       {listing.shipDays !== null && <div><dt>{t('Срок отгрузки')}</dt><dd>{t('{count} раб. дн. после оплаты', { count: listing.shipDays })}</dd></div>}
       {date && <div><dt>{t('Доставка до')}</dt><dd>{new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeZone: 'UTC' }).format(date)}</dd></div>}
-      <div><dt>{t('Стоимость')}</dt><dd>{listing.price === null || listing.unitPrice === null ? t('По договорённости')
-        : <>{formatMoney(listing.unitPrice, listing.currency, locale)} {t('за шт.')} · {formatMoney(listing.price, listing.currency, locale)} {t('за всё')}</>}</dd></div>
+      <div><dt>{t('Стоимость')}</dt><dd><ListingPrice listing={{ ...listing, priceUsd: listing.unitPriceUsd }} usd /></dd></div>
       <div><dt>{t('Оплата')}</dt><dd>{payment.join(', ') || '—'}</dd></div>
     </dl>
     <div className="match-owner">
@@ -118,25 +119,16 @@ function MatchCard({ match, busy, onChat, onDecline }: {
     {(match.voidReason || match.declineReason) && <Notice>{t(match.voidReason ?? match.declineReason!)}</Notice>}
     {(match.status === 'NEW' || match.status === 'CHAT') && <div className="match-actions">
       <Button disabled={busy} onClick={onChat}>{t(match.status === 'CHAT' ? 'Открыть чат' : 'Написать')}</Button>
-      {match.status === 'NEW' && <Button variant="secondary" aria-haspopup="dialog" disabled={busy} onClick={onDecline}>{t('Не подходит')}</Button>}
+      {match.status === 'NEW' && <Button variant="secondary" aria-haspopup="dialog" disabled={busy} onClick={event => onDecline(event.currentTarget)}>{t('Не подходит')}</Button>}
     </div>}
   </article>;
 }
 
-function DeclineDialog({ busy, error, onClose, onSubmit }: {
-  busy: boolean; error: string; onClose: () => void; onSubmit: (reason: string) => void;
+function DeclineDialog({ busy, error, onClose, onSubmit, trigger }: {
+  busy: boolean; error: string; onClose: () => void; onSubmit: (reason: string) => void; trigger?: HTMLElement;
 }) {
   const { t } = useI18n();
-  const dialog = useRef<HTMLDialogElement>(null);
-  const titleId = useId();
-  useEffect(() => {
-    const node = dialog.current!;
-    node.showModal();
-    return () => node.close();
-  }, []);
-  return <dialog ref={dialog} className="panel match-dialog" aria-labelledby={titleId}
-    onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
-    <h2 id={titleId}>{t('Отклонить совпадение')}</h2>
+  return <StaffDialog title={t('Отклонить совпадение')} closeDisabled={busy} returnFocus={trigger} onClose={onClose}>
     <form onSubmit={event => {
       event.preventDefault();
       onSubmit(String(new FormData(event.currentTarget).get('reason')));
@@ -153,7 +145,7 @@ function DeclineDialog({ busy, error, onClose, onSubmit }: {
         <Button type="submit" disabled={busy}>{t('Отклонить')}</Button>
       </div>
     </form>
-  </dialog>;
+  </StaffDialog>;
 }
 
 export function MatchesPage({ onChanged }: { onChanged?: () => void } = {}) {
@@ -169,6 +161,7 @@ export function MatchesPage({ onChanged }: { onChanged?: () => void } = {}) {
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState<string>();
+  const declineTrigger = useRef<HTMLElement>(undefined);
   const [declining, setDeclining] = useState<string>();
   const [error, setError] = useState('');
   const [dialogError, setDialogError] = useState('');
@@ -238,10 +231,10 @@ export function MatchesPage({ onChanged }: { onChanged?: () => void } = {}) {
     {loading ? <Spinner /> : data && <div className="match-results">
       {data.items.length === 0 && <div className="panel match-card"><p>{t('В этом разделе пока нет совпадений.')}</p></div>}
       {data.items.map(match => <MatchCard key={match.id} match={match} busy={busy === match.id}
-        onChat={() => void chat(match)} onDecline={() => { setDialogError(''); setDeclining(match.id); }} />)}
+        onChat={() => void chat(match)} onDecline={trigger => { declineTrigger.current = trigger; setDialogError(''); setDeclining(match.id); }} />)}
       {!id && <MatchPagination data={data} onPage={value => setFilter(status, value)} />}
     </div>}
-    {declining && <DeclineDialog busy={busy === declining} error={dialogError} onClose={() => setDeclining(undefined)}
+    {declining && <DeclineDialog trigger={declineTrigger.current} busy={busy === declining} error={dialogError} onClose={() => setDeclining(undefined)}
       onSubmit={reason => void decline(reason)} />}
   </div>;
 }

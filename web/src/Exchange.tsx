@@ -4,8 +4,10 @@ import { api } from './api';
 import { useI18n } from './i18n';
 import { Button, Field, Icon, Notice, Spinner } from './ui';
 import type { RepresentationActionData } from './Representation';
+import type { ListingOwnerFields } from './StaffListing';
 import { TelegramDemoActions, type TelegramActionFields } from './Telegram';
 import { ThirdPartyLetterEditor, type ThirdPartyLetter } from './Consent';
+import { StaffDialog } from './StaffDialog';
 
 type Settings = Record<string, boolean | number | string | string[]>;
 const ExchangeContext = createContext({ features: {} as Settings, reload: () => {} });
@@ -35,19 +37,8 @@ interface Notification {
   actions: { label: string; token?: string; href?: string }[];
 }
 
-export function NotificationLink({ revision }: { revision: number }) {
+export function NotificationLink({ unread }: { unread: number }) {
   const { t } = useI18n();
-  const [unread, setUnread] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    function refresh() {
-      void api<{ unread: number }>('/notifications?unread=true&limit=1', { signal: controller.signal })
-        .then(value => setUnread(value.unread)).catch(() => {});
-    }
-    refresh();
-    const timer = window.setInterval(refresh, 60_000);
-    return () => { controller.abort(); window.clearInterval(timer); };
-  }, [revision]);
   return <Link to="/notifications" className="button button-secondary exchange-notification-link"
     aria-label={unread ? t('Уведомления, непрочитанных: {count}', { count: unread }) : t('Уведомления')}>
     <Icon name="bell" size={17} />
@@ -109,14 +100,25 @@ const settingNames: Record<string, string> = {
   feature_disclosure_journal: 'Журнал раскрытий', feature_representation: 'Прямые стороны и агенты',
   feature_matching: 'Совпадения объявлений', feature_trust_rating: 'Рейтинг и проверка',
   feature_telegram: 'Уведомления в Telegram',
+  disclosure_requires_verified_telegram: 'Требовать подтверждения Telegram перед раскрытием',
+  feature_disputes: 'Споры по раскрытиям',
   feature_lot_groups: 'Дубли лотов', lot_price_tolerance: 'Допуск цены одинаковых лотов, доля',
   near_miss_max_failures: 'Допустимое число расхождений при ручном сведении',
   near_miss_price_over: 'Допуск сверх бюджета при ручном сведении, доля',
   feature_catalog_sync: 'Синхронизация справочника', disclosure_min_level: 'Уровень для раскрытия',
   low_rating_threshold: 'Порог низкого рейтинга', catalog_sync_vendors: 'Идентификаторы производителей PCI',
+  model_required_categories: 'Категории с обязательной моделью',
   pd_policy_version: 'Версия политики обработки данных',
+  staff_digest_hour: 'Час отправки сводки для модераторов',
+  staff_instant_kinds: 'Срочные письма сотрудникам',
 };
-const dedicatedSettings = new Set(['pilot_period', 'stop_rule', 'pilot_targets', 'pilot_excluded_users']);
+const staffNoticeLabels: Record<string, string> = {
+  'onboarding.submitted': 'Новые анкеты', 'verification.document_uploaded': 'Загруженные документы',
+  'deal.executed': 'Исполненные сделки', 'deal.amount_mismatch': 'Расхождения в условиях сделки',
+  'listing.pending_review': 'Объявления на премодерации', 'dispute.opened': 'Открытые споры',
+  'dispute.reopened': 'Заявления о пересмотре спора',
+};
+const dedicatedSettings = new Set(['ops_alerts', 'pilot_period', 'stop_rule', 'pilot_targets', 'pilot_excluded_users']);
 
 export function ExchangeSettings() {
   const { t } = useI18n();
@@ -129,8 +131,10 @@ export function ExchangeSettings() {
   async function save(event: FormEvent<HTMLFormElement>, key: string, current: Settings[string]) {
     event.preventDefault();
     if (busy) return;
-    const field = new FormData(event.currentTarget).get('value');
-    const value = typeof current === 'boolean' ? field === 'on' : typeof current === 'number' ? Number(field)
+    const submitted = new FormData(event.currentTarget);
+    const field = submitted.get('value');
+    const value = key === 'staff_instant_kinds' ? submitted.getAll('noticeKind').map(String)
+      : typeof current === 'boolean' ? field === 'on' : typeof current === 'number' ? Number(field)
       : Array.isArray(current) ? String(field ?? '').trim().split(/[,\s]+/).filter(Boolean) : String(field ?? '');
     setBusy(key); setFeedback(undefined);
     try {
@@ -150,14 +154,23 @@ export function ExchangeSettings() {
         setValues(list => list?.map(item => item.key === row.key ? { key: item.key, value: value as unknown as Settings[string] } : item));
       }} /> : <div key={row.key} className="workflow-stack">
       <form className="exchange-setting" aria-busy={busy === row.key} onSubmit={event => void save(event, row.key, row.value)}>
-      <Field label={t(settingNames[row.key] ?? row.key)}>
+      {row.key === 'staff_instant_kinds' && Array.isArray(row.value) ? (
+        <fieldset className="exchange-notice-kinds">
+          <legend>{t(settingNames.staff_instant_kinds)}</legend>
+          {Object.entries(staffNoticeLabels).map(([key, label]) => <label key={key} className="workflow-checkbox">
+            <input type="checkbox" name="noticeKind" value={key} defaultChecked={(row.value as string[]).includes(key)} />
+            {t(label)}
+          </label>)}
+        </fieldset>
+      ) : <Field label={t(settingNames[row.key] ?? row.key)}>
         {typeof row.value === 'boolean' ? <input type="checkbox" name="value" defaultChecked={row.value} /> :
           row.key === 'registration_mode' ? <select name="value" defaultValue={String(row.value)}>
             <option value="OPEN">{t('Открытая регистрация')}</option><option value="INVITE">{t('Только по приглашению')}</option>
           </select> : <input type={typeof row.value === 'number' ? 'number' : 'text'} name="value"
             step={row.key === 'lot_price_tolerance' || row.key === 'near_miss_price_over' ? 'any' : undefined}
+            min={row.key === 'staff_digest_hour' ? 0 : undefined} max={row.key === 'staff_digest_hour' ? 23 : undefined}
             defaultValue={Array.isArray(row.value) ? row.value.join(', ') : row.value} required />}
-      </Field>
+      </Field>}
         <Button type="submit" variant="secondary" disabled={Boolean(busy)}>{t('Сохранить')}</Button>
       </form>
       {feedback?.key === row.key && <Notice tone={feedback.tone}>{t(feedback.text)}</Notice>}
@@ -165,11 +178,28 @@ export function ExchangeSettings() {
   </div>;
 }
 
-const jobStatuses: Record<string, string> = { RUNNING: 'Выполняется', DONE: 'Завершена', FAILED: 'Ошибка', SKIPPED: 'Пропущена' };
-
+const jobStatuses: Record<string, string> = { RUNNING: 'Выполняется', DONE: 'Выполнена', FAILED: 'Ошибка', SKIPPED: 'Пропущена' };
+type JobOption = { name: string; title: string; canRun: boolean; requiresConfirmation: boolean };
 export function ExchangeJobRuns({ administrator = false }: { administrator?: boolean }) {
   const { t, locale } = useI18n();
-  const [records, setRecords] = useState<{ id: string; job: string; slot: string; status: string; startedAt: string }[]>();
+  const [records, setRecords] = useState<{ id: string; job: string; slot: string; status: string; startedAt: string; manual?: boolean; manualBy?: string }[]>();
+  const [options, setOptions] = useState<JobOption[]>([]);
+  const [confirm, setConfirm] = useState<{ task: JobOption; trigger: HTMLElement }>();
+  const [busy, setBusy] = useState<string>();
+  const [result, setResult] = useState('');
+  useEffect(() => { void api<{ items: JobOption[] }>('/admin/jobs/available').then(response => setOptions(response.items))
+    .catch((cause: Error) => setError(cause.message)); }, []);
+  async function run(task: JobOption, confirmation = false) {
+    setBusy(task.name); setError(''); setResult('');
+    try {
+      const response = await api<{ status: string }>('/admin/jobs/' + encodeURIComponent(task.name) + '/run', {
+        method: 'POST', body: { confirm: confirmation },
+      });
+      setResult(jobStatuses[response.status] ?? 'Результат неизвестен');
+      setRevision(value => value + 1);
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(undefined); setConfirm(undefined); }
+  }
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
   const [job, setJob] = useState('');
@@ -186,18 +216,32 @@ export function ExchangeJobRuns({ administrator = false }: { administrator?: boo
   return <div className="workflow-stack">
     <h2>{t('Фоновые задачи')}</h2>
     {administrator && <TelegramDemoActions onFinished={() => setRevision(value => value + 1)} />}
-    <form className="exchange-setting" onSubmit={event => {
-      event.preventDefault();
-      setPage(1); setJob(String(new FormData(event.currentTarget).get('job') ?? '').trim());
-    }}>
-      <Field label={t('Имя задачи')}><input name="job" maxLength={80} /></Field><Button type="submit">{t('Найти')}</Button>
-    </form>
+    <details className="ops-panel"><summary>{t('Ручной запуск')}</summary>
+      <ul className="ops-job-list">{options.filter(item => item.canRun).map(item => <li key={item.name}>
+        <strong>{t(item.title)}</strong>
+        <Button variant="secondary" disabled={Boolean(busy)} aria-label={t('Запустить сейчас') + ' · ' + t(item.title)}
+          onClick={event => item.requiresConfirmation ? setConfirm({ task: item, trigger: event.currentTarget }) : void run(item)}>
+          {t('Запустить сейчас')}
+        </Button>
+      </li>)}</ul>
+    </details>
+    <Field label={t('Задача в журнале')}><select value={job} onChange={event => {
+      setPage(1); setJob(event.currentTarget.value);
+    }}><option value="">{t('Все задачи')}</option>
+      {options.map(item => <option key={item.name} value={item.name}>{t(item.title)}</option>)}</select></Field>
     {error && <Notice tone="error">{t(error)}</Notice>}
+    {result && <Notice>{t(result)}</Notice>}
     {!records && !error && <Spinner />}
-    <ul className="exchange-runs">{records?.map(item => <li key={item.id}>
-      <strong>{item.job}</strong> <span>{item.slot}</span> <span>{t(jobStatuses[item.status] ?? item.status)}</span>
+    <ul className="ops-job-list">{records?.map(item => <li key={item.id}>
+      <strong>{t(options.find(option => option.name === item.job)?.title ?? 'Служебная задача')}</strong>
+      <span>{t(jobStatuses[item.status] ?? 'Неизвестный статус')}</span>
+      {item.manual && <span>{t('Вручную')}{item.manualBy ? ' · ' + item.manualBy : ''}</span>}
       <time dateTime={item.startedAt}>{new Date(item.startedAt).toLocaleString(locale)}</time>
     </li>)}</ul>
+    {confirm && <StaffDialog title={t(confirm.task.title)} returnFocus={confirm.trigger} closeDisabled={Boolean(busy)} onClose={() => setConfirm(undefined)}>
+      <p>{t('Участники получат вопрос или напоминание сейчас.')}</p>
+      <div className="admin-actions"><Button disabled={Boolean(busy)} onClick={() => void run(confirm.task, true)}>{t('Подтвердить отправку')}</Button></div>
+    </StaffDialog>}
     <div className="admin-actions">
       <Button variant="secondary" disabled={page <= 1} onClick={() => setPage(value => value - 1)}>{t('Назад')}</Button>
       <Button variant="secondary" disabled={total <= page * 25} onClick={() => setPage(value => value + 1)}>{t('Далее')}</Button>
@@ -208,7 +252,7 @@ export function ExchangeJobRuns({ administrator = false }: { administrator?: boo
 type ActionDescription = RepresentationActionData & {
   title?: string;
   listing?: { title?: string };
-  fields?: TelegramActionFields & { priceMode?: string; price?: number | null; quantity?: number; minLot?: number };
+  fields?: TelegramActionFields & ListingOwnerFields & { priceMode?: string; minLot?: number };
 };
 export function ActionPage({ renderForm }: { renderForm: (
   action: ActionDescription, onSubmit: (body: Record<string, unknown>) => Promise<void>, pending: boolean

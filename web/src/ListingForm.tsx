@@ -1,17 +1,18 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, ApiError, type User } from './api';
+import { api, ApiError, tradeSidesFor, type User } from './api';
 import { useI18n } from './i18n';
 import { ListingImagesEditor, listingImagePayload } from './ListingImages';
 import type { ListingImageDraft } from './ListingImages';
 import { useExchange } from './Exchange';
 import { ListingModelFields } from './Models';
 import { ListingRepresentationFields, readListingRepresentation } from './Representation';
+import { StaffRepresentationFields, type StaffListingOwner } from './StaffListingFields';
 import { PaymentTerms } from './Trust';
 import locationData from '../../server/seeds/exchange_data/locations.json';
 import paymentData from '../../server/seeds/exchange_data/payment_forms.json';
 import { CountrySelect } from './CountrySelect';
-import { categoryName, type Category, type Listing } from './market';
+import { categoryName, formatMoney, maxUnitPrice, type Category, type Listing } from './market';
 import { Button, Field, Notice, Spinner } from './ui';
 import './workflows.css';
 
@@ -24,6 +25,7 @@ interface ListingFormProps {
   homeCountry?: string;
   ownerId?: string;
   user?: User;
+  staffOwner?: StaffListingOwner;
   onSaved: (listing: { id: string }) => void;
 }
 
@@ -33,6 +35,13 @@ const paymentLabels = {
   CASH: 'Наличные',
   LETTER_OF_CREDIT: 'Аккредитив',
 };
+
+function OptionalListingFields({ compact, title, children }: { compact: boolean; title: string; children: ReactNode }) {
+  return compact ? <details className="workflow-span listing-more-fields">
+    <summary>{title}</summary>
+    <div className="form-grid workflow-form">{children}</div>
+  </details> : <>{children}</>;
+}
 
 const currencyChoices = [
   ['RUB', 'Российский рубль'],
@@ -69,12 +78,13 @@ export function ListingEditorPage({ user }: { user: User }) {
 }
 
 export function ListingForm(props: ListingFormProps) {
-  const { listingId, admin } = props;
+  const { listingId, admin, staffOwner } = props;
   const { t } = useI18n();
   const [state, setState] = useState<{ categories: Category[]; listing?: Listing; forListing: string }>();
   const [error, setError] = useState('');
   const key = String(listingId ?? 'new');
-  const listingPath = listingId ? `/${admin ? 'admin/' : ''}listings/${listingId}` : '/listings';
+  const listingPath = listingId ? `/${admin ? 'admin/' : ''}listings/${listingId}`
+    : staffOwner ? `/admin/users/${staffOwner.id}/listings` : '/listings';
 
   useEffect(() => {
     const controller = new AbortController();
@@ -110,6 +120,7 @@ function ListingFields({
   homeCountry = 'RU',
   admin,
   user,
+  staffOwner,
   onSaved,
 }: ListingFormProps & { listing?: Listing; categories: Category[]; listingPath: string }) {
   const { t, locale } = useI18n();
@@ -120,9 +131,16 @@ function ListingFields({
     analogModelIds: listing?.analogModelIds ?? [],
   });
   const [draftSpecs, setDraftSpecs] = useState<Record<string, string>>(listing?.specs ?? {});
-  const isBuyer = (listing?.kind ?? kind) === 'BUY';
+  const sides = staffOwner ? staffOwner.tradeSides ?? [staffOwner.role === 'BUYER' ? 'BUY' : 'SELL'] : tradeSidesFor(user);
+  const [selectedKind, setSelectedKind] = useState<Kind>(() => sides.includes(kind) ? kind : sides[0] ?? kind);
+  const isBuyer = (listing?.kind ?? selectedKind) === 'BUY';
   const [categoryId, setCategoryId] = useState(listing?.categoryId ?? '');
   const [priceMode, setPriceMode] = useState<string>(listing?.priceMode ?? 'FIXED');
+  const [price, setPrice] = useState(String(listing?.price ?? ''));
+  const [quantity, setQuantity] = useState(String(listing?.quantity ?? 1));
+  const [currency, setCurrency] = useState(listing?.currency ?? 'RUB');
+  const [deliveryIncluded, setDeliveryIncluded] = useState(listing?.deliveryIncluded ?? false);
+  const [priceWarning, setPriceWarning] = useState(false);
   const [availability, setAvailability] = useState(listing?.availability ?? 'STOCK');
   const [originScope, setOriginScope] = useState(listing?.originScope ?? 'ANY');
   const sellerDefaultCountry = listing?.originScope === 'ANY' ? 'ANY' : homeCountry;
@@ -137,12 +155,33 @@ function ListingFields({
   const newPhotoKeys = photos.filter(photo => 'file' in photo).map(photo => photo.key).sort();
   const photoConfirmation = (features.feature_disclosure_journal === true || fieldError?.field === 'images') && newPhotoKeys.length > 0;
   const selectedCategory = categories.find(category => category.id === categoryId);
+  const compact = Boolean(!listing && !staffOwner && !admin && selectedCategory?.requiresModel
+    && features.feature_listing_premoderation === true);
   const attributes = [...new Set([
     ...(selectedCategory?.attributeKeys ?? []),
     ...(listing?.categoryId === categoryId ? Object.keys(listing?.specs ?? {}) : []),
   ])];
   const fieldHint = (name: string, hint?: string) => fieldError?.field === name
     ? <span role="alert" className="field-error">{t(fieldError.message)}</span> : (hint ? t(hint) : undefined);
+
+  useEffect(() => {
+    setPriceWarning(false);
+    if (priceMode !== 'FIXED' || !modelSelection.modelId || !/^\d+(\.\d{1,2})?$/.test(price)
+      || Number(price) <= 0 || Number(price) > maxUnitPrice
+      || !/^\d+$/.test(quantity) || Number(quantity) <= 50 || Number(quantity) > 1_000_000) return;
+    const controller = new AbortController();
+    const parameters = new URLSearchParams({ price, quantity, currency, deliveryIncluded: String(deliveryIncluded) });
+    const timer = window.setTimeout(() => {
+      void api<{ looksLikeTotal: boolean }>(`/models/${encodeURIComponent(modelSelection.modelId!)}/price-check?${parameters}`,
+        { signal: controller.signal }).then(result => {
+          if (!controller.signal.aborted) setPriceWarning(result.looksLikeTotal);
+        }).catch(() => undefined);
+    }, 300);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [priceMode, modelSelection.modelId, price, quantity, currency, deliveryIncluded]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -188,6 +227,7 @@ function ListingFields({
         counterparty: value('counterparty'),
         paymentMethods,
         specs,
+        ...(staffOwner && { staffSourceNote: value('staffSourceNote') }),
         ...(form.get('imageContactAcknowledged') === 'on' && { imageContactAcknowledged: true }),
         ...modelSelection,
         ...readListingRepresentation(form),
@@ -202,9 +242,13 @@ function ListingFields({
       });
       onSaved(saved);
     } catch (cause) {
-      if (cause instanceof ApiError && cause.field && ['CONTACT_IN_FIELD', 'PHOTO_CONTACT_CONFIRMATION_REQUIRED'].includes(cause.code ?? '')) {
+      if (cause instanceof ApiError && cause.field && ['CONTACT_IN_FIELD', 'PHOTO_CONTACT_CONFIRMATION_REQUIRED', 'MODEL_REQUIRED'].includes(cause.code ?? '')) {
         const control = element.elements.namedItem(cause.field === 'images' ? 'imageContactAcknowledged' : cause.field);
-        if (control instanceof HTMLElement) control.focus();
+        if (control instanceof HTMLElement) {
+          const group = control.closest('details');
+          if (group) group.open = true;
+          control.focus();
+        }
         setFieldError({ field: cause.field, message: cause.message });
       } else {
         setError(cause instanceof Error ? cause.message : 'Не удалось сохранить объявление.');
@@ -214,17 +258,43 @@ function ListingFields({
     }
   }
 
+  const titleField = (
+    <div className="workflow-span">
+      <Field label={t('Заголовок')} hint={fieldHint('title')}>
+        <input name="title" aria-invalid={fieldError?.field === 'title'} value={title} onChange={event => setTitle(event.target.value)} placeholder={t('Например, сервер с 4 × NVIDIA H100')} minLength={3} maxLength={140} required={!compact} />
+      </Field>
+    </div>
+  );
+
   return (
-    <form className="workflow-stack" onSubmit={submit} aria-busy={busy}>
+    <form className="workflow-stack" onSubmit={submit} aria-busy={busy} onInvalid={event => {
+      if (event.target instanceof HTMLElement) {
+        const group = event.target.closest('details');
+        if (group) group.open = true;
+      }
+    }}>
+      {!listing && sides.length === 2 && <section className="panel workflow-section">
+        <Field label={t('Что размещаете?')}>
+          <select name="kind" value={selectedKind} onChange={event => {
+            setSelectedKind(event.target.value as Kind);
+            setModelSelection({ modelId: null, analogModelIds: [] });
+          }}>
+            <option value="SELL">{t('Предложение (продаю)')}</option>
+            <option value="BUY">{t('Заявка (покупаю)')}</option>
+          </select>
+        </Field>
+      </section>}
       {user && <ListingRepresentationFields user={user} listing={listing} />}
+      {staffOwner && <>
+        <Field label={t('Откуда данные')} hint={t('Заметка доступна сотрудникам.')}>
+          <textarea name="staffSourceNote" minLength={5} maxLength={500} rows={2} required />
+        </Field>
+        <StaffRepresentationFields owner={staffOwner} />
+      </>}
       <section className="panel workflow-section">
         <h2>{t(isBuyer ? 'Какое оборудование нужно' : 'Какое оборудование продаётся')}</h2>
         <div className="form-grid workflow-form">
-          <div className="workflow-span">
-            <Field label={t('Заголовок')} hint={fieldHint('title')}>
-              <input name="title" aria-invalid={fieldError?.field === 'title'} value={title} onChange={event => setTitle(event.target.value)} placeholder={t('Например, сервер с 4 × NVIDIA H100')} minLength={3} maxLength={140} required />
-            </Field>
-          </div>
+          {!compact && titleField}
           <div className="workflow-span">
             <Field label={t('Категория')}>
               <select name="categoryId" value={categoryId} onChange={event => {
@@ -240,8 +310,12 @@ function ListingFields({
             </Field>
           </div>
           {selectedCategory && <div className="workflow-span">
-            <ListingModelFields categorySlug={selectedCategory.slug} title={title} buyer={isBuyer} canPropose={!admin}
-              {...modelSelection} onChange={setModelSelection} onSelectModel={model => setDraftSpecs(current => {
+            <ListingModelFields categorySlug={selectedCategory.slug} title={title} buyer={isBuyer} canPropose={!admin && !staffOwner}
+              required={selectedCategory.requiresModel} errorMessage={fieldError?.field === 'modelId' ? fieldError.message : undefined}
+              {...modelSelection} onChange={value => {
+                setModelSelection(value);
+                setFieldError(current => current?.field === 'modelId' ? undefined : current);
+              }} onSelectModel={model => setDraftSpecs(current => {
                 const values: Record<string, string> = {
                   'Модель': model.nameEn, 'Видеопамять': model.memoryGb ? model.memoryGb + ' ГБ' : '',
                   'Форм-фактор': model.formFactor ?? '', 'Количество GPU': model.gpuCount ? String(model.gpuCount) : '',
@@ -250,8 +324,10 @@ function ListingFields({
               })} />
           </div>}
           <Field label={t('Количество, шт.')}>
-            <input name="quantity" type="number" min={1} max={1_000_000} defaultValue={listing?.quantity ?? 1} required />
+            <input name="quantity" type="number" min={1} max={1_000_000} value={quantity} onChange={event => setQuantity(event.target.value)} required />
           </Field>
+          <OptionalListingFields compact={compact} title={t('Описание и характеристики')}>
+          {compact && titleField}
           {features.feature_matching === true && <Field label={t('Минимальная партия, шт.')}>
             <input name="minLot" type="number" min={1} max={1_000_000} defaultValue={listing?.minLot ?? 1} required />
           </Field>}
@@ -265,7 +341,7 @@ function ListingFields({
           </Field>
           <div className="workflow-span">
             <Field label={t('Описание')} hint={fieldHint('description', 'Укажите модель, конфигурацию и комплектацию. Для общения используйте чат.')}>
-              <textarea name="description" aria-invalid={fieldError?.field === 'description'} defaultValue={listing?.description} minLength={10} maxLength={8000} required />
+              <textarea name="description" aria-invalid={fieldError?.field === 'description'} defaultValue={listing?.description} minLength={10} maxLength={8000} required={!compact} />
             </Field>
           </div>
           {attributes.map(attribute => (
@@ -273,8 +349,10 @@ function ListingFields({
               <input name={`spec:${attribute}`} aria-invalid={fieldError?.field === `spec:${attribute}`} value={draftSpecs[attribute] ?? ''} onChange={event => setDraftSpecs(values => ({ ...values, [attribute]: event.target.value }))} maxLength={300} />
             </Field>
           ))}
+          </OptionalListingFields>
         </div>
       </section>
+      <OptionalListingFields compact={compact} title={t('Фотографии')}>
       <ListingImagesEditor drafts={photos} onChange={setPhotoDraft} disabled={busy} />
       {photoConfirmation && <div>
         <label className="workflow-checkbox">
@@ -283,6 +361,7 @@ function ListingFields({
         </label>
         {fieldHint('images')}
       </div>}
+      </OptionalListingFields>
       <section className="panel workflow-section">
         <h2>{t('Сроки и география')}</h2>
         <div className="form-grid workflow-form">
@@ -320,6 +399,7 @@ function ListingFields({
                 <option key={place.id} value={locale.startsWith('ru') ? place.city_ru : place.city_en} />)}</datalist>
             </Field>
           )}
+          <OptionalListingFields compact={compact} title={t('Сроки и условия поставки')}>
           {!isBuyer && (
             <CountrySelect
               label={t('Страна доставки')} name="destinationCountry" defaultValue={listing?.destinationCountry ?? ''}
@@ -336,8 +416,9 @@ function ListingFields({
           </Field>}
           <Field label={t(isBuyer ? 'Требуется доставка до' : 'Предложение действительно до')}
             hint={isBuyer ? undefined : t('Если указать дату, предложение будет видно в каталоге до конца этого дня по UTC.')}>
-            <input name="deliveryBy" type="date" min={hasPreviousDate ? undefined : earliestDate} defaultValue={listing?.deliveryBy?.slice(0, 10)} required={isBuyer} />
+            <input name="deliveryBy" type="date" min={hasPreviousDate ? undefined : earliestDate} defaultValue={listing?.deliveryBy?.slice(0, 10)} required={isBuyer && !compact} />
           </Field>
+          </OptionalListingFields>
         </div>
       </section>
       <section className="panel workflow-section">
@@ -350,13 +431,23 @@ function ListingFields({
             </select>
           </Field>
           <Field label={t('Валюта')}>
-            <select name="currency" defaultValue={listing?.currency ?? 'RUB'}>
+            <select name="currency" value={currency} onChange={event => setCurrency(event.target.value)}>
               {currencyChoices.map(([code, label]) => <option key={code} value={code}>{code} · {t(label)}</option>)}
             </select>
           </Field>
-          {priceMode === 'FIXED' && <Field label={t(isBuyer ? 'Бюджет до' : 'Цена')} hint={t('Укажите сумму за всё количество.')}>
-            <input name="price" type="number" min="0.01" step="0.01" max={9_999_999_999_999.99} defaultValue={listing?.price ?? ''} required />
-          </Field>}
+          {priceMode === 'FIXED' && <div>
+            <Field label={t(isBuyer ? 'Бюджет за шт., до' : 'Цена за шт.')} hint={t('Цена за одну единицу. Общая сумма считается сама.')}>
+              <input name="price" type="number" min="0.01" step="0.01" max={maxUnitPrice} value={price}
+                onChange={event => setPrice(event.target.value)} required />
+            </Field>
+            {Number(price) > 0 && Number(quantity) > 1 && <p className="muted">
+              {t('За {quantity} шт.: {price}', { quantity, price: formatMoney(Number(price) * Number(quantity), currency, locale) })}
+            </p>}
+            {priceWarning && <p role="status">
+              {t('Похоже, вы указали сумму за всё количество. Здесь нужна цена за одну штуку.')}
+            </p>}
+          </div>}
+          <OptionalListingFields compact={compact} title={t('Подробнее об условиях')}>
           <Field label={t('НДС')}>
             <select name="vat" defaultValue={listing?.vat ?? 'NA'}>
               <option value="INCLUDED">{t('Включён')}</option>
@@ -374,7 +465,7 @@ function ListingFields({
             <legend>{t('Что входит в сумму')}</legend>
             <div className="workflow-checkbox-list">
               <label className="workflow-checkbox">
-                <input type="checkbox" name="deliveryIncluded" defaultChecked={listing?.deliveryIncluded ?? false} /> {t('Доставка')}
+                <input type="checkbox" name="deliveryIncluded" checked={deliveryIncluded} onChange={event => setDeliveryIncluded(event.target.checked)} /> {t('Доставка')}
               </label>
               <label className="workflow-checkbox">
                 <input type="checkbox" name="customsIncluded" defaultChecked={listing?.customsIncluded ?? false} /> {t('Таможенное оформление и пошлины')}
@@ -392,8 +483,10 @@ function ListingFields({
               ))}
             </div>
           </fieldset>
+          </OptionalListingFields>
         </div>
       </section>
+      <OptionalListingFields compact={compact} title={t('Расчёты')}>
       {features.feature_trust_rating === true && <PaymentTerms selected={listing?.paymentTerms} />}
       {features.feature_matching === true && features.feature_trust_rating !== true && <fieldset className="panel workflow-section">
         <legend>{t('Условия расчёта')}</legend>
@@ -404,9 +497,11 @@ function ListingFields({
           </label>)}
         </div>
       </fieldset>}
+      </OptionalListingFields>
       {error && <Notice tone="error">{t(error)}</Notice>}
       <div className="workflow-actions">
-        <Button type="submit" disabled={busy}>{t(busy ? 'Сохраняем объявление…' : listing ? 'Сохранить изменения' : 'Опубликовать объявление')}</Button>
+        <Button type="submit" disabled={busy}>{t(busy ? 'Сохраняем объявление…' : staffOwner ? 'Отправить черновик владельцу' :
+          listing?.status === 'PENDING_OWNER' && !admin ? 'Сохранить и подтвердить объявление' : listing ? 'Сохранить изменения' : 'Опубликовать объявление')}</Button>
       </div>
     </form>
   );

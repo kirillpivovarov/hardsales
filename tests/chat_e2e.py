@@ -44,7 +44,7 @@ def external_overflow(page):
 
 def publish_listing(context, title, kind='SELL'):
     categories = response_json(context.request.get(f'{API}/categories'))
-    category = next(category for category in categories if category['active'])
+    category = next(category for category in categories if category['active'] and not category.get('requiresModel'))
     terms = {'availability': 'STOCK', 'stockCity': 'Москва', 'originCountry': 'RU'} if kind == 'SELL' else {
         'originScope': 'ANY', 'destinationCountry': 'RU',
         'deliveryBy': (date.today() + timedelta(days=30)).isoformat(),

@@ -1,16 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from './api';
+import { DisputeDisclosurePanel } from './Disputes';
+import { useExchange } from './Exchange';
 import { useI18n } from './i18n';
 import { countryName, formatMoney, terms } from './market';
+import { ListingPrice } from './ListingPrice';
 import { StaffDialog } from './StaffDialog';
+import { TelegramVerificationLabel } from './Telegram';
 import { Button, Field, Notice, Spinner } from './ui';
 import './exchange-detail.css';
 
-type Party = { nickname: string; companyName: string | null; participantType?: string; country: string; telegram?: string | null };
+type Party = { nickname: string; companyName: string | null; participantType?: string; country: string;
+  telegram?: string | null; telegramVerified?: boolean };
 type Snapshot = {
   id: string; title: string; kind: 'BUY' | 'SELL'; description?: string; quantity?: number; currency?: string;
-  price?: number | null; availability?: string; condition?: string; deliveryBy?: string; originCountry?: string;
+  price?: number | null; priceBasis?: 'UNIT'; totalPrice?: number | null;
+  availability?: string; condition?: string; deliveryBy?: string; originCountry?: string;
   destinationCountry?: string; paymentMethods?: string[]; deliveryIncluded?: boolean; customsIncluded?: boolean;
 };
 type RecordSummary = {
@@ -20,7 +26,9 @@ type RecordSummary = {
 };
 type RecordDetail = RecordSummary & {
   timezone: string; rulesVersion: string | null; requestedAt: string | null; counterListing: Snapshot | null;
-  events: Array<{ type: string; by?: string; at: string; data?: { text?: string } }>;
+  events: Array<{ type: string; by?: string; at: string; data?: {
+    text?: string; action?: string; status?: string; resultingStatus?: string; title?: string;
+  } }>;
 };
 type Page = { items: RecordSummary[]; page: number; limit: number; total: number; timezone: string };
 
@@ -65,6 +73,7 @@ function SummaryRows({ records, admin, onSelect, reload }: {
 
 function Known({ record, reload }: { record: RecordSummary; reload: () => void }) {
   const { t } = useI18n();
+  const [confirm, setConfirm] = useState<HTMLElement>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   if (record.alreadyKnown?.mine) return <span className="muted">{t('Отмечено: уже знакомы')}</span>;
@@ -74,6 +83,7 @@ function Known({ record, reload }: { record: RecordSummary; reload: () => void }
     setError('');
     try {
       await api('/disclosures/' + record.id + '/already-known', { method: 'POST' });
+      setConfirm(undefined);
       reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Не удалось сохранить отметку.');
@@ -82,8 +92,14 @@ function Known({ record, reload }: { record: RecordSummary; reload: () => void }
     }
   }
   return <>
-    <Button variant="secondary" disabled={pending} onClick={() => void mark()}>{t('Уже знакомы')}</Button>
-    {error && <Notice tone="error">{t(error)}</Notice>}
+    <Button variant="secondary" aria-haspopup="dialog" disabled={pending}
+      onClick={event => { setError(''); setConfirm(event.currentTarget); }}>{t('Уже знакомы')}</Button>
+    {confirm && <StaffDialog title={t('Подтвердить знакомство до раскрытия')} returnFocus={confirm}
+      closeDisabled={pending} onClose={() => setConfirm(undefined)}>
+      <p>{t('Отметка фиксирует, что вы знали собеседника до раскрытия контактов на площадке.')}</p>
+      {error && <Notice tone="error">{t(error)}</Notice>}
+      <Button disabled={pending} onClick={() => void mark()}>{t('Подтвердить')}</Button>
+    </StaffDialog>}
   </>;
 }
 
@@ -113,9 +129,13 @@ export function DisclosuresPage() {
 
 function SnapshotCard({ listing, title }: { listing: Snapshot; title: string }) {
   const { t, locale } = useI18n();
+  const quoted = listing.price != null && listing.currency;
+  const price = !quoted ? t('По договорённости') : listing.priceBasis === 'UNIT'
+    ? <ListingPrice listing={{ ...listing, price: listing.price ?? null, currency: quoted, quantity: listing.quantity ?? 1 }} />
+    : <>{formatMoney(listing.price!, quoted, locale)}<br />{t('Цена в снимке указана за всё количество.')}</>;
   const properties = [
     ['Количество', listing.quantity],
-    ['Цена', listing.price == null || !listing.currency ? t('По договорённости') : formatMoney(listing.price, listing.currency, locale)],
+    ['Цена', price],
     ['Состояние', listing.condition && t(terms[listing.condition] ?? listing.condition)],
     ['Наличие', listing.availability && t(terms[listing.availability] ?? listing.availability)],
     ['Страна отгрузки', listing.originCountry && countryName(listing.originCountry, locale)],
@@ -124,7 +144,7 @@ function SnapshotCard({ listing, title }: { listing: Snapshot; title: string }) 
     ['Оплата', listing.paymentMethods?.map(method => t(terms[method] ?? method)).join(', ')],
     ['Доставка', listing.deliveryIncluded === undefined ? null : t(listing.deliveryIncluded ? 'Включена' : 'Отдельно')],
     ['Оформление и пошлины', listing.customsIncluded === undefined ? null : t(listing.customsIncluded ? 'Включены' : 'Отдельно')],
-  ];
+  ] as const;
   return <section className="panel detail-panel">
     <h2>{title}</h2><p><strong>{listing.title}</strong></p>
     {listing.description && <p className="preserve-text">{listing.description}</p>}
@@ -136,6 +156,7 @@ function SnapshotCard({ listing, title }: { listing: Snapshot; title: string }) 
 
 function DisclosureRecord({ id, admin = false }: { id: string; admin?: boolean }) {
   const { t, locale } = useI18n();
+  const { features } = useExchange();
   const [revision, setRevision] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
@@ -147,7 +168,7 @@ function DisclosureRecord({ id, admin = false }: { id: string; admin?: boolean }
   if (!result.data) return <Notice tone="error">{t(result.error ?? 'Запись не найдена.')}</Notice>;
   const record = result.data;
   const eventLabels: Record<string, string> = {
-    ALREADY_KNOWN: 'Уже знакомы', DEAL_STATUS: 'Состояние сделки обновлено', DEAL_VERIFIED: 'Сделка проверена', ADMIN_NOTE: 'Заметка модератора',
+    ALREADY_KNOWN: 'Уже знакомы', DEAL_STATUS: 'Состояние сделки обновлено', DEAL_VERIFIED: 'Сделка проверена', ADMIN_NOTE: 'Заметка модератора', DISPUTE: 'Спор',
   };
   return <>
     <h2>{record.number}</h2>
@@ -156,18 +177,22 @@ function DisclosureRecord({ id, admin = false }: { id: string; admin?: boolean }
     {record.migrated && <Notice>{t('Условия и данные участников перенесены из прежней версии площадки.')}</Notice>}
     {[record.partner, record.partyA, record.partyB].filter(Boolean).map((party, index) => party && <div key={index} className="panel exchange-record">
       <strong>{party.nickname}</strong><span>{party.companyName ?? t('Частное лицо')}</span>
-      <span>{countryName(party.country, locale)}{party.telegram ? ' · @' + party.telegram.replace(/^@/, '') : ''}</span>
+      <span>{countryName(party.country, locale)}</span>
+      {party.telegram && <span>@{party.telegram.replace(/^@/, '')} · <TelegramVerificationLabel verified={party.telegramVerified} /></span>}
     </div>)}
     <SnapshotCard listing={record.listing} title={t('Объявление на момент раскрытия')} />
     {record.counterListing && <SnapshotCard listing={record.counterListing} title={t('Встречное объявление')} />}
     <section className="panel detail-panel">
       <h2>{t('События раскрытия')}</h2>
       {record.events.length ? <ul className="exchange-events">{record.events.map((event, index) => <li key={index}>
-        <strong>{t(eventLabels[event.type] ?? event.type)}</strong> · {localDate(event.at, locale, record.timezone)}
+        <strong>{t(event.type === 'DEAL_STATUS' && event.data?.resultingStatus === 'EXECUTED' ? 'Сделка исполнена'
+          : event.type === 'DEAL_STATUS' && event.data?.action === 'STARTED' ? 'Начата сделка' : eventLabels[event.type] ?? event.type)}</strong>
+        {' · '}{localDate(event.at, locale, record.timezone)}
         {event.by && <span className="muted"> · {t(event.by === 'mine' ? 'Вы' : event.by === 'partner' ? 'Собеседник' : 'Система')}</span>}
-        {event.data?.text && <p className="preserve-text">{event.data.text}</p>}
+        {(event.data?.text || event.data?.title) && <p className="preserve-text">{event.data.text ?? event.data.title}</p>}
       </li>)}</ul> : <p className="muted">{t('Событий пока нет.')}</p>}
     </section>
+    {!admin && features.feature_disputes === true && <DisputeDisclosurePanel id={record.id} />}
     {!admin && <div className="exchange-actions"><Link className="button button-secondary" to={'/chats/' + record.chatId}>{t('Открыть чат')}</Link><Known record={record} reload={reload} /></div>}
     {admin && <form className="panel exchange-record" onSubmit={async event => {
       event.preventDefault();

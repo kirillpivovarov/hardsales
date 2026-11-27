@@ -107,6 +107,7 @@ test('invite concurrency, questionnaire and rules gate', {
   const { data: categories } = await request('/categories', { status: 200 });
   const listing = {
     categoryId: categories.find(({ slug }) => slug === 'gpu').id,
+    modelId: 'h100-sxm',
     title: 'Тестовая заявка на ускорители ' + id,
     description: 'Заявка создана для проверки допуска после анкеты.',
     destinationCountry: 'RU',

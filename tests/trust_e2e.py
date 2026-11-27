@@ -83,7 +83,7 @@ def main():
         gpu = next(row for row in request(seller, "categories") if row["slug"] == "gpu")
         title = "Со склада H200 " + uuid4().hex[:8]
         listing = request(seller, "listings", "POST", {
-            "categoryId": gpu["id"], "title": title,
+            "categoryId": gpu["id"], "modelId": "h200-sxm", "title": title,
             "description": "Комплект оборудования на складе для проверки площадки.",
             "availability": "STOCK", "originCountry": "RU", "stockCity": "Казань",
             "paymentTerms": ["PREPAY_100"],
@@ -146,7 +146,10 @@ def main():
         for context in [seller, buyer]:
             request(context, deal_status, "POST", {"status": "EXECUTED"})
         interested.reload()
-        expect(interested.get_by_text("Сделка исполнена", exact=True)).to_be_visible()
+        expect(interested.locator(".trust-tag").filter(has_text=re.compile("^Сделка исполнена$"))).to_be_visible()
+        history = interested.get_by_role("region", name="История сделки")
+        expect(history.get_by_text("Сделка исполнена", exact=True)).to_be_visible()
+        expect(history.get_by_text("Исполнение подтверждено одной из сторон", exact=True)).to_be_visible()
         page.goto(BASE + "/admin?section=exchange&part=verification")
         page.get_by_role("link", name=deal["disclosureNumber"], exact=True).click()
         expect(page.get_by_role("heading", name=deal["disclosureNumber"], exact=True)).to_be_visible()

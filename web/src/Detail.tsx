@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
-import { api, ApiError, isStaff } from './api';
+import { api, ApiError, isStaff, tradeSidesFor } from './api';
 import type { User } from './api';
 import { ActualityBadges } from './ActualityWidgets';
 import { ListingExchangeBadges } from './ListingExchangeBadges';
@@ -13,7 +13,8 @@ import { StartChatButton } from './ChatPage';
 import { useI18n } from './i18n';
 import { ListingGallery } from './ListingImages';
 import { ListingPhotoReport } from './ListingPhotoReport';
-import { categoryName, countryName, formatMoney, terms } from './market';
+import { categoryName, countryName, terms } from './market';
+import { ListingPrice } from './ListingPrice';
 import type { Category, Listing } from './market';
 import { Icon, Notice, Spinner } from './ui';
 
@@ -22,6 +23,8 @@ const nonPublicStatus: Record<string, string> = {
   HIDDEN: 'Скрыто',
   FROZEN: 'Заморожено',
   BANNED: 'Заблокировано',
+  PENDING_OWNER: 'Ждёт подтверждения владельца',
+  PENDING_REVIEW: 'На проверке',
 };
 
 type ListingFact = [label: string, value: string | number | null];
@@ -97,9 +100,8 @@ export function ListingDetail({ user }: { user: User | null }) {
 
   const category = listing.category ?? categories.find(item => item.id === listing.categoryId);
   const ownerName = listing.owner.nickname ?? listing.owner.displayName ?? t('Участник');
-  const price = listing.price == null ? t('По договорённости') : (listing.kind === 'BUY' ? t('До {price}', {price: formatMoney(listing.price, listing.currency, locale)}) : formatMoney(listing.price, listing.currency, locale));
   const myListing = listing.owner.id === user.id;
-  const compatible = (user.role === 'BUYER' && listing.kind === 'SELL') || (user.role === 'SELLER' && listing.kind === 'BUY');
+  const compatible = tradeSidesFor(user).includes(listing.kind === 'SELL' ? 'BUY' : 'SELL');
   const companyOnly = listing.counterparty === 'COMPANY' && user.participantType !== 'COMPANY';
   const stringTerm = (value: string | null) => value ? t(terms[value] ?? value) : '';
   const localCountry = (value: string | null) => value ? countryName(value, locale) : '';
@@ -149,11 +151,25 @@ export function ListingDetail({ user }: { user: User | null }) {
       <aside className="panel detail-panel detail-seller">
         <div className="detail-offer-price">
           <span className="muted">{t(listing.kind === 'SELL' ? 'Цена' : 'Бюджет')}</span>
-          <strong className="detail-price">{price}</strong>
+          <ListingPrice listing={listing} className="detail-price" usd />
         </div>
         {features.feature_trust_rating === true && <PaymentRisk listing={listing} />}
+        {listing.representation === 'AGENT' && listing.agentFeeDisclosed === true && listing.agentFeeValue != null && <p className="muted">
+          {t('Вознаграждение агента')}{' '}
+          {new Intl.NumberFormat(locale).format(listing.agentFeeValue)}{' '}
+          {t(listing.agentFeeKind === 'PERCENT' ? '% от суммы' : 'за единицу')}
+          {listing.agentFeePayer && <> · {t(listing.agentFeePayer === 'BUYER' ? 'Платит покупатель' :
+            listing.agentFeePayer === 'SELLER' ? 'Платит продавец' : 'Платят обе стороны')}</>}
+        </p>}
         {myListing && <LotAppeal listing={listing} onSaved={reloadAfterModeration} />}
-        {myListing && ['ACTIVE','ARCHIVED'].includes(listing.status) && <Link className="button button-secondary" to={`/listings/${listing.id}/edit`}>{t('Редактировать')}</Link>}
+        {myListing && ['ACTIVE','ARCHIVED','PENDING_OWNER','PENDING_REVIEW'].includes(listing.status) &&
+          <Link className="button button-secondary" to={`/listings/${listing.id}/edit`}>{t('Редактировать')}</Link>}
+        {listing.createdByStaff && <p className="muted">
+          {t('Заведено модератором {date}', { date: new Date(listing.createdAt).toLocaleDateString(locale) })}
+          {listing.ownerConfirmedAt && ' · ' + t('Подтверждено владельцем {date}', { date: new Date(listing.ownerConfirmedAt).toLocaleDateString(locale) })}
+        </p>}
+        {myListing && listing.status === 'PENDING_OWNER' && <Notice>{t('Подтвердите черновик по ссылке из уведомления или сохраните исправления.')}</Notice>}
+        {myListing && listing.status === 'PENDING_REVIEW' && <Notice>{t('Объявление проверит модератор.')}{listing.reviewReturnNote && ' ' + listing.reviewReturnNote}</Notice>}
         {compatible && listing.status === 'ACTIVE' && (companyOnly
           ? <p className="muted">{t('Автор принимает обращения только от компаний.')}</p>
           : <StartChatButton listingId={listing.id} />)}

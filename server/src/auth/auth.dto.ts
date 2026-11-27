@@ -47,8 +47,10 @@ export class RegisterDto extends AcceptPolicyDto {
   @Length(4, 20, { message: INVALID_INVITE })
   inviteCode?: string;
 
-  @IsString({ message: 'Пройдите проверку CAPTCHA.' })
-  @Length(1, 2048, { message: 'Повторите проверку CAPTCHA.' })
+  @ValidateBy({
+    name: 'validCaptchaToken',
+    validator: { validate: (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 2048 },
+  }, { message: 'Пройдите проверку CAPTCHA.' })
   captchaToken!: string;
 
   @Transform(trimText)
@@ -65,8 +67,8 @@ export class RegisterDto extends AcceptPolicyDto {
   @Length(12, 128, { message: 'Пароль должен содержать от 12 до 128 символов.' })
   password!: string;
 
-  @IsIn(['BUYER', 'SELLER'], { message: 'Выберите роль покупателя или продавца.' })
-  role!: 'BUYER' | 'SELLER';
+  @IsIn(['BUYER', 'SELLER', 'BOTH'], { message: 'Укажите, покупаете вы, продаёте или совмещаете обе стороны.' })
+  role!: 'BUYER' | 'SELLER' | 'BOTH';
 
   @IsIn(['INDIVIDUAL', 'COMPANY'], { message: 'Выберите тип участника.' })
   participantType!: 'INDIVIDUAL' | 'COMPANY';

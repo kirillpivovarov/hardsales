@@ -32,6 +32,7 @@ export function StaffDialog({ title, onClose, children, closeDisabled = false, r
 
   return createPortal(<dialog ref={dialog} className="admin-dialog panel" aria-labelledby={titleId} onCancel={event => {
     event.preventDefault();
+    event.stopPropagation();
     if (!closeDisabled) onClose();
   }}>
     <div className="admin-dialog-header">

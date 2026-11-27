@@ -14,15 +14,19 @@ const actions = {
 } as const
 const reasons = ['Цена', 'Оплата', 'Сроки', 'Товар', 'Документы', 'Контрагент пропал', 'Другое']
 type DealStatus = keyof typeof labels
+export type ChatDealSummary = { id?: string; status?: DealStatus | null; amountMismatch?: boolean; canStart: boolean }
 type Agreement = { amount: number; quantity: number; currency: string }
 type Deal = {
   id: string; disclosureId: string; disclosureNumber: string
   sellerId: string; buyerId: string; sellTitle: string | null; buyTitle: string | null
+  partnerId: string | null; partnerName: string | null; chatId: string | null
   status: DealStatus; sellerAgreed: Agreement | null; buyerAgreed: Agreement | null; amountMismatch: boolean
   sellerExecutedAt: string | null; buyerExecutedAt: string | null
   failedReason: string | null; adminVerifiedAt: string | null; adminRejectedAt: string | null; adminNote: string | null
+  ratingNextEligibleAt?: string | null
   updatedAt: string
-  events?: { id: string; type: string; data: { status?: DealStatus; approved?: boolean; reason?: string }; actorUserId: string; createdAt: string }[]
+  events?: { id: string; type: string; data: { status?: DealStatus; resultingStatus?: DealStatus; action?: string;
+    approved?: boolean; reason?: string }; actorUserId: string | null; createdAt: string }[]
 }
 
 function dealTitle(deal: Deal) {
@@ -52,26 +56,58 @@ export function DealsPage() {
 function DealList() {
   const { t, locale } = useI18n()
   const [page, setPage] = useState(1)
-  const result = useTrustData<{ items: Deal[]; total: number }>('/deals?page=' + page + '&limit=20')
+  const [search, setSearch] = useSearchParams()
+  const selectedPartner = search.get('pairUserId')
+  const parameters = new URLSearchParams({ page: String(page), limit: '20' })
+  if (selectedPartner) parameters.set('pairUserId', selectedPartner)
+  const result = useTrustData<{ items: Deal[]; total: number }>('/deals?' + parameters)
+  const groups = new Map<string, Deal[]>()
+  for (const deal of result.data?.items ?? []) {
+    const key = deal.partnerId ?? ''
+    const group = groups.get(key) ?? []
+    group.push(deal)
+    groups.set(key, group)
+  }
   return <>
     {result.loading && <Spinner />}
     {result.error && <Notice tone="error">{t(result.error)}</Notice>}
-    {result.data?.total === 0 && <Notice>{t('Сделок пока нет. Новая сделка появится после первого раскрытия контактов.')}</Notice>}
-    {result.data && <ul className="trust-item-list">
-      {result.data.items.map(deal => <li key={deal.id}>
-        <div className="trust-heading">
-          <Link className="text-link" to={'/deals/' + deal.id}>{dealTitle(deal)}</Link>
-          <span className="trust-tag">{t(dealStatusLabel(deal))}</span>
-        </div>
-        <p className="muted">{deal.disclosureNumber} · {new Date(deal.updatedAt).toLocaleDateString(locale)}</p>
-      </li>)}
-    </ul>}
+    {selectedPartner && <Button variant="secondary" onClick={() => {
+      setPage(1)
+      setSearch({})
+    }}>{t('Все контрагенты')}</Button>}
+    {result.data?.total === 0 && <Notice>{t('Сделок пока нет.')}</Notice>}
+    {[...groups].map(([partner, group]) => <section className="panel workflow-section" key={partner}>
+      <div className="trust-heading">
+        <h2>{group[0].partnerName || t('Контрагент')}</h2>
+        {!selectedPartner && partner && <Button variant="ghost" onClick={() => {
+          setPage(1)
+          setSearch({ pairUserId: partner })
+        }}>{t('Все сделки с участником')}</Button>}
+      </div>
+      <ul className="trust-item-list" aria-label={t('Сделки по объявлениям')}>
+        {group.map(deal => <li key={deal.id}>
+          <div className="trust-heading">
+            <Link className="text-link" to={'/deals/' + deal.id}>{dealTitle(deal)}</Link>
+            <span className="trust-tag">{t(dealStatusLabel(deal))}</span>
+          </div>
+          <p className="muted">{deal.disclosureNumber} · {new Date(deal.updatedAt).toLocaleDateString(locale)}</p>
+          <DealRatingNote deal={deal} />
+        </li>)}
+      </ul>
+    </section>)}
     {result.data && (result.data.total > 20 || page > 1) && <nav className="admin-actions" aria-label={t('Страницы сделок')}>
       <Button variant="secondary" disabled={page <= 1} onClick={() => setPage(value => value - 1)}>{t('Назад')}</Button>
       <span>{page}</span>
       <Button variant="secondary" disabled={page * 20 >= result.data.total} onClick={() => setPage(value => value + 1)}>{t('Далее')}</Button>
     </nav>}
   </>
+}
+
+function DealRatingNote({ deal }: { deal: Deal }) {
+  const { t, locale } = useI18n()
+  return deal.ratingNextEligibleAt ? <p className="muted">{t('Сделка засчитана. Следующая сделка с этим контрагентом войдёт в рейтинг не раньше {date}.', {
+    date: new Date(deal.ratingNextEligibleAt).toLocaleDateString(locale),
+  })}</p> : null
 }
 
 function DealDetails({ id }: { id: string }) {
@@ -97,6 +133,7 @@ function DealDetails({ id }: { id: string }) {
         {deal.amountMismatch && <Notice>{t('Сумма, валюта или количество у сторон расходятся. Модератор увидит расхождение при проверке.')}</Notice>}
         {deal.failedReason && <p>{t('Причина')} · {t(reasonLabel(deal.failedReason))}</p>}
         {deal.adminVerifiedAt && <Notice tone="success">{t('Модератор подтвердил сделку.')}</Notice>}
+        <DealRatingNote deal={deal} />
         {deal.adminRejectedAt && <Notice>{t('Модератор не подтвердил сделку.')} {deal.adminNote}</Notice>}
         {(deal.status === 'NEGOTIATING' || deal.status === 'AGREED') && <DealStatusForm deal={deal}
           initial={search.get('status') ?? (search.get('action') === 'agree' ? 'AGREED' : null)}
@@ -106,19 +143,51 @@ function DealDetails({ id }: { id: string }) {
         <h2>{t('Документ по сделке')}</h2>
         <DocumentBox dealId={deal.id} kinds={['DEAL_DOC']} />
       </section>
-      {Boolean(deal.events?.length) && <section className="panel workflow-section">
-        <h2>{t('История сделки')}</h2>
+      {Boolean(deal.events?.length) && <section className="panel workflow-section" aria-labelledby="deal-history-title">
+        <h2 id="deal-history-title">{t('История сделки')}</h2>
         <ul className="trust-item-list">{deal.events?.map(event => <li key={event.id}>
           <strong>{event.type === 'DEAL_VERIFIED' ? t(event.data.approved ? 'Сделка подтверждена модератором' : 'Модератор не подтвердил сделку')
+            : event.data.action === 'STARTED' ? t('Сделка начата')
             : event.data.status ? t(event.data.status === 'AGREED' ? 'Условия указаны'
+              : event.data.resultingStatus === 'EXECUTED' ? 'Сделка исполнена'
               : event.data.status === 'EXECUTED' ? 'Исполнение подтверждено одной из сторон' : labels[event.data.status]) : t('Статус изменён')}</strong>
-          <p className="muted">{t(event.actorUserId === deal.sellerId ? 'Продавец' : event.actorUserId === deal.buyerId ? 'Покупатель' : 'Модератор')}
+          <p className="muted">{t(event.actorUserId === deal.sellerId ? 'Продавец' : event.actorUserId === deal.buyerId ? 'Покупатель'
+            : event.actorUserId ? 'Модератор' : 'Площадка')}
             {' · '}{new Date(event.createdAt).toLocaleString(locale)}</p>
           {event.data.reason && <p>{t(reasonLabel(event.data.reason))}</p>}
         </li>)}</ul>
       </section>}
     </>}
   </div>
+}
+
+export function ChatDealPanel({ deal, active, pending, onStart, onChanged }: {
+  deal: ChatDealSummary; active: boolean; pending: boolean; onStart: () => void; onChanged: () => void
+}) {
+  const { t } = useI18n()
+  const [open, setOpen] = useState(false)
+  const status = deal.status ?? 'NEGOTIATING'
+  const mayUpdate = active && (status === 'NEGOTIATING' || status === 'AGREED')
+  const { data, error, loading } = useTrustData<Deal>(open && deal.id && mayUpdate ? '/deals/' + deal.id : null)
+  if (!deal.id && (!deal.canStart || !active)) return null
+
+  return <section className="workflow-stack chat-deal-panel" aria-labelledby="chat-deal-title">
+    <div className="trust-heading">
+      <strong id="chat-deal-title">{t('Сделка по этому объявлению')}</strong>
+      {deal.id && <span className="trust-tag">{t(status === 'AGREED' && deal.amountMismatch ? 'Условия расходятся' : labels[status])}</span>}
+    </div>
+    <div className="workflow-actions">
+      {deal.id ? <>
+        {mayUpdate && <Button variant="secondary" aria-expanded={open} onClick={() => setOpen(value => !value)}>{t('Изменить статус сделки')}</Button>}
+        <Link className="button button-ghost" to={'/deals/' + deal.id}>{t('Открыть сделку')}</Link>
+      </> : <Button variant="secondary" disabled={pending} onClick={onStart}>{t('Начать сделку по этому объявлению')}</Button>}
+    </div>
+    {open && mayUpdate && <>
+      {loading && <Spinner />}
+      {error && <Notice tone="error">{t(error)}</Notice>}
+      {data && <DealStatusForm deal={data} initial={null} onSaved={() => { setOpen(false); onChanged() }} />}
+    </>}
+  </section>
 }
 
 function DealStatusForm({ deal, initial, onSaved }: { deal: Deal; initial: string | null; onSaved: () => void }) {

@@ -38,7 +38,8 @@ test('contact guard blocks transmission, preserves legacy ownership, audits esca
 
     const categories = await request(guest, '/categories');
     const listing = { title: 'Сервер для теста контактов', description: 'Конфигурация сервера с двумя ускорителями',
-      categoryId: categories.find(row => row.slug === 'servers').id, kind: 'SELL', stockCity: 'Москва', originCountry: 'RU' };
+      categoryId: categories.find(row => row.slug === 'servers').id, modelId: 'hgx-h100-8',
+      kind: 'SELL', stockCity: 'Москва', originCountry: 'RU' };
     const { id } = await request(seller, '/listings', 'POST', listing, 201);
     const chat = await request(buyer, '/chats', 'POST', { listingId: id }, 201);
     const path = '/chats/' + chat.id;
@@ -104,12 +105,13 @@ test('contact guard blocks transmission, preserves legacy ownership, audits esca
         await flag('feature_matching', true);
         const myTitle = 'Ищу сервер Dell PowerEdge R760';
         const { id: requestId } = await request(buyer, '/listings', 'POST', {
-          title: myTitle, description: 'Нужна рабочая конфигурация с гарантией', categoryId: listing.categoryId,
+          title: myTitle, description: 'Нужна рабочая конфигурация с гарантией', categoryId: listing.categoryId, modelId: listing.modelId,
           kind: 'BUY', destinationCountry: 'RU', deliveryBy: new Date(Date.now() + 86400000 * 7).toISOString().slice(0, 10),
         }, 201);
         const { rows: [match] } = await pool.query(`
           INSERT INTO listing_matches (sell_listing_id,buy_listing_id,seller_id,buyer_id,type)
-          VALUES ($1,$2,$3,$4,'FULL') RETURNING id
+          VALUES ($1,$2,$3,$4,'FULL')
+          ON CONFLICT (sell_listing_id,buy_listing_id) DO UPDATE SET type=EXCLUDED.type RETURNING id
         `, [legacyId, requestId, actorSeller, actorBuyer]);
         for (const row of [
           await request(buyer, '/matches/' + match.id),

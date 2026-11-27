@@ -79,7 +79,7 @@ export class LotDetection implements OnModuleInit {
     for (;;) {
       const { rows: page }: { rows: LotOffer[] } = await client.query<LotOffer>(`
         ${visibleCategories}
-        SELECT l.id,l.owner_id AS "ownerId",l.model_id AS "modelId",(l.price*f.usd_per_unit)::text AS "usdTotal"
+        SELECT l.id,l.owner_id AS "ownerId",l.model_id AS "modelId",(l.price*f.usd_per_unit)::text AS "usdPerUnit"
         FROM listings l JOIN users u ON u.id=l.owner_id JOIN fx_rates f ON f.currency=l.currency
         JOIN hardware_models h ON h.id=l.model_id AND h.status='ACTIVE'
         LEFT JOIN lot_group_members lm ON lm.listing_id=l.id AND lm.role IN ('MEMBER','PRIMARY')

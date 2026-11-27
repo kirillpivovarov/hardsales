@@ -1,4 +1,5 @@
 export type ParticipantRole = 'BUYER' | 'SELLER';
+export type TradeSide = 'BUY' | 'SELL';
 export type StaffRole = 'ADMIN' | 'MODERATOR';
 export type Role = ParticipantRole | StaffRole;
 export type ParticipantType = 'INDIVIDUAL' | 'COMPANY';
@@ -10,6 +11,14 @@ export function isStaffRole(role: Role): role is StaffRole {
   return role === 'ADMIN' || role === 'MODERATOR';
 }
 
+export function oppositeTradeSide(side: TradeSide): TradeSide {
+  return side === 'SELL' ? 'BUY' : 'SELL';
+}
+
+export function defaultTradeSide(role: ParticipantRole): TradeSide {
+  return role === 'SELLER' ? 'SELL' : 'BUY';
+}
+
 export interface UserRow {
   id: string;
   username: string;
@@ -17,6 +26,9 @@ export interface UserRow {
   email: string;
   password_hash: string;
   role: Role;
+  trade_sides: TradeSide[] | null;
+  onboarding_added_side: TradeSide | null;
+  verification_source: 'DOCUMENTS' | 'OPERATOR_KNOWN' | 'DEAL' | null;
   participant_type: ParticipantType | null;
   company_name: string | null;
   city: string | null;
@@ -43,6 +55,7 @@ export interface SessionUser<R extends Role = Role> {
   displayName: string;
   email: string;
   role: R;
+  tradeSides: TradeSide[];
   participantType: ParticipantType | null;
   companyName: string | null;
   city: string | null;
@@ -74,6 +87,7 @@ export function sessionUser(row: UserRow, rulesVersion: string, rulesEnabled: bo
     displayName: row.display_name,
     email: row.email,
     role: row.role,
+    tradeSides: row.trade_sides ?? [],
     participantType: row.participant_type,
     companyName: row.company_name,
     city: row.city,

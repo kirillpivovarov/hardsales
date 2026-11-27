@@ -1,0 +1,12 @@
+[Unit]
+Description=hwforai restore-check
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+StateDirectory=hwforai-backup
+StateDirectoryMode=0700
+EnvironmentFile=-/etc/hwforai/backup/monitor.env
+ExecStart=/usr/local/sbin/hwforai-restore-check

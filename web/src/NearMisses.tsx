@@ -41,7 +41,12 @@ function SideDetails({ side, sell }: { side: Side; sell: boolean }) {
       <div><dt>{t('Количество')}</dt><dd>{t('{count} шт. (партия от {min})', { count: side.quantity, min: side.minLot })}</dd></div>
       {origin && <div><dt>{t('Страна отгрузки')}</dt><dd>{origin}</dd></div>}
       {side.destinationCountry && <div><dt>{t('Страна доставки')}</dt><dd>{countryName(side.destinationCountry, locale)}</dd></div>}
-      <div><dt>{t('Цена за единицу')}</dt><dd>{side.unitPrice === null ? t('По договорённости') : formatMoney(side.unitPrice, side.currency, locale)}</dd></div>
+      <div><dt>{t('Цена за единицу')}</dt><dd>{side.unitPrice === null ? t('По договорённости') : <>
+        {formatMoney(side.unitPrice, side.currency, locale)}
+        {side.quantity > 1 && <div className="muted">{t('{price} за {quantity} шт.', {
+          price: formatMoney(side.unitPrice * side.quantity, side.currency, locale), quantity: side.quantity,
+        })}</div>}
+      </>}</dd></div>
       {side.shipDays !== null && <div><dt>{t('Срок отгрузки')}</dt><dd>{t('{count} раб. дн. после оплаты', { count: side.shipDays })}</dd></div>}
       {side.deliveryBy && <div><dt>{t('Доставка до')}</dt><dd>{formatDate(side.deliveryBy + 'T12:00:00')}</dd></div>}
       {side.confirmedAt && <div><dt>{t('Подтверждено')}</dt><dd>{formatDate(side.confirmedAt)}</dd></div>}

@@ -1,0 +1,14 @@
+.dispute-detail, .dispute-panel, .dispute-form, .dispute-list { min-width: 0; overflow-wrap: anywhere; }
+.dispute-detail > header { display: grid; gap: 8px; }
+.dispute-detail > header > * { margin: 0; }
+.dispute-panel { display: grid; gap: 12px; justify-items: start; }
+.dispute-panel .exchange-records { width: 100%; }
+.dispute-list { display: grid; gap: 12px; padding: 0; list-style: none; }
+.dispute-list > li { padding: 12px 0; border-top: 1px solid var(--line); }
+.dispute-detail .panel > p, .dispute-detail .panel h3 { margin-block: 0 10px; }
+.dispute-form { display: grid; align-items: start; gap: 16px; }
+.dispute-form > .button { justify-self: start; }
+.dispute-form select, .dispute-form input, .dispute-form textarea { width: 100%; min-width: 0; max-width: 100%; }
+.dispute-form .field { min-width: 0; }
+.dispute-deadline { display: inline-block; }
+.dispute-overdue { color: var(--danger); }

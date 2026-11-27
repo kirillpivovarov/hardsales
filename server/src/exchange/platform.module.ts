@@ -41,6 +41,12 @@ class PlatformController {
     return this.notifications.list((await this.auth.require(request)).id, query);
   }
 
+  @Get('notifications/counts')
+  async notificationCounts(@Req() request: Request) {
+    const user = await this.auth.require(request);
+    return this.notifications.counts(user.id, user.role === 'BUYER' || user.role === 'SELLER');
+  }
+
   @Patch('notifications/:id/read')
   async read(@Req() request: Request, @Param('id') id: string) {
     return this.notifications.mark((await this.auth.require(request)).id, id);

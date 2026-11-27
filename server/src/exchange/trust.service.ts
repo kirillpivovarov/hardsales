@@ -3,7 +3,8 @@ import type { PoolClient } from 'pg'
 import { DatabaseService } from '../database/database.service'
 import { ExchangeJobs } from './jobs'
 import { PlatformSettings } from './platform-settings'
-import { countEligibleDeals, levelNames, listingLimit, participantRating } from './trust-score'
+import { countEligibleDeals, listingLimit, participantRating } from './trust-score'
+import { verificationLevelName } from './verification-requirements'
 
 type RatingUser = {
   id: string; verification_level: number; role: string; status: string; representation_mode: string
@@ -91,7 +92,7 @@ export class TrustService implements OnApplicationBootstrap {
       const { rows: [user] } = await client.query(`
         SELECT verification_requested_at AS "verificationRequestedAt", verified_at AS "verifiedAt",
           verification_rejected_at AS "verificationRejectedAt", verification_note AS "verificationNote",
-          publish_ban_at AS "publishBanAt", publish_ban_note AS "publishBanNote"
+          publish_ban_at AS "publishBanAt", publish_ban_note AS "publishBanNote", verification_source AS source
         FROM users WHERE id = $1
       `, [userId])
       const { rows: dayCodes } = await client.query(`
@@ -100,7 +101,7 @@ export class TrustService implements OnApplicationBootstrap {
         ORDER BY issued_at DESC LIMIT 30
       `, [userId])
       return {
-        ...rating, penalties, dayCodes, ...user, levelName: levelNames[rating.level],
+        ...rating, penalties, dayCodes, ...user, levelName: verificationLevelName(rating.level, user.source),
         listingLimit: listingLimit(rating.level, rating.total), listingsUsed: await this.listingUse(client, userId),
       }
     })
@@ -108,7 +109,7 @@ export class TrustService implements OnApplicationBootstrap {
 
   private async listingUse(client: PoolClient, userId: string) {
     const { rows: [value] } = await client.query<{ count: number }>(`
-      SELECT count(*)::int AS count FROM listings WHERE owner_id = $1 AND status IN ('ACTIVE','HIDDEN')
+      SELECT count(*)::int AS count FROM listings WHERE owner_id = $1 AND status IN ('ACTIVE','HIDDEN','PENDING_REVIEW')
     `, [userId])
     return value.count
   }
@@ -121,6 +122,7 @@ export class TrustService implements OnApplicationBootstrap {
     `, [userId])
     if (!user) return undefined
 
+    const disputes = await this.settings.enabled('feature_disputes', client)
     const { rows: [metrics] } = await client.query<RatingMetrics>(`
       WITH response_times AS (
         SELECT seller_first_action_at AS acted_at, created_at FROM listing_matches WHERE seller_id = $1
@@ -150,18 +152,23 @@ export class TrustService implements OnApplicationBootstrap {
               AND (p.confirmed_at IS NULL OR p.removed_at IS NOT NULL)
           )
         ) AS principals_confirmed,
-        (
+        CASE WHEN $2 THEN (
+          SELECT count(*)::int FROM dispute_decisions d WHERE d.loser_id=u.id AND d.penalty<>'NONE'
+            AND d.decided_at>=now()-interval '365 days' AND NOT EXISTS (
+              SELECT 1 FROM dispute_decisions later WHERE later.dispute_id=d.dispute_id AND later.round>d.round
+            )
+        ) ELSE (
           SELECT count(*)::int FROM reports r WHERE r.subject_id = u.id AND r.reason = 'FRAUD' AND r.status = 'RESOLVED'
             AND EXISTS (
               SELECT 1 FROM moderation_audit a WHERE a.entity = 'reports' AND a.entity_id = r.id::text
                 AND a.action = 'status-changed' AND a.after_data->>'status' = 'RESOLVED'
                 AND a.created_at >= now() - interval '365 days'
             )
-        ) AS lost,
+        ) END AS lost,
         coalesce((SELECT sum(points)::int FROM user_penalties p
           WHERE p.user_id = u.id AND p.created_at >= now() - interval '365 days'), 0) AS penalties
       FROM users u WHERE u.id = $1
-    `, [userId])
+    `, [userId, disputes])
 
     const { rows: verified } = await client.query<{ counterparty: string; verified_at: Date }>(`
       SELECT other.id AS counterparty, d.admin_verified_at AS verified_at

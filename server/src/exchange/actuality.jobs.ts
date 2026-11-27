@@ -1,5 +1,6 @@
 import { Injectable, OnModuleInit } from '@nestjs/common'
 import type { PoolClient } from 'pg'
+import { publicListingTitle } from '../contact-guard/public-text'
 import { ExchangeActions } from './actions'
 import { ActualityService } from './actuality.service'
 import { ExchangeJobs } from './jobs'
@@ -158,13 +159,16 @@ export class ActualityJobs implements OnModuleInit {
         ) ORDER BY id LIMIT $4 FOR UPDATE SKIP LOCKED
       `, [ownerId, clock.now, Boolean(owner.actuality_suspended_at), sweepLimit - processed])
       const missed: Due[] = []
+      const archived: Due[] = []
       for (const listing of rows) {
         if (listing.expires_at && listing.expires_at <= clock.now) {
-          await this.archiveExpired(client, ownerId, listing, clock, 'EXPIRED')
+          await this.archiveExpired(client, listing.id, clock, 'EXPIRED')
+          archived.push(listing)
         } else if (owner.actuality_suspended_at) {
           await this.hideRestricted(client, [listing.id], clock.now)
         } else if (listing.status === 'HIDDEN') {
-          await this.archiveExpired(client, ownerId, listing, clock, 'HIDDEN_7D')
+          await this.archiveExpired(client, listing.id, clock, 'HIDDEN_7D')
+          archived.push(listing)
         } else {
           await client.query(`
             UPDATE listing_actuality_asks SET missed_at = $3, on_time = false
@@ -177,6 +181,7 @@ export class ActualityJobs implements OnModuleInit {
         }
         processed++
       }
+      if (archived.length) await this.listingDigest(client, ownerId, archived, clock, 'archived')
       if (missed.length) {
         const suspended = await this.actuality.missedDays(client, ownerId, clock.day) >= 3
         if (suspended) {
@@ -195,7 +200,8 @@ export class ActualityJobs implements OnModuleInit {
             dedupeKey: `actuality.suspended:${ownerId}:${clock.day}`, channels: ['EMAIL'],
           })
         }
-        for (const listing of missed) await this.notifyHidden(client, ownerId, listing, clock, suspended)
+        if (!suspended) await this.listingDigest(client, ownerId, missed, clock, 'hidden')
+        for (const listing of missed) await this.notifyChatHidden(client, listing, clock)
         await this.trust.refresh(client, ownerId)
       }
       processed += (await this.actuality.finishPause(client, ownerId, clock.now, sweepLimit - processed)).restored
@@ -211,36 +217,49 @@ export class ActualityJobs implements OnModuleInit {
     `, [ids, now])
   }
 
-  private async archiveExpired(client: PoolClient, ownerId: string, listing: Due, clock: Clock, reason: 'EXPIRED' | 'HIDDEN_7D') {
+  private async archiveExpired(client: PoolClient, listingId: string, clock: Clock, reason: 'EXPIRED' | 'HIDDEN_7D') {
     await client.query(`
       UPDATE listings SET status = 'ARCHIVED', archived_at = $2, archived_reason = $3, updated_at = $2 WHERE id = $1
-    `, [listing.id, clock.now, reason])
-    await this.notifications.notify(client, ownerId, {
-      kind: 'actuality.archived', title: 'Объявление в архиве',
-      body: `«${listing.title}» в архиве. Его можно восстановить в разделе «Мои объявления».`,
-      payload: { listingId: listing.id, reason },
-      actions: [{ label: 'Открыть', href: '/my-listings', action: 'listing.open' }],
-      dedupeKey: `actuality.archived:${listing.id}:${clock.now.toISOString()}`,
-    })
+    `, [listingId, clock.now, reason])
   }
 
-  private async notifyHidden(client: PoolClient, ownerId: string, listing: Due, clock: Clock, suspended: boolean) {
-    if (!suspended) {
+  private async listingDigest(client: PoolClient, ownerId: string, listings: Pick<Due, 'id' | 'title'>[],
+    clock: Clock, state: 'hidden' | 'archived') {
+    const hidden = state === 'hidden'
+    const kind = 'actuality.' + state
+    const dedupeKey = `${kind}:${ownerId}:${clock.day}`
+    const { rows: [existing] } = await client.query<{ id: string; payload: { listings: { id: string; title: string }[] } }>(
+      'SELECT id,payload FROM notifications WHERE user_id=$1 AND dedupe_key=$2 FOR UPDATE', [ownerId, dedupeKey],
+    )
+    const items = new Map((existing?.payload.listings ?? []).map(item => [item.id, item]))
+    for (const { id, title } of listings) items.set(id, { id, title })
+    if (existing && existing.payload.listings.length === items.size) return
+    const grammar = new Intl.PluralRules('ru').select(items.size)
+    const noun = grammar === 'one' ? 'объявление' : grammar === 'few' ? 'объявления' : 'объявлений'
+    const title = `${hidden ? 'Скрыто без ответа' : 'Перенесено в архив'}: ${items.size} ${noun}`
+    const instruction = hidden ? 'Вернуть объявления можно в течение 7 дней.' : 'Объявления можно восстановить в разделе «Мои объявления».'
+    const names = Array.from(items.values()).map(item => '• ' + item.title).join('\n')
+    const body = [title, names.slice(0, 3700), instruction].join('\n\n')
+    const payload = { count: items.size, listings: Array.from(items.values()) }
+    if (existing) {
+      await client.query('UPDATE notifications SET title=$2,body=$3,payload=$4,read_at=NULL WHERE id=$1',
+        [existing.id, title, body, JSON.stringify(payload)])
+    } else {
       await this.notifications.notify(client, ownerId, {
-        kind: 'actuality.hidden', title: 'Объявление скрыто',
-        body: `«${listing.title}» скрыто: нет ответа 24 часа. Вернуть его можно в течение 7 дней.`,
-        payload: { listingId: listing.id },
-        actions: [{ label: 'Вернуть', href: '/my-listings', action: 'listing.restore' }],
-        dedupeKey: `actuality.hidden:${listing.id}:${clock.now.toISOString()}`, channels: ['EMAIL'],
+        kind, title, body, payload, dedupeKey, priority: 3, channels: ['EMAIL'],
+        actions: [{ label: 'Мои объявления', href: '/my-listings', action: hidden ? 'listing.restore' : 'listing.open' }],
       })
     }
+  }
+
+  private async notifyChatHidden(client: PoolClient, listing: Due, clock: Clock) {
     const { rows: chats } = await client.query<{ id: string; visitor_id: string }>(`
       SELECT id, visitor_id FROM chats WHERE listing_id = $1
     `, [listing.id])
     for (const chat of chats) {
       await this.notifications.notify(client, chat.visitor_id, {
         kind: 'actuality.chat_hidden', title: 'Объявление скрыто',
-        body: `«${listing.title}» скрыто: автор не подтвердил актуальность. Переписку можно продолжить.`,
+        body: `«${publicListingTitle(listing.title)}» скрыто: автор не подтвердил актуальность. Переписку можно продолжить.`,
         payload: { listingId: listing.id, chatId: chat.id },
         actions: [{ label: 'Открыть чат', href: `/chats/${chat.id}`, action: 'chat.open' }],
         dedupeKey: `actuality.chat-hidden:${chat.id}:${clock.now.toISOString()}`,
@@ -283,8 +302,10 @@ export class ActualityJobs implements OnModuleInit {
         purpose: 'listing.actuality', userId: ownerId, subjectId: listing.id,
         payload: { askedAt: listing.asked_at.toISOString() }, expiresAt,
       })
-      const price = listing.price === null ? 'по договорённости'
-        : new Intl.NumberFormat('ru', { style: 'currency', currency: listing.currency }).format(Number(listing.price))
+      const format = new Intl.NumberFormat('ru', { style: 'currency', currency: listing.currency })
+      const unitPrice = listing.price === null ? null : Number(listing.price)
+      const price = unitPrice === null ? 'по договорённости' : format.format(unitPrice) + ' за шт.'
+        + (listing.quantity > 1 ? ` (${format.format(unitPrice * listing.quantity)} за ${listing.quantity} шт.)` : '')
       const line = `${listing.title} · ${listing.quantity} шт. · ${price}`
       body.push(line)
       if (telegramLines.length < 7) telegramLines.push(line)

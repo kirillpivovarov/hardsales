@@ -112,9 +112,19 @@ export class ChatsController {
     return this.chats.create(await this.auth.participant(request), body)
   }
 
+  @Get('unread-count')
+  async unreadCount(@Req() request: Request) {
+    return this.chats.unreadCount(await this.auth.participant(request))
+  }
+
   @Get(':id')
   async detail(@Req() request: Request, @Param('id') id: string) {
     return this.chats.detail(await this.auth.participant(request), id)
+  }
+
+  @Post(':id/deal')
+  async startDeal(@Req() request: Request, @Param('id') id: string) {
+    return this.chats.startDeal(await this.auth.participant(request), id)
   }
 
   @Get(':id/messages')

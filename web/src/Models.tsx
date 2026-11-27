@@ -28,7 +28,7 @@ interface ModelOptions {
   groups: { id: string; familyCode: string; categorySlug: string; rack: boolean }[];
   categories: { slug: string; name: string }[];
 }
-interface ModelSuggestion { id: string; nameRu: string; matchedAlias: string }
+interface ModelSuggestion { id: string; nameRu: string; matchedAlias: string; score: number }
 
 function useModelData<T>(path: string | null, revision = 0, keepPreviousData = false) {
   const [result, setResult] = useState<{ path: string; revision: number; data?: T; error?: string }>();
@@ -73,12 +73,14 @@ function modelPath(category: string, q = '') {
   return `/models?${query}`;
 }
 
-function ModelPicker({ families, value, id, emptyLabel = 'Без модели', onChange }: {
-  families: ModelFamily[]; value: string; id?: string; emptyLabel?: string; onChange: (value: string, model?: HardwareModel) => void;
+function ModelPicker({ families, value, id, name, required, invalid, emptyLabel = 'Без модели', onChange }: {
+  families: ModelFamily[]; value: string; id?: string; name?: string; required?: boolean; invalid?: boolean;
+  emptyLabel?: string; onChange: (value: string, model?: HardwareModel) => void;
 }) {
   const { t, locale } = useI18n();
   const find = (id: string) => families.flatMap(group => group.models).find(model => model.id === id);
-  return <select id={id} value={value} onChange={event => onChange(event.target.value, find(event.target.value))}>
+  return <select id={id} name={name} value={value} required={required} aria-invalid={invalid}
+    onChange={event => onChange(event.target.value, find(event.target.value))}>
     <option value="">{t(emptyLabel)}</option>
     {value && !find(value) && <option value={value}>{value}</option>}
     {families.map(family => <optgroup key={family.key} label={t(family.label)}>
@@ -90,8 +92,10 @@ function ModelPicker({ families, value, id, emptyLabel = 'Без модели', 
 }
 
 type ListingModelValue = { modelId: string | null; analogModelIds: string[] };
-export function ListingModelFields({ categorySlug, title, modelId, analogModelIds, buyer, canPropose = true, onChange, onSelectModel }: {
+export function ListingModelFields({ categorySlug, title, modelId, analogModelIds, buyer, canPropose = true,
+  required, errorMessage, onChange, onSelectModel }: {
   categorySlug: string; title: string; modelId: string | null; analogModelIds: string[]; buyer: boolean; canPropose?: boolean;
+  required?: boolean; errorMessage?: string;
   onChange: (value: ListingModelValue) => void; onSelectModel?: (model: HardwareModel) => void;
 }) {
   const { t, locale } = useI18n();
@@ -113,7 +117,7 @@ export function ListingModelFields({ categorySlug, title, modelId, analogModelId
   const analogs = useModelData<{ group: HardwareModel[]; others: ModelFamily[] }>(buyer && modelId && categorySlug
     ? `/models/${encodeURIComponent(modelId)}/analogs` : null, revision);
   const families = all.data?.families ?? [];
-  if (!categorySlug || (families.length === 0 && !modelId && !all.error)) return null;
+  if (!categorySlug || (!required && families.length === 0 && !modelId && !all.error)) return null;
 
   function select(id: string, model?: HardwareModel) {
     onChange({ modelId: id || null, analogModelIds: id === modelId ? analogModelIds : [] });
@@ -132,10 +136,6 @@ export function ListingModelFields({ categorySlug, title, modelId, analogModelId
         method: 'POST', signal: controller.signal, body: { name: proposalName.trim(), category: categorySlug },
       });
       if (controller.signal.aborted) return;
-      if (!families.flatMap(group => group.models).some(model => model.categorySlug === result.model.categorySlug)) {
-        setError('Модель относится к другой категории. Выберите подходящую категорию.');
-        return;
-      }
       select(result.model.id, result.model);
       setFilter('');
       setProposalName('');
@@ -160,14 +160,26 @@ export function ListingModelFields({ categorySlug, title, modelId, analogModelId
     </label>)}</div>;
   }
 
-  const first = suggest.data?.items[0];
+  const suggestions = suggest.data?.items.filter(item => item.score === suggest.data?.items[0]?.score) ?? [];
+  const allModels = families.flatMap(group => group.models);
+  const explanation = modelId && allModels.some(model => model.id === modelId && model.status === 'PENDING')
+    ? 'Поиск совпадений начнётся после проверки модели.'
+    : required ? 'Выберите модель из справочника. Без неё площадка не найдёт встречные объявления.'
+      : 'Необязательно. С моделью из справочника площадка может найти встречные объявления.';
   return <div className="model-fields workflow-span">
-    {first && <div className="model-inline"><span>{t('Похоже на {name}', { name: first.nameRu })}</span>
-      <Button variant="secondary" onClick={() => select(first.id, families.flatMap(group => group.models).find(model => model.id === first.id))}>{t('Выбрать')}</Button>
+    {suggestions.length === 1 && <div className="model-inline"><span>{t('Похоже на {name}', { name: suggestions[0].nameRu })}</span>
+      <Button variant="secondary" onClick={() => select(suggestions[0].id, allModels.find(model => model.id === suggestions[0].id))}>{t('Выбрать')}</Button>
+    </div>}
+    {suggestions.length > 1 && <div className="model-inline" role="group" aria-label={t('Уточните модель')}>
+      <span>{t('Уточните модель')}</span>
+      {suggestions.map(item => <Button variant="secondary" key={item.id}
+        onClick={() => select(item.id, allModels.find(model => model.id === item.id))}>{item.nameRu}</Button>)}
     </div>}
     <Field label={t('Поиск модели по справочнику')}><input type="search" value={filter} maxLength={200} onChange={event => setFilter(event.target.value)} /></Field>
-    <Field label={t('Модель по справочнику')} hint={t('Необязательно. С моделью из справочника площадка может найти встречные объявления.') }>
-      <ModelPicker families={search ? filtered.data?.families ?? [] : families} value={modelId ?? ''} onChange={select} />
+    <Field label={t('Модель по справочнику')} hint={errorMessage
+      ? <span role="alert" className="field-error">{t(errorMessage)}</span> : t(explanation)}>
+      <ModelPicker name="modelId" required={required} invalid={Boolean(errorMessage)} emptyLabel={required ? 'Выберите модель' : 'Без модели'}
+        families={search ? filtered.data?.families ?? [] : families} value={modelId ?? ''} onChange={select} />
     </Field>
     {canPropose && <Button variant="ghost" aria-expanded={proposal} onClick={() => { setProposal(current => !current); setMessage(''); }}>{t('Нет в списке: предложить модель')}</Button>}
     {canPropose && proposal && <div className="model-form">

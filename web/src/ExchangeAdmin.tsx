@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { User } from './api';
 import { AdminDisclosures } from './Disclosures';
-import { ExchangeJobRuns, ExchangeSettings } from './Exchange';
+import { AdminDisputes } from './Disputes';
+import { ExchangeJobRuns, ExchangeSettings, useExchange } from './Exchange';
 import { InvitesPanel, UserOnboardingAnswers } from './InviteAdmin';
 import { FxRatesPanel, MatchAdminPanel } from './Matches';
 import { CatalogModelsPage } from './Models';
@@ -13,14 +15,17 @@ import { AdminLotsPanel } from './LotGroups';
 import { PilotMetrics } from './PilotMetrics';
 import { TelegramAdmin } from './Telegram';
 import { useI18n } from './i18n';
+import { InvitationReadiness, MailQueuePanel, PilotOperations } from './PilotOperations';
 
 const sections = {
   models: 'Модели оборудования',
   disclosures: 'Журнал раскрытий',
+  disputes: 'Споры',
   principals: 'Принципалы',
   matching: 'Совпадения',
   verification: 'Проверки и сделки',
   jobs: 'Фоновые задачи',
+  mail: 'Письма',
   invites: 'Приглашения',
   settings: 'Настройки биржи',
   rates: 'Курсы валют',
@@ -38,13 +43,16 @@ type Section = keyof typeof sections;
 
 export default function ExchangeAdministration({ user }: { user: User }) {
   const { t } = useI18n();
+  const { features } = useExchange();
   const [query] = useSearchParams();
+  const [settingsRevision, setSettingsRevision] = useState(0);
   const administrator = user.role === 'ADMIN';
   const requested = query.get('part');
   const participant = query.get('userId');
-  const navigation: Section[] = ['models', 'disclosures', 'principals', 'matching', 'verification', 'jobs', 'pilot', 'lots'];
-  if (administrator) navigation.push('invites', 'settings', 'rates', 'corridors', 'contact-blocks', 'telegram', 'data-requests');
-  const section = administrator && participant && (requested === 'onboarding' || requested === 'user-consents') ? requested :
+  const navigation: Section[] = ['models', 'disclosures', 'principals', 'matching', 'verification', 'jobs', 'mail', 'pilot', 'lots', 'invites'];
+  if (features.feature_disputes === true) navigation.push('disputes');
+  if (administrator) navigation.push('settings', 'rates', 'corridors', 'contact-blocks', 'telegram', 'data-requests');
+  const section = participant && (requested === 'onboarding' || administrator && requested === 'user-consents') ? requested :
     navigation.find(key => key === requested) ?? navigation[0];
 
   return <div className="workflow-stack">
@@ -55,12 +63,17 @@ export default function ExchangeAdministration({ user }: { user: User }) {
     </nav>
     {section === 'models' && <CatalogModelsPage user={user} />}
     {section === 'disclosures' && <AdminDisclosures />}
+    {section === 'disputes' && <AdminDisputes />}
     {section === 'principals' && <AdminPrincipals />}
     {section === 'matching' && <MatchAdminPanel />}
     {section === 'verification' && <VerificationAdmin isAdmin={administrator} />}
     {section === 'jobs' && <ExchangeJobRuns administrator={administrator} />}
-    {section === 'invites' && <InvitesPanel />}
-    {section === 'settings' && <ExchangeSettings />}
+    {section === 'mail' && <MailQueuePanel />}
+    {section === 'invites' && <>{administrator && <InvitationReadiness />}<InvitesPanel administrator={administrator} /></>}
+    {section === 'settings' && <>
+      <PilotOperations onApplied={() => setSettingsRevision(value => value + 1)} />
+      <ExchangeSettings key={settingsRevision} />
+    </>}
     {section === 'rates' && <FxRatesPanel />}
     {section === 'corridors' && <PriceCorridorsAdmin />}
     {section === 'pilot' && <PilotMetrics isAdmin={administrator} />}

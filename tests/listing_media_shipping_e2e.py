@@ -73,7 +73,8 @@ def fill_listing(page, title, source, paths=(), buyer=False):
     page.goto("/listings/new")
     expect(page.get_by_role("heading", name="Новое объявление")).to_be_visible()
     field(page, "title").fill(title)
-    field(page, "categoryId").select_option(index=1)
+    categories = page.request.get("/api/v1/categories").json()
+    field(page, "categoryId").select_option(next(category["id"] for category in categories if category["slug"] == "cpu"))
     field(page, "description").fill("Тестовое объявление для проверки фотографий и географии поставки.")
     field(page, "priceMode").select_option("NEGOTIABLE")
     if buyer:

@@ -44,7 +44,7 @@ function presentSide(side: Candidate) {
     model: presentModel(side.model), modelByTitle: !side.model_id && Boolean(side.model),
     quantity: side.quantity, minLot: side.min_lot, originCountry: side.origin_country, originScope: side.origin_scope,
     destinationCountry: side.destination_country, currency: side.currency, shipDays: side.ship_days, deliveryBy: side.delivery_by,
-    unitPrice: side.price === null ? null : Number(side.price) / side.quantity, confirmedAt: side.confirmed_at,
+    unitPrice: side.price === null ? null : Number(side.price), confirmedAt: side.confirmed_at,
   };
 }
 
@@ -301,10 +301,12 @@ export class NearMissesService {
 
   private async announce(client: PoolClient, match: MatchRow, mine: Candidate, other: Candidate,
     mismatches: { key: string; text: string }[], comment: string) {
-    const unitPrice = other.price === null ? 'договорная цена'
-      : new Intl.NumberFormat('ru-RU', { style: 'currency', currency: other.currency }).format(Number(other.price) / other.quantity) + ' за ед.';
+    const formatter = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: other.currency });
+    const price = other.price === null ? null : Number(other.price);
+    const unitPrice = price === null ? 'договорная цена' : `${formatter.format(price)} за шт.`;
+    const fullPrice = price !== null && other.quantity > 1 ? `${formatter.format(price * other.quantity)} за ${other.quantity} шт.` : null;
     const location = matchRegion(other.kind === 'SELL' ? other.origin_country : other.destination_country);
-    const details = [other.model?.nameRu, `${other.quantity} шт.`, location, unitPrice].filter(Boolean).join(', ');
+    const details = [other.model?.nameRu, `${other.quantity} шт.`, location, unitPrice, fullPrice].filter(Boolean).join(', ');
     const differences = mismatches.length ? `\nНе сошлось: ${mismatches.map(item => item.text).join('. ')}` : '';
     await this.notifications.notify(client, mine.owner_id, {
       kind: 'match.new', title: 'Модератор предлагает совпадение',

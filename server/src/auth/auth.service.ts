@@ -13,13 +13,15 @@ import { DatabaseService, type Queryable } from '../database/database.service';
 import { assertCompanyAlias } from '../exchange/disclosure-names';
 import { INVALID_INVITE, INVITE_NO_LONGER_AVAILABLE, InvitesService, type AvailableInvite } from '../exchange/invites.service';
 import { OnboardingService } from '../exchange/onboarding.service';
+import { onboardingGroups } from '../exchange/onboarding.questions';
+import { object } from '../market/market.inputs';
 import {
   assertPolicyVersion, assertRegistrationAvailable, CONSENT_REQUIRED, policyRequired, policyVersion,
   recordConsent, registrationAvailable, type ConsentEvidence,
 } from '../privacy/policy';
 import { codesMatch, hashCode, hashPassword, hashToken, passwordMatches, strongAdminPassword } from './auth.crypto';
 import type { AcceptPolicyDto, CreateModeratorDto, CredentialsDto, LoginDto, ProfileDto, RegisterDto } from './auth.dto';
-import { isStaffRole, type ParticipantRole, type SessionUser, type StaffSession, type UserRow } from './auth.types';
+import { defaultTradeSide, isStaffRole, type ParticipantRole, type SessionUser, type StaffSession, type TradeSide, type UserRow } from './auth.types';
 import { MailService } from './mail.service';
 import { CAPTCHA_TTL, createRegistrationCaptcha, verifyRegistrationCaptcha } from './captcha';
 
@@ -181,6 +183,10 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
         throw new BadRequestException(INVALID_INVITE);
       }
       if (invite.preset_role && invite.preset_role !== profile.role) {
+        if (profile.role === 'BOTH') {
+          const side = invite.preset_role === 'SELLER' ? 'продавца' : 'покупателя';
+          throw new BadRequestException(`Приглашение выдано для ${side}. Вторую сторону добавьте в профиле после входа.`);
+        }
         throw new BadRequestException('Приглашение выдано для другой роли');
       }
     }
@@ -282,7 +288,7 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
 
       let user: UserRow | undefined;
       if (challenge.purpose === 'REGISTER') {
-        if (!pending || (pending.role !== 'BUYER' && pending.role !== 'SELLER')) return null;
+        if (!pending || !['BUYER', 'SELLER', 'BOTH'].includes(pending.role)) return null;
         if (!pending.pdConsentVersion || !pending.pdConsentAt) {
           await client.query('DELETE FROM email_challenges WHERE id = $1', [id]);
           return { error: 'consent' } as const;
@@ -290,22 +296,30 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
         const consentAt = new Date(pending.pdConsentAt);
         const registration = await this.invites.lockRegistration(client);
         if (!pending.inviteId && registration.mode === 'INVITE') throw new ConflictException(INVITE_NO_LONGER_AVAILABLE);
-        const invite = pending.inviteId ? await this.invites.lockAvailable(client, pending.inviteId, pending.role) : null;
+        const role = pending.role === 'BUYER' ? 'BUYER' : 'SELLER';
+        const tradeSides = pending.role === 'BOTH' ? ['BUY', 'SELL'] : [defaultTradeSide(role)];
+        const invite = pending.inviteId ? await this.invites.lockAvailable(client, pending.inviteId, role) : null;
+        if (invite?.preset_role && pending.role === 'BOTH') throw new ConflictException(INVITE_NO_LONGER_AVAILABLE);
         user = (await client.query<UserRow>(`
           INSERT INTO users (username, display_name, email, password_hash, role, participant_type,
             company_name, city, country, telegram, email_verified_at, invite_id, onboarding_state,
-            pd_consent_version, pd_consent_at, info_email_consent)
-          VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13, $14)
+            pd_consent_version, pd_consent_at, info_email_consent, trade_sides)
+          VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13, $14, $15)
           ON CONFLICT DO NOTHING RETURNING *
-        `, [pending.username, pending.email, pending.passwordHash, pending.role, pending.participantType,
+        `, [pending.username, pending.email, pending.passwordHash, role, pending.participantType,
           pending.participantType === 'COMPANY' ? pending.companyName : null,
           pending.city, pending.country, pending.telegram.replace(/^@/, ''), invite?.id ?? null,
-          registration.enabled || invite ? 'REQUIRED' : 'EXEMPT', pending.pdConsentVersion, consentAt,
-          pending.infoEmailConsent === true])).rows[0];
+          registration.enabled || invite || pending.role === 'BOTH' ? 'REQUIRED' : 'EXEMPT', pending.pdConsentVersion, consentAt,
+          pending.infoEmailConsent === true, tradeSides])).rows[0];
         if (user) await recordConsent(client, user.id, pending.pdConsentVersion, 'REGISTRATION',
           { at: consentAt, ip: pending.consentIp, userAgent: pending.consentUserAgent },
           { pd: true, infoEmail: pending.infoEmailConsent === true });
-        if (invite && user) await this.invites.consume(client, invite, user.id, user.display_name);
+        if (invite && user) {
+          await this.invites.consume(client, invite, user.id, user.display_name);
+          if (invite.known_personally) {
+            user = (await client.query<UserRow>('SELECT * FROM users WHERE id=$1', [user.id])).rows[0];
+          }
+        }
       } else {
         user = (await client.query<UserRow>('SELECT * FROM users WHERE id = $1 FOR UPDATE', [challenge.user_id])).rows[0];
       }
@@ -377,6 +391,50 @@ export class AuthService implements OnApplicationBootstrap, OnApplicationShutdow
     const user = await this.require(request, allowPendingConsent);
     if (isStaffRole(user.role)) throw new ForbiddenException('Действие доступно покупателям и продавцам.');
     return { ...user, role: user.role };
+  }
+
+  async changeTradeSides(request: Request, raw: unknown): Promise<SessionUser> {
+    const owner = await this.participant(request);
+    const values = object(raw).tradeSides;
+    if (!Array.isArray(values) || values.length < 1 || values.length > 2 ||
+        values.some(side => side !== 'BUY' && side !== 'SELL') || new Set(values).size !== values.length) {
+      throw new BadRequestException('Выберите хотя бы одну сторону: покупка или продажа.');
+    }
+    const tradeSides = (['BUY', 'SELL'] as const).filter(side => values.includes(side));
+    return this.db.transaction(async client => {
+      const version = await policyVersion(client, true);
+      const { rows: [current] } = await client.query<UserRow>(`
+        SELECT * FROM users u WHERE id=$1 AND status='ACTIVE' AND email_verified_at IS NOT NULL
+          AND role IN ('BUYER','SELLER') AND NOT must_change_password
+          AND EXISTS (SELECT 1 FROM auth_sessions WHERE token_hash=$2 AND user_id=$1 AND expires_at>now())
+        FOR UPDATE
+      `, [owner.id, hashToken(sessionToken(request)!)]);
+      if (!current) throw new ForbiddenException('Профиль недоступен.');
+      if (current.pd_consent_version !== version) throw policyRequired();
+      const currentSides = current.trade_sides!;
+      const removed = currentSides.filter(side => !tradeSides.includes(side));
+      if (removed.length && (await client.query(`
+        SELECT 1 FROM listings WHERE owner_id=$1 AND kind=ANY($2::text[])
+          AND status IN ('ACTIVE','HIDDEN','PENDING_REVIEW','PENDING_OWNER') LIMIT 1
+      `, [owner.id, removed])).rowCount) throw new ConflictException('Сначала архивируйте объявления этого вида');
+      const added = tradeSides.find(side => !currentSides.includes(side));
+      const questions = onboardingGroups.find(group => group.key === (added === 'BUY' ? 'buyer' : 'seller'))?.questions ?? [];
+      let addedSide: TradeSide | null = current.onboarding_added_side;
+      let state = current.onboarding_state;
+      if (addedSide && !tradeSides.includes(addedSide)) {
+        addedSide = null;
+        state = 'DONE';
+      }
+      if (added && questions.some(question => question.required && !current.onboarding_answers[question.id]?.trim())) {
+        if (state !== 'REQUIRED') addedSide = added;
+        state = 'REQUIRED';
+      }
+      const { rows: [updated] } = await client.query<UserRow>(`
+        UPDATE users SET trade_sides=$2,onboarding_state=$3,onboarding_added_side=$4,updated_at=now()
+        WHERE id=$1 RETURNING *
+      `, [owner.id, tradeSides, state, addedSide]);
+      return this.onboarding.presentUser(updated, client);
+    });
   }
 
   async acceptPolicy(request: Request, input: AcceptPolicyDto, evidence: ConsentEvidence): Promise<SessionUser> {

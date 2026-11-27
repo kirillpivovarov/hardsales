@@ -9,6 +9,7 @@ import { DatabaseService, type Queryable } from '../database/database.service'
 import { assertCompanyAlias } from '../exchange/disclosure-names'
 import { representationEnabled } from '../exchange/representation.rules'
 import { TrustService } from '../exchange/trust.service'
+import { persistAccountStatus } from './account-status'
 import { CatalogService } from './catalog.service'
 import { ListingMediaService, type ListingImageUpload } from './listing-media.service'
 import {
@@ -55,7 +56,7 @@ const reportJoins = 'FROM reports r LEFT JOIN users a ON a.id = r.reporter_id JO
 
 const statusTables = {
   users: { choices: accountStatuses, table: 'users' },
-  listings: { choices: listingStatuses.filter(status => status !== 'HIDDEN'), table: 'listings' },
+  listings: { choices: listingStatuses.filter(status => status !== 'HIDDEN' && !status.startsWith('PENDING_')), table: 'listings' },
   reviews: { choices: reviewStatuses, table: 'reviews' },
   reports: { choices: reportStatuses, table: 'reports' },
 } as const
@@ -279,6 +280,9 @@ export class AdminService {
       `, [id])
       const before = rows[0]
       if (!before) throw new NotFoundException('Запись не найдена')
+      if (entity === 'listings' && (before.status === 'PENDING_OWNER' || before.status === 'PENDING_REVIEW')) {
+        throw new ConflictException('Завершите проверку или дождитесь подтверждения владельца')
+      }
       if (entity === 'listings' && status === 'ACTIVE' && before.duplicate_of) {
         throw new ConflictException('Верните объявление через раздел «Дубли лотов».')
       }
@@ -303,7 +307,7 @@ export class AdminService {
         }
         const extra = {
           reports: ', resolution = $3',
-          users: ', updated_at = now(), credential_version = credential_version + 1',
+          users: '',
           listings: `, updated_at = now(), expires_at = CASE
             WHEN $2 = 'ACTIVE' AND (status = 'ARCHIVED' OR expires_at IS NULL OR expires_at <= now())
             THEN greatest(now(), (SELECT starts_at FROM actuality_activation WHERE singleton AND ${actualityRequestedSql}))
@@ -312,8 +316,8 @@ export class AdminService {
           reviews: '',
         }[entity]
         const values = entity === 'reports' ? [id, status, reason] : [id, status]
-        await client.query(`UPDATE ${table} SET status = $2${extra} WHERE id = $1`, values)
-        if (entity === 'users') await client.query('DELETE FROM auth_sessions WHERE user_id = $1', [id])
+        if (entity === 'users') await persistAccountStatus(client, id, status as typeof accountStatuses[number])
+        else await client.query(`UPDATE ${table} SET status = $2${extra} WHERE id = $1`, values)
         if (listingOwner) await this.trust.refresh(client, listingOwner)
       }
       await this.audit(client, currentActor, entity, id, changed ? 'status-changed' : 'status-unchanged', reason,
@@ -429,21 +433,29 @@ export class AdminService {
   async content(admin = false) {
     const { rows } = await this.db.query(`
       SELECT key, translations, active, updated_at AS "updatedAt"
-      FROM site_content WHERE $1 OR active ORDER BY key
+      FROM site_content WHERE $1 OR (active AND key<>'rules_draft') ORDER BY key
     `, [admin])
     return rows
   }
 
   async saveContent(actor: StaffActor, keyInput: string, raw: unknown) {
-    const key = slug(keyInput, 'Код страницы')
+    const key = ['pd_policy', 'rules_draft', 'rules_upcoming'].includes(keyInput) ? keyInput : slug(keyInput, 'Код страницы')
     const body = object(raw)
-    const active = boolean(body.active ?? true, 'Публикация')
+    const active = key !== 'rules_draft' && boolean(body.active ?? true, 'Публикация')
     const translations = this.localized(body.translations, true, value => ({
       title: str(value.title, 'Заголовок', 2, 140),
       body: str(value.body, 'Текст', 1, 20000),
     }))
     return this.staffTransaction(actor, async (client, currentActor) => {
       await client.query('SELECT pg_advisory_xact_lock(32915, hashtext($1))', [key])
+      if (['pd_policy', 'rules', 'rules_draft', 'rules_upcoming'].includes(key) && currentActor.role !== 'ADMIN') {
+        throw new ForbiddenException('Эту страницу редактирует администратор')
+      }
+      if (key === 'rules_upcoming') throw new ConflictException('Новая версия управляется в настройках правил')
+      if (key === 'rules') {
+        const committed = await client.query("SELECT 1 FROM preset_runs WHERE preset='TRIAL' LIMIT 1")
+        if (committed.rowCount) throw new ConflictException('Измените заготовку правил и запланируйте её публикацию')
+      }
       const { rows: previous } = await client.query('SELECT key, translations, active FROM site_content WHERE key = $1', [key])
       const { rows } = await client.query(`
         INSERT INTO site_content (key, translations, active) VALUES ($1, $2, $3)

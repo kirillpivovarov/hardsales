@@ -17,7 +17,7 @@ const { lotComponents, recommendLotPrimary } = require('../dist/lots/lot-rules.j
 const integrationDatabase = process.env.HWFORAI_LOTS_TEST_DATABASE_URL
 
 test('lot graph uses exact five-percent boundary, distinct sellers and durable exclusions', () => {
-  const make = (id, usdTotal, ownerId = id) => ({ id, ownerId, usdTotal, modelId: 'h200' })
+  const make = (id, usdPerUnit, ownerId = id) => ({ id, ownerId, usdPerUnit, modelId: 'h200' })
   const a = make('a', '100000.0000000000')
   const equal = make('b', '105000.0000000000')
   const high = make('c', '105000.0000000100')

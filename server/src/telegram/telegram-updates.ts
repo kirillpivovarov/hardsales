@@ -1,5 +1,6 @@
 import { BadRequestException, HttpException, Injectable, Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
+import { TELEGRAM_PATTERN } from '../auth/auth.dto';
 import { DatabaseService } from '../database/database.service';
 import { ExchangeActions } from '../exchange/actions';
 import { ActualityJobs } from '../exchange/actuality.jobs';
@@ -7,7 +8,7 @@ import { dealFailureReasons } from '../exchange/deals.service';
 import type { NotificationAction } from '../exchange/notifications';
 import { PlatformSettings } from '../exchange/platform-settings';
 import { declineReasons } from '../matching/matching.rules';
-import { TelegramApi, type TelegramCallback, type TelegramKeyboard, type TelegramMessage,
+import { TelegramApi, type TelegramButton, type TelegramCallback, type TelegramKeyboard, type TelegramMessage,
   type TelegramPerson, type TelegramUpdate } from './telegram-api';
 import { callback, noticeKeyboard, parseActualityChange, parseDecimal, urlButton, type TelegramNotice } from './telegram-buttons';
 import { telegramToken } from './telegram-config';
@@ -60,15 +61,29 @@ export class TelegramUpdates {
         ON CONFLICT DO NOTHING`, [update.update_id, kind]);
       if (!rowCount || !telegramToken() || !await this.settings.enabled('feature_telegram', client)) return [];
       let answer: Effect[];
+      let chatId: number;
+      let sender: TelegramPerson;
       if (update.callback_query && typeof update.callback_query.id === 'string' &&
         privateMessage(update.callback_query.message, update.callback_query.from)) {
-        await this.lockConversation(client, update.callback_query.message.chat.id);
+        chatId = update.callback_query.message.chat.id;
+        sender = update.callback_query.from;
+        await this.lockConversation(client, chatId);
         answer = await this.onCallback(client, update.callback_query, update.callback_query.message);
       } else if (privateMessage(update.message)) {
-        await this.lockConversation(client, update.message.chat.id);
+        chatId = update.message.chat.id;
+        sender = update.message.from;
+        await this.lockConversation(client, chatId);
         answer = await this.onMessage(client, update.message);
       }
       else return [];
+      // Business actions lock the actor and any counterparty in their normal order before this single-user write.
+      const names = await this.links.observeUsername(client, String(chatId), sender);
+      if (names && !names.verified && names.username && TELEGRAM_PATTERN.test(names.username)) {
+        const profile = names.profileUsername ? `@${names.profileUsername}` : 'не указан';
+        answer.push(this.reply(String(chatId),
+          `Ник в профиле площадки (${profile}) не совпадает с вашим Telegram @${names.username}. Для обмена контактами можно выбрать актуальный ник.`,
+          { text: `Использовать @${names.username}`, callback_data: `u:${names.username}` }));
+      }
       await client.query('UPDATE telegram_updates SET handled=true WHERE update_id=$1', [update.update_id]);
       return answer;
     });
@@ -87,7 +102,7 @@ export class TelegramUpdates {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 49011))', [String(chatId)]);
   }
 
-  private reply(chatId: string, text: string, button?: ReturnType<typeof urlButton>): Effect {
+  private reply(chatId: string, text: string, button?: TelegramButton): Effect {
     const markup = button ? { reply_markup: { inline_keyboard: [[button]] } } : {};
     return () => this.api.call('sendMessage', { chat_id: chatId, text, ...markup, link_preview_options: { is_disabled: true } });
   }
@@ -173,8 +188,13 @@ export class TelegramUpdates {
 
   private async onCallback(client: PoolClient, query: TelegramCallback, message: TelegramMessage): Promise<Effect[]> {
     const chatId = String(message.chat.id);
-    const user = await this.links.findMember(client, chatId, query.from);
     const ack = (text?: string) => this.callbackAnswer(query.id, text);
+    const nickname = typeof query.data === 'string' && /^u:([A-Za-z][A-Za-z0-9_]{4,31})$/.exec(query.data);
+    if (nickname) {
+      const result = await this.links.adoptUsername(client, chatId, query.from, nickname[1]);
+      return [ack(result)];
+    }
+    const user = await this.links.findMember(client, chatId, query.from);
     const fields = typeof query.data === 'string' && /^n:([1-9]\d{0,18}):([0-9]|[1-4][0-9]):([A-Z0-9]{1,8})$/.exec(query.data);
     if (!user || !fields || BigInt(fields[1]) > 9223372036854775807n) return [ack('Эта кнопка не для вас')];
     if (user.status !== 'ACTIVE') return [ack(profileUnavailable)];
@@ -199,7 +219,9 @@ export class TelegramUpdates {
       }
       const body = this.actionBody(action, code);
       if (!body) return [ack('Эта кнопка недоступна')];
-      const planned = await this.execute(client, chatId, user.id, action, body, message.message_id);
+      const beforeExecute = action.action === 'chat.reveal'
+        ? () => this.links.observeUsername(client, chatId, query.from) : undefined;
+      const planned = await this.execute(client, chatId, user.id, action, body, message.message_id, beforeExecute);
       return [ack(planned.text), ...planned.effects];
     } catch (error) {
       if (!(error instanceof HttpException) || error.getStatus() >= 500) throw error;
@@ -250,7 +272,7 @@ export class TelegramUpdates {
     return async () => {
       const ask = await this.api.call<TelegramMessage>('sendMessage', { chat_id: chatId, reply_markup: { force_reply: true },
         text: kind === 'ACTUALITY_CHANGE'
-          ? 'Напишите новую цену за всё количество и (или) количество. Например: цена 1890000; количество 6'
+          ? 'Напишите новую цену за шт. и (или) количество. Например: цена 1890000; количество 6'
           : 'Напишите согласованный размер вознаграждения. Например: 4,5',
       });
       await this.db.query('UPDATE telegram_dialogs SET prompt_message_id=$2 WHERE chat_id=$1 AND expires_at=$3',
@@ -259,10 +281,10 @@ export class TelegramUpdates {
   }
 
   private async execute(client: PoolClient, chatId: string, userId: string, action: NotificationAction,
-    body: object, messageId: number): Promise<{ text: string; effects: Effect[]; retryDialog?: boolean }> {
+    body: object, messageId: number, beforeExecute?: () => Promise<unknown>): Promise<{ text: string; effects: Effect[]; retryDialog?: boolean }> {
     await client.query('SAVEPOINT telegram_button');
     try {
-      const result = await this.actions.runForUser(action.token!, body, userId, client, chatId) as { chatId?: string; message?: string };
+      const result = await this.actions.runForUser(action.token!, body, userId, client, chatId, beforeExecute) as { chatId?: string; message?: string };
       await client.query('RELEASE SAVEPOINT telegram_button');
       const text = action.action === 'listing.actuality' && (body as { answer?: string }).answer === 'WITHDRAWN' ? 'Объявление снято'
         : action.action === 'listing.extend' ? 'Срок продлён' : result.chatId ? 'Чат открыт' : result.message ?? 'Подтверждено';

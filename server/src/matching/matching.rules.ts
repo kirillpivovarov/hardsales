@@ -98,9 +98,9 @@ function compareTerms(sell: ListingForMatch, buy: ListingForMatch, rates: Rates,
   } else if (!sellRate || !buyRate) {
     mismatches.push({ key: 'PRICE_UNKNOWN', text: `Курс валюты ${!sellRate ? sell.currency : buy.currency} не задан: цену нужно сравнить вручную` });
   } else {
-    // Cross-multiplication preserves the 5% threshold for decimal amounts and rates.
-    const asking = fixedDecimal(sell.price, 2) * fixedDecimal(sellRate, 8) * BigInt(buy.quantity);
-    const budget = fixedDecimal(buy.price, 2) * fixedDecimal(buyRate, 8) * BigInt(sell.quantity);
+    // Compare unit prices exactly, preserving the 5% threshold with decimal FX rates.
+    const asking = fixedDecimal(sell.price, 2) * fixedDecimal(sellRate, 8);
+    const budget = fixedDecimal(buy.price, 2) * fixedDecimal(buyRate, 8);
     if (asking * 100n > budget * 105n) priceOver = Number(asking - budget) / Number(budget);
     else if (asking > budget) {
       const over = (100 * Number(asking - budget) / Number(budget)).toFixed(1).replace('.', ',');

@@ -5,7 +5,8 @@ import { api } from './api'
 import { useExchange } from './Exchange'
 import { useI18n } from './i18n'
 import { ListingExchangeBadges } from './ListingExchangeBadges'
-import { formatMoney, type Listing } from './market'
+import { ListingPrice } from './ListingPrice'
+import type { Listing } from './market'
 import { StaffDialog } from './StaffDialog'
 import { documentStatuses, type TrustDocument, useTrustData } from './Trust'
 import { Button, Field, Notice, Spinner } from './ui'
@@ -39,8 +40,9 @@ export function LotAlternatives({ listing, returnTo }: { listing: Listing; retur
       {open && result.data && <ul className="lot-alternatives">
         {result.data.items.map(offer => <li key={offer.id}>
           <Link to={'/listings/' + offer.id} state={{ returnTo }} className="text-link">{offer.title}</Link>
-          <p>{offer.owner.nickname || offer.owner.displayName} · {offer.price === null ? t('По договорённости') : formatMoney(offer.price, offer.currency, locale)}
+          <p>{offer.owner.nickname || offer.owner.displayName}
             {offer.owner.rating != null && ' · ★ ' + offer.owner.rating.toLocaleString(locale)}</p>
+          <ListingPrice listing={offer} usd />
           <ListingExchangeBadges listing={offer} /><ActualityBadges listing={offer} />
         </li>)}
       </ul>}
@@ -279,7 +281,7 @@ function StaffLotDetails({ lot, onChange, onBusy }: { lot: AdminLot; onChange: (
             {lot.status === 'OPEN' && member.mandateStatus === 'PENDING' && member.mandateDocumentId &&
               <Button variant="secondary" onClick={() => select('approve', member.mandateDocumentId!)}>{t('Одобрить мандат')}</Button>}
           </td>
-          <td>{member.pricePerUnit !== null && <p>{formatMoney(member.pricePerUnit, member.currency, locale)} {t('за штуку')}</p>}
+          <td><ListingPrice listing={{ kind: 'SELL', price: member.pricePerUnit, currency: member.currency, quantity: member.quantity }} />
             <p>{t('Количество')}: {member.quantity}</p>
             {member.listingConfirmedAt && <p>{t('Актуальность')}: {actualityDate(member.listingConfirmedAt, locale)}</p>}
             {member.trustScore != null && <p>{t('Рейтинг объявления')}: {member.trustScore}</p>}

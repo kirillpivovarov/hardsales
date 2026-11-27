@@ -4,7 +4,7 @@ import { outsideContact } from '../contact'
 
 export const kinds = ['SELL', 'BUY'] as const
 export const accountTypes = ['INDIVIDUAL', 'COMPANY'] as const
-export const listingStatuses = ['ACTIVE', 'FROZEN', 'BANNED', 'ARCHIVED', 'HIDDEN'] as const
+export const listingStatuses = ['ACTIVE', 'FROZEN', 'BANNED', 'ARCHIVED', 'HIDDEN', 'PENDING_OWNER', 'PENDING_REVIEW'] as const
 export const accountStatuses = ['ACTIVE', 'FROZEN', 'BANNED'] as const
 export const reviewStatuses = ['ACTIVE', 'HIDDEN', 'BANNED'] as const
 export const reportStatuses = ['OPEN', 'RESOLVED', 'REJECTED'] as const
@@ -53,9 +53,14 @@ export function boolean(value: unknown, label: string): boolean {
   throw new BadRequestException(`${label}: ожидается логическое значение`)
 }
 
-export function priceValue(value: unknown, label: string, minimum = 0.01): number {
+export const maxUnitPrice = 999_999_999.99
+
+export function priceValue(value: unknown, label: string, minimum = 0.01, maximum = 9_999_999_999_999.99): number {
   const result = typeof value === 'string' && /^\d+(\.\d{1,2})?$/.test(value) ? Number(value) : value
-  if (typeof result !== 'number' || !Number.isFinite(result) || result < minimum || result > 9999999999999.99 || !/^\d+(\.\d{1,2})?$/.test(String(result))) {
+  if (typeof result === 'number' && result > maximum && maximum === maxUnitPrice) {
+    throw new BadRequestException(`${label}: не больше 999 999 999,99`)
+  }
+  if (typeof result !== 'number' || !Number.isFinite(result) || result < minimum || result > maximum || !/^\d+(\.\d{1,2})?$/.test(String(result))) {
     throw new BadRequestException(`${label}: укажите корректную сумму с точностью до сотых`)
   }
   return result
@@ -137,7 +142,7 @@ export function listingInput(body: unknown, existing: Record<string, unknown>, k
   const condition = oneOf(input.condition ?? (kind === 'SELL' ? 'NEW' : 'ANY'), conditions, 'Состояние')
   if (kind === 'SELL' && condition === 'ANY') throw new BadRequestException('Укажите состояние оборудования')
   const priceMode = oneOf(input.priceMode ?? 'NEGOTIABLE', ['FIXED', 'NEGOTIABLE'], 'Тип цены')
-  const price = priceMode === 'FIXED' ? priceValue(input.price, 'Цена') : null
+  const price = priceMode === 'FIXED' ? priceValue(input.price, 'Цена за шт.', 0.01, maxUnitPrice) : null
   const currency = oneOf(input.currency ?? 'RUB', currencies, 'Валюта')
   const destinationCountry = kind === 'BUY' || input.destinationCountry
     ? country(input.destinationCountry, 'Страна доставки')

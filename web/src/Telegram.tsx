@@ -7,7 +7,7 @@ import { Button, Field, Notice, Spinner } from './ui';
 
 export type TelegramState = {
   enabled: boolean; linked: boolean; username: string | null; botUsername: string | null;
-  linkedAt: string | null; disabledReason: string | null;
+  linkedAt: string | null; disabledReason: string | null; profileUsername: string | null; verified: boolean;
 };
 
 type AdminState = {
@@ -18,7 +18,7 @@ type AdminState = {
 const deliveryStates = { SENT: 'Отправлено', FAILED: 'Ошибка', SKIPPED: 'Пропущено', PENDING: 'Ожидают отправки' } as const;
 const validLink = /^https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{4,63}\?start=[A-Za-z0-9_-]{43}$/;
 
-function useTelegramStatus(path: string, enabled = true) {
+function useTelegramStatus(path: string, enabled = true, profileUsername?: string | null) {
   const [state, setState] = useState<TelegramState>();
   const [error, setError] = useState('');
   useEffect(() => {
@@ -28,23 +28,39 @@ function useTelegramStatus(path: string, enabled = true) {
       if (!controller.signal.aborted) setError(cause.message);
     });
     return () => controller.abort();
-  }, [path, enabled]);
+  }, [path, enabled, profileUsername]);
   async function refresh() {
     setError('');
-    try { setState(await api<TelegramState>(path)); }
+    try {
+      const result = await api<TelegramState>(path);
+      setState(result);
+      return result;
+    }
     catch (cause) { setError((cause as Error).message); }
   }
   return { state, error, setError, refresh };
 }
 
-export function TelegramProfile() {
+export function TelegramVerificationLabel({ verified }: { verified?: boolean }) {
+  const { t } = useI18n();
+  return <small className={verified ? 'telegram-verified' : 'muted'}>{verified
+    ? t('Подтверждён через бота')
+    : t('Не подтверждён: площадка не проверяла, что это аккаунт собеседника')}</small>;
+}
+
+export function TelegramProfile({ profileUsername, onUsernameChange }: {
+  profileUsername?: string | null;
+  onUsernameChange?: (username: string) => void;
+} = {}) {
   const { t, locale } = useI18n();
   const heading = useId();
-  const { state, error, setError, refresh } = useTelegramStatus('/me/telegram');
+  const { state, error, setError, refresh } = useTelegramStatus('/me/telegram', true, profileUsername);
   const [link, setLink] = useState<{ url: string; expiresAt: string }>();
   const [pending, setPending] = useState(false);
   const [unbinding, setUnbinding] = useState(false);
-  if (!state?.enabled && !state?.linked) return null;
+  const handle = (profileUsername ?? state?.profileUsername)?.replace(/^@/, '');
+  const verified = Boolean(state?.verified && state.profileUsername?.toLowerCase() === handle?.toLowerCase());
+  if (!state || (!state.enabled && !state.linked && !handle)) return null;
   async function connect() {
     const popup = window.open('', '_blank');
     if (popup) popup.opener = null;
@@ -66,24 +82,36 @@ export function TelegramProfile() {
     } catch (cause) { setError((cause as Error).message); }
     finally { setPending(false); }
   }
+  async function check() {
+    const result = await refresh();
+    if (result?.profileUsername && result.profileUsername !== profileUsername) onUsernameChange?.(result.profileUsername);
+  }
   return <section className="workflow-span workflow-stack" aria-labelledby={heading}>
     <h2 id={heading}>{t('Telegram для уведомлений')}</h2>
-    {state.linked ? <>
+    {handle && <p role="status" className={verified ? 'telegram-verified' : 'muted'}>{verified
+      ? t('Telegram @{name}: подтверждён', { name: handle })
+      : t('Telegram @{name}: не подтверждён', { name: handle })}</p>}
+    {state.linked && <>
       <p>{state.username && state.linkedAt ? t('Подключён @{name} с {date}', {
         name: state.username, date: new Date(state.linkedAt).toLocaleDateString(locale),
       }) : t('Telegram подключён.')}</p>
-      <div><Button variant="secondary" onClick={() => setUnbinding(true)}>{t('Отвязать Telegram')}</Button></div>
-    </> : <>
+    </>}
+    {!state.linked && state.enabled && <>
       {state.disabledReason === 'BOT_BLOCKED' && <Notice>{t('Telegram отключён из-за блокировки бота. Разблокируйте его и подключите снова.')}</Notice>}
       {state.disabledReason === 'CHAT_NOT_FOUND' && <Notice>{t('Чат бота недоступен. Подключите Telegram снова.')}</Notice>}
       <p>{t('Вопрос «Актуально?» и уведомления будут приходить в Telegram с кнопками ответа. Если Telegram не доставит сообщение за 30 минут, придёт резервное письмо.')}</p>
-      <div className="admin-actions">
-        <Button variant="secondary" disabled={pending} onClick={() => void connect()}>{t('Подключить Telegram')}</Button>
-        <Button variant="ghost" disabled={pending} onClick={() => void refresh()}>{t('Проверить подключение')}</Button>
-      </div>
-      {link && <p>{t('Ссылка действует 15 минут.')}{' '}
-        <a className="text-link" href={link.url} target="_blank" rel="noopener noreferrer">{t('Открыть Telegram')}</a></p>}
     </>}
+    {(state.enabled || state.linked) && <div className="admin-actions">
+      {state.enabled && !verified && <Button variant="secondary" disabled={pending} onClick={() => void connect()}>
+        {t(state.linked ? 'Подтвердить через бота' : 'Подключить Telegram')}
+      </Button>}
+      {state.enabled && !verified && <Button variant="ghost" disabled={pending} onClick={() => void check()}>
+        {t(state.linked ? 'Проверить подтверждение' : 'Проверить подключение')}
+      </Button>}
+      {state.linked && <Button variant="secondary" onClick={() => setUnbinding(true)}>{t('Отвязать Telegram')}</Button>}
+    </div>}
+    {link && <p>{t('Ссылка действует 15 минут.')}{' '}
+      <a className="text-link" href={link.url} target="_blank" rel="noopener noreferrer">{t('Открыть Telegram')}</a></p>}
     {error && !unbinding && <Notice tone="error">{t(error)}</Notice>}
     {unbinding && <StaffDialog title={t('Отвязать Telegram')} onClose={() => setUnbinding(false)} closeDisabled={pending}>
       <p>{t('Уведомления продолжат приходить на почту, если она включена в профиле.')}</p>

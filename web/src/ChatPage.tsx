@@ -3,8 +3,12 @@ import type { FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from './api';
 import type { User } from './api';
+import { ChatDealPanel, type ChatDealSummary } from './Deals';
 import { useI18n } from './i18n';
-import { countryName } from './market';
+import { countryName, reportReasonNames } from './market';
+import { StaffDialog } from './StaffDialog';
+import { TelegramVerificationLabel } from './Telegram';
+import { RevealVerification } from './RevealVerification';
 import { Button, Field, Icon, Notice, Spinner } from './ui';
 import './chat.css';
 
@@ -40,9 +44,12 @@ type Chat = {
   disclosureRulesRequired?: boolean;
   contactsAllowed?: boolean;
   disclosureRulesVersion?: string | null;
+  verification?: { minimum: number; mine: number; partner: number } | null;
   disclosure?: { id: string; number: string; kind: 'FIRST' | 'REPEAT' } | null;
+  deal?: ChatDealSummary;
   telegramChanged: { mine: boolean; partner: boolean } | null;
   telegram: { mine: string; partner: string } | null;
+  telegramVerification?: { mine: boolean; partner: boolean } | null;
   status: 'ACTIVE' | 'RESTRICTED';
   hasReview: boolean;
   canReview?: boolean;
@@ -129,7 +136,7 @@ export function StartChatButton({ listingId }: { listingId: string }) {
   </div>;
 }
 
-export function ChatPage({ user }: { user: User }) {
+export function ChatPage({ user, onRead }: { user: User; onRead?: () => void }) {
   const { id } = useParams();
   const { t } = useI18n();
   const [refresh, setRefresh] = useState(0);
@@ -141,7 +148,8 @@ export function ChatPage({ user }: { user: User }) {
     </div>
     <div className={`chat-workspace${id ? ' chat-workspace-selected' : ''}`}>
       <ChatInbox refresh={refresh} selectedId={id} userId={user.id} />
-      {id ? <ChatConversation key={id} id={id} userId={user.id} onInboxChange={() => setRefresh((value) => value + 1)} />
+      {id ? <ChatConversation key={id} id={id} userId={user.id} onRead={onRead}
+        onInboxChange={() => setRefresh((value) => value + 1)} />
         : <div className="panel chat-no-selection">
           <Icon name="message-circle" size={30} />
           <p>{t('Выберите переписку')}</p>
@@ -227,22 +235,27 @@ function ChatInbox({ selectedId, refresh, userId }: { selectedId?: string; refre
   </aside>;
 }
 
-function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: string; onInboxChange: () => void }) {
+function ChatConversation({ id, userId, onInboxChange, onRead }: {
+  id: string; userId: string; onInboxChange: () => void; onRead?: () => void;
+}) {
   const { t, locale } = useI18n();
   const [chat, setChat] = useState<Chat | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageBody, setMessageBody] = useState('');
+  const reportTrigger = useRef<HTMLElement>(undefined);
   const [form, setForm] = useState<'review' | 'report' | null>(null);
   const [olderAvailable, setOlderAvailable] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [actionError, setActionError] = useState('');
+  const [telegramVerificationRequired, setTelegramVerificationRequired] = useState(false);
   const [blocked, setBlocked] = useState<ApiError>();
   const [fieldError, setFieldError] = useState<ApiError>();
   const [banner, setBanner] = useState('');
   const [pending, setPending] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const inboxChange = useRef(onInboxChange);
+  const onReadRef = useRef(onRead);
   const cursor = useRef<number | undefined>(undefined);
   const contactPolicy = useRef<boolean | undefined>(undefined);
   const markedRead = useRef(0);
@@ -251,7 +264,7 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
   const preservePosition = useRef<number | undefined>(undefined);
   const follow = useRef(true);
 
-  useEffect(() => { inboxChange.current = onInboxChange; }, [onInboxChange]);
+  useEffect(() => { inboxChange.current = onInboxChange; onReadRef.current = onRead; }, [onInboxChange, onRead]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -266,6 +279,7 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
         if (!controller.signal.aborted) {
           markedRead.current = Math.max(markedRead.current, messageId);
           inboxChange.current();
+          onReadRef.current?.();
         }
       } catch {
         // The next poll retries the current read marker.
@@ -344,6 +358,7 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
   async function action(work: () => Promise<void>) {
     setPending(true);
     setActionError('');
+    setTelegramVerificationRequired(false);
     setFieldError(undefined);
     setBanner('');
     try {
@@ -351,7 +366,10 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === 'CONTACT_BLOCKED') setBlocked(cause);
       else if (cause instanceof ApiError && cause.code === 'CONTACT_IN_FIELD') setFieldError(cause);
-      else setActionError(errorMessage(cause, t));
+      else {
+        setActionError(errorMessage(cause, t));
+        setTelegramVerificationRequired(cause instanceof ApiError && cause.code === 'TELEGRAM_NOT_VERIFIED_SELF');
+      }
     } finally {
       setRefresh((value) => value + 1);
       setPending(false);
@@ -414,7 +432,9 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
       </div>
       <div className="chat-actions">
         {mayReview && <Button variant="ghost" disabled={pending} aria-expanded={form === 'review'} onClick={() => { setActionError(''); setFieldError(undefined); setForm(form === 'review' ? null : 'review'); }}>{t('Оставить отзыв')}</Button>}
-        {!chat.hasReport && <Button variant="ghost" disabled={pending} aria-expanded={form === 'report'} onClick={() => { setActionError(''); setFieldError(undefined); setForm(form === 'report' ? null : 'report'); }}>{t('Пожаловаться')}</Button>}
+        {!chat.hasReport && <Button variant="ghost" disabled={pending} aria-haspopup="dialog" onClick={event => {
+          reportTrigger.current = event.currentTarget; setActionError(''); setFieldError(undefined); setForm('report');
+        }}>{t('Пожаловаться')}</Button>}
       </div>
     </header>
 
@@ -422,10 +442,17 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
       {isActive && ['HIDDEN', 'ARCHIVED'].includes(chat.listing.status) && <Notice>{t('Объявление больше не показывается в каталоге. Вы можете продолжить переписку.')}</Notice>}
       {chat.telegramChanged && <TelegramChangeNotice change={chat.telegramChanged} />}
       {!loadError && <div id="chat-telegram" tabIndex={-1}><TelegramPanel chat={chat} userId={userId} pending={pending} reveal={reveal} /></div>}
+      {!loadError && chat.deal && <ChatDealPanel deal={chat.deal} active={isActive} pending={pending}
+        onStart={() => void action(async () => {
+          await api(`/chats/${id}/deal`, { method: 'POST' });
+          setBanner(t('Сделка начата.'));
+        })} onChanged={() => setRefresh(value => value + 1)} />}
       {!isActive && <Notice>{t('Переписка ограничена. Новые сообщения и обмен Telegram недоступны.')}</Notice>}
       {banner && <Notice tone="success">{banner}</Notice>}
       {loadError && <Notice tone="error">{loadError}</Notice>}
-      {actionError && <Notice tone="error">{actionError}</Notice>}
+      {actionError && <Notice tone="error">{actionError}{telegramVerificationRequired && <> {' '}
+        <Link className="text-link" to="/account#telegram-account">{t('Открыть настройки Telegram')}</Link>
+      </>}</Notice>}
     </div>
 
     {form === 'review' && mayReview && <ReviewForm pending={pending} error={fieldError?.field === 'comment' ? t(fieldError.message) : undefined}
@@ -435,13 +462,14 @@ function ChatConversation({ id, userId, onInboxChange }: { id: string; userId: s
       setForm(null);
       setBanner(t('Отзыв отправлен.'));
     })} />}
-    {form === 'report' && !chat.hasReport && <ReportForm pending={pending} error={fieldError?.field === 'details' ? t(fieldError.message) : undefined}
+    {form === 'report' && !chat.hasReport && <StaffDialog title={t('Жалоба на собеседника')} closeDisabled={pending}
+      returnFocus={reportTrigger.current} onClose={() => setForm(null)}><ReportForm pending={pending} error={fieldError?.field === 'details' ? t(fieldError.message) : undefined}
       close={() => setForm(null)} allowTelegram={chat.canReportTelegram ?? Boolean(currentTelegram)} submit={(reason, scope, details) => void action(async () => {
       await api(`/chats/${id}/reports`, { method: 'POST', body: { reason, scope, details } });
       setChat((previous) => previous && { ...previous, hasReport: true });
       setForm(null);
       setBanner(t('Жалоба отправлена модератору.'));
-    })} />}
+    })} /></StaffDialog>}
 
     <div className="chat-messages" ref={scroll} onScroll={() => {
       const viewport = scroll.current;
@@ -500,7 +528,10 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
   const ruleContext = [chat.revealState, chat.revealRequestId, chat.disclosureRulesVersion].join(':');
   const agreed = agreedContext === ruleContext;
   const needsAgreement = Boolean(chat.disclosureRulesRequired && !agreed);
-  const rules = chat.disclosureRulesRequired && <fieldset className="chat-disclosure-rules">
+  const verification = chat.verification;
+  const verificationRequired = Boolean(verification && verification.mine < verification.minimum);
+  const waitingForPartner = Boolean(verification && verification.partner < verification.minimum);
+  const expandedRules = chat.disclosureRulesRequired && <fieldset className="chat-disclosure-rules">
     <legend>{t('Правила раскрытия')}</legend>
     <ul>
       <li>{t('Контакты, полученные через раскрытие, используются только для переговоров по этой позиции и не передаются третьим лицам.')}</li>
@@ -510,6 +541,9 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
     <label className="checkbox-label"><input type="checkbox" checked={agreed}
       onChange={event => setAgreedContext(event.target.checked ? ruleContext : '')} /> {t('Понимаю правила раскрытия')}</label>
   </fieldset>;
+  const rules = verification?.minimum ? <details className="chat-verification-details">
+    <summary>{t('Прочитать правила раскрытия')}</summary>{expandedRules}
+  </details> : expandedRules;
   if (chat.status !== 'ACTIVE') return null;
   if (chat.revealState === 'ACCEPTED' && chat.telegram) {
     const partner = telegramName(chat.telegram.partner);
@@ -519,7 +553,10 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
         <strong>{t('Telegram открыт для обоих')}</strong>
         <span>{t('Ваш Telegram: @{handle}', { handle: telegramName(chat.telegram.mine) })}</span>
       </div>
-      <a className="button button-secondary" href={`https://t.me/${encodeURIComponent(partner)}`} target="_blank" rel="noopener noreferrer">@{partner}</a>
+      <div className="chat-telegram-contact">
+        <a className="button button-secondary" href={`https://t.me/${encodeURIComponent(partner)}`} target="_blank" rel="noopener noreferrer">@{partner}</a>
+        <TelegramVerificationLabel verified={chat.telegramVerification?.partner} />
+      </div>
     </div>;
   }
   if (chat.revealState === 'REQUESTED') {
@@ -529,11 +566,14 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
       <div className="chat-telegram-copy" role="status">
         <strong>{outgoing ? t('Запрос на обмен Telegram отправлен') : t('Собеседник предлагает обменяться Telegram')}</strong>
         <span>{outgoing ? t('Когда собеседник согласится, вы оба увидите контакты во всех ваших чатах.') : t('При согласии вы оба увидите контакты из профилей во всех ваших чатах.')}</span>
+        {waitingForPartner && <span>{t('Ждём проверки документов собеседника. Мы сообщим, когда можно будет открыть контакты.')}</span>}
       </div>
-      {!outgoing && rules}
+      {verificationRequired && <RevealVerification />}
+      {!outgoing && !verificationRequired && rules}
       {!outgoing && <div className="chat-telegram-actions">
         <Button variant="ghost" disabled={pending || !chat.revealRequestId} onClick={() => reveal('DECLINE')}>{t('Отклонить')}</Button>
-        <Button variant="secondary" disabled={pending || !chat.revealRequestId || needsAgreement} onClick={() => reveal('ACCEPT', agreed)}>{t('Согласиться')}</Button>
+        {!verificationRequired && <Button variant="secondary" disabled={pending || !chat.revealRequestId || needsAgreement || waitingForPartner}
+          onClick={() => reveal('ACCEPT', agreed)}>{t('Согласиться')}</Button>}
       </div>}
     </div>;
   }
@@ -543,8 +583,10 @@ function TelegramPanel({ chat, userId, pending, reveal }: { chat: Chat; userId: 
       <strong>{chat.revealState === 'DECLINED' ? t('Запрос на обмен Telegram отклонён') : t('Telegram скрыт')}</strong>
       {!chat.telegramChanged && <span>{t('По взаимному согласию контакты откроются во всех ваших чатах с этим собеседником.')}</span>}
     </div>
-    {rules}
-    <Button variant="secondary" disabled={pending || needsAgreement} onClick={() => reveal('REQUEST', agreed)}>{chat.telegramChanged ? t('Предложить обмен заново') : t('Предложить обмен')}</Button>
+    {verificationRequired ? <RevealVerification /> : <>
+      {rules}
+      <Button variant="secondary" disabled={pending || needsAgreement} onClick={() => reveal('REQUEST', agreed)}>{chat.telegramChanged ? t('Предложить обмен заново') : t('Предложить обмен')}</Button>
+    </>}
   </div>;
 }
 
@@ -585,15 +627,14 @@ function ReportForm({ pending, close, allowTelegram, submit, error }: { pending:
     event.preventDefault();
     if (reason && details.trim().length >= 10) submit(reason, allowTelegram ? scope : 'ON_PLATFORM', details.trim());
   }}>
-    <h3>{t('Жалоба на собеседника')}</h3>
     <p className="muted">{t('Мы рассматриваем жалобы на переписку на площадке и общение по Telegram, раскрытому в чате. Переписка по другим контактам остаётся ответственностью собеседников.')}</p>
     <div className="form-grid">
       <Field label={t('Причина')}>
         <select required value={reason} onChange={(event) => setReason(event.target.value as ReportReason | '')}>
           <option value="">{t('Выберите причину')}</option>
-          <option value="FRAUD">{t('Мошенничество')}</option>
-          <option value="ABUSE">{t('Оскорбления или спам')}</option>
-          <option value="OTHER">{t('Другая причина')}</option>
+          <option value="FRAUD">{t(reportReasonNames.FRAUD)}</option>
+          <option value="ABUSE">{t(reportReasonNames.ABUSE)}</option>
+          <option value="OTHER">{t(reportReasonNames.OTHER)}</option>
         </select>
       </Field>
       {allowTelegram && <Field label={t('Где это произошло')}>

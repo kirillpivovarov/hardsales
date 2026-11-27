@@ -30,23 +30,23 @@ export class OnboardingController {
 
   @Get('admin/invites')
   async inviteList(@Req() request: Request, @Query() query: Record<string, unknown>) {
-    await this.auth.admin(request);
+    await this.auth.staff(request);
     return this.invites.list(query);
   }
 
   @Post('admin/invites')
   async createInvites(@Req() request: Request, @Body() input: unknown) {
-    return this.invites.create(await this.auth.admin(request), input);
+    return this.invites.create(await this.auth.staff(request), input);
   }
 
   @Patch('admin/invites/:id/revoke')
   async revokeInvite(@Req() request: Request, @Param('id') id: string, @Body() input: unknown) {
-    return this.invites.revoke(await this.auth.admin(request), id, input);
+    return this.invites.revoke(await this.auth.staff(request), id, input);
   }
 
   @Get('admin/users/:id/onboarding')
   async answers(@Req() request: Request, @Param('id') id: string) {
-    await this.auth.admin(request);
+    await this.auth.staff(request);
     return this.onboarding.staffAnswers(id);
   }
 }

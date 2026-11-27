@@ -61,3 +61,16 @@ export class MailService {
     });
   }
 }
+
+/** Keep addresses, provider responses and message bodies out of operational logs. */
+export function mailErrorText(error: unknown): string {
+  if (typeof error !== 'object' || error === null) return 'Не удалось отправить письмо';
+  const { code, responseCode } = error as { code?: unknown; responseCode?: unknown };
+  if (code === 'ETIMEDOUT') return 'Тайм-аут соединения';
+  if (code === 'EAUTH') return 'Ошибка аутентификации SMTP';
+  if (typeof responseCode === 'number' && Number.isInteger(responseCode) && responseCode >= 400 && responseCode <= 599) {
+    if (responseCode === 550) return 'SMTP 550: почтовый ящик недоступен';
+    return `SMTP ${responseCode}`;
+  }
+  return 'Не удалось отправить письмо';
+}

@@ -82,15 +82,20 @@ export function listingLimit(level: number, score: number | null) {
 }
 
 /** A suppressed deal cannot reset the window for the next eligible deal. */
-export function countEligibleDeals(deals: { counterparty: string; verified_at: Date }[]) {
+export function dealRatingEligibility<T extends { counterparty: string; verified_at: Date }>(deals: T[]) {
   const lastCounted = new Map<string, number>()
-  let count = 0
-  for (const { counterparty, verified_at } of deals) {
+  return deals.map(deal => {
+    const { counterparty, verified_at } = deal
     const time = verified_at.getTime()
     const previous = lastCounted.get(counterparty)
-    if (previous !== undefined && time - previous < 90 * day) continue
+    if (previous !== undefined && time - previous < 90 * day) {
+      return { deal, nextEligibleAt: new Date(previous + 90 * day) }
+    }
     lastCounted.set(counterparty, time)
-    count++
-  }
-  return count
+    return { deal, nextEligibleAt: null }
+  })
+}
+
+export function countEligibleDeals(deals: { counterparty: string; verified_at: Date }[]) {
+  return dealRatingEligibility(deals).filter(({ nextEligibleAt }) => nextEligibleAt === null).length
 }

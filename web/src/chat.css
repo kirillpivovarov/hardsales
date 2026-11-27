@@ -285,7 +285,15 @@
   flex-shrink: 0;
 }
 
-.chat-telegram > a {
+.chat-telegram-contact {
+  display: grid;
+  justify-items: start;
+  gap: .25rem;
+  min-width: 0;
+  max-width: min(100%, 13rem);
+}
+
+.chat-telegram-contact > a {
   max-width: 100%;
   overflow-wrap: anywhere;
 }
@@ -551,4 +559,71 @@
   .chat-composer .button svg {
     display: none;
   }
+}
+.chat-verification {
+  min-width: 0;
+  flex-basis: 100%;
+}
+.chat-telegram:has(.chat-verification) {
+  flex-wrap: wrap;
+}
+.chat-verification-details {
+  min-width: 0;
+}
+.chat-verification-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.chat-verification-details[open] > .workflow-stack {
+  margin-top: 0.65rem;
+}
+.chat-verification-details input[type="file"] {
+  min-width: 0;
+  max-width: 100%;
+}
+@media (max-width: 480px) {
+  .chat-page:has(.chat-verification) {
+    padding-block-start: .65rem;
+  }
+
+  .chat-page:has(.chat-verification) .chat-page-heading {
+    margin-block-end: .55rem;
+  }
+
+  .chat-conversation:has(.chat-verification) {
+    min-height: 0;
+    overflow: clip;
+  }
+
+  .chat-conversation:has(.chat-verification) .chat-messages {
+    min-height: 5rem;
+    max-height: 18dvh;
+    padding-block: .55rem;
+  }
+
+  .chat-conversation:has(.chat-verification) .chat-no-messages {
+    min-height: 0;
+    padding-block: .25rem;
+  }
+
+  .chat-conversation:has(.chat-verification) .chat-messages:has(.chat-no-messages) {
+    min-height: 0;
+  }
+
+  .chat-conversation:has(.chat-verification .chat-verification-details:not([open])) .chat-composer {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    background: var(--surface);
+  }
+}
+.chat-deal-panel {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.75rem;
+}
+
+.chat-deal-panel .workflow-actions {
+  display: flex;
+  flex-wrap: wrap;
 }

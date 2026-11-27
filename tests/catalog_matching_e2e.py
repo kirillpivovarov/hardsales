@@ -32,6 +32,7 @@ def create(page, name, category, **fields):
     response = page.request.post("/api/v1/listings", headers={"Origin": BASE}, data={
         "title": title,
         "categoryId": category,
+        "modelId": "h100-sxm",
         "description": "Проверка совместимости географических и ценовых фильтров.",
         "priceMode": "FIXED",
         "price": 500,

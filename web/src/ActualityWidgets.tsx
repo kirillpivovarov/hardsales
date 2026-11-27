@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from './api';
 import { useI18n } from './i18n';
+import { maxUnitPrice } from './market';
 import { Button, Field, Notice } from './ui';
 import './actuality.css';
 
@@ -74,13 +75,14 @@ export function ActualityStartNotice({ summary }: { summary?: ActualitySummary }
 export function ActualityBadges({ listing }: { listing: ActualityListingFields }) {
   const { t } = useI18n();
   const changes = listing.priceChanges14 ?? 0;
-  if (!listing.freshness && !changes) return null;
+  const freshness = listing.askedAt ? null : listing.freshness;
+  if (!freshness && !changes) return null;
   const plural = changes % 100 < 11 || changes % 100 > 14;
   const changeLabel = plural && changes % 10 >= 2 && changes % 10 <= 4
     ? 'Цена менялась {n} раза за 14 дней' : 'Цена менялась {n} раз за 14 дней';
   return <div className="actuality-badges">
-    {listing.freshness && <span className={listing.freshness.today ? 'actuality-badge actuality-fresh' : 'actuality-badge'}>
-      {listing.freshness.today ? t('Подтверждено сегодня') : t('Подтверждено {n} ч назад', { n: listing.freshness.hoursAgo })}
+    {freshness && <span className={freshness.today ? 'actuality-badge actuality-fresh' : 'actuality-badge'}>
+      {freshness.today ? t('Подтверждено сегодня') : t('Подтверждено {n} ч назад', { n: freshness.hoursAgo })}
     </span>}
     {changes > 0 && <span className="actuality-badge actuality-price">{t(changeLabel, { n: changes })}</span>}
   </div>;
@@ -208,8 +210,8 @@ export function ActualityEditForm({ action, listing, onSubmit, onClose }: {
 
   return <form className="workflow-stack" onSubmit={submit}>
     {action === 'CHANGED' ? <>
-      {listing.priceMode !== 'NEGOTIABLE' && <Field label={t('Новая цена за всё количество')}>
-        <input name="price" type="number" min="0.01" max="9999999999999.99" step="0.01"
+      {listing.priceMode !== 'NEGOTIABLE' && <Field label={t('Новая цена за шт.')}>
+        <input name="price" type="number" min="0.01" max={maxUnitPrice} step="0.01"
           placeholder={listing.price == null ? undefined : String(listing.price)} />
       </Field>}
       <Field label={t('Новое количество')} hint={listing.minLot && listing.minLot > 1

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { api, isStaff, type User } from './api';
 import { useI18n } from './i18n';
 import { useExchange } from './Exchange';
@@ -38,7 +38,6 @@ function message(cause: unknown, fallback: string) {
 export function OnboardingPage({ user, onUser }: UserUpdateProps) {
   const { t, locale } = useI18n();
   const { features } = useExchange();
-  const navigate = useNavigate();
   const [data, setData] = useState<OnboardingData>();
   const [mode, setMode] = useState<RepresentationMode>('DIRECT');
   const [answers, setAnswers] = useState<Record<string, string>>({});
@@ -48,6 +47,7 @@ export function OnboardingPage({ user, onUser }: UserUpdateProps) {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
   const [telegramInvite, setTelegramInvite] = useState(false);
+  const [readyForListing, setReadyForListing] = useState(false);
   const loadedFor = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -95,8 +95,8 @@ export function OnboardingPage({ user, onUser }: UserUpdateProps) {
       if (user.onboardingState === 'REQUIRED') {
         const telegram = features.feature_telegram === true
           ? await api<TelegramState>('/me/telegram').catch(() => undefined) : undefined;
-        if (telegram?.enabled && !telegram.linked) setTelegramInvite(true);
-        else navigate('/catalog', { replace: true });
+        setTelegramInvite(Boolean(telegram?.enabled && !telegram.linked));
+        setReadyForListing(true);
       } else {
         if (principalRequired) setData({ ...data, principalRequired: false, hasPrincipal: true });
         setSuccess(true);
@@ -128,15 +128,23 @@ export function OnboardingPage({ user, onUser }: UserUpdateProps) {
     );
   }
 
-  if (telegramInvite) return <div className="container workflow-page workflow-stack">
-    <h1>{t('Подключите Telegram')}</h1>
-    <div className="panel workflow-section"><TelegramProfile /></div>
-    <Link className="text-link" to="/catalog" replace>{t('Позже')}</Link>
+  if (readyForListing) return <div className="container workflow-page workflow-stack">
+    <p>{t('Шаг 4 из 4')}</p>
+    <h1>{t('Разместите первое объявление')}</h1>
+    <p>{t('Документы понадобятся, только когда захотите открыть контакты.')}</p>
+    <div className="admin-actions">
+      <Link className="button button-primary" to="/listings/new" replace>{t('Разместить')}</Link>
+      <Link className="button button-ghost" to="/catalog" replace>{t('Позже')}</Link>
+    </div>
+    {telegramInvite && <details className="panel workflow-section">
+      <summary>{t('Подключите Telegram')}</summary><TelegramProfile />
+    </details>}
   </div>;
 
   return (
     <div className="container workflow-page">
       <div className="workflow-intro">
+        {user.onboardingState === 'REQUIRED' && <p>{t('Шаг 3 из 4')}</p>}
         <h1>{t('Анкета участника')}</h1>
         <p>{t('Ответы доступны администрации площадки.')}</p>
       </div>
@@ -166,8 +174,13 @@ export function OnboardingPage({ user, onUser }: UserUpdateProps) {
               {t('Заполнено {done} из {total} обязательных полей', { done, total: required.length })}
             </p>
             {required.map(questionField)}
-            <h3>{t(data.optionalHeading)}</h3>
-            {questions.filter((question) => !question.required).map(questionField)}
+            <details>
+              <summary>{t('Ответить подробнее (по желанию)')}</summary>
+              <div className="workflow-stack">
+                <p>{t(data.optionalHeading)}</p>
+                {questions.filter((question) => !question.required).map(questionField)}
+              </div>
+            </details>
           </section>
 
           {principalRequired && (

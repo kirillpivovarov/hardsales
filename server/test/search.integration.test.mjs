@@ -39,7 +39,7 @@ test('catalogue search recognizes equipment variants and retains exact constrain
     const { payload } = await call('/listings', {
       method: 'POST', cookie: seller, status: 201,
       body: {
-        categoryId, title: `${title} ${suffix}`, description,
+        categoryId, modelId: categoryId === servers ? 'hgx-h100-8' : 'h100-sxm', title: `${title} ${suffix}`, description,
         quantity: 1, condition: 'NEW', availability: 'STOCK', originCountry: 'RU',
         stockCity: 'Новосибирск', priceMode: 'FIXED', price, currency: 'RUB', specs,
       },
@@ -88,7 +88,7 @@ test('catalogue search recognizes equipment variants and retains exact constrain
     assert.ok(relevant.indexOf(exact.id) < relevant.indexOf(variant.id));
     assert.ok(cheap.indexOf(variant.id) < cheap.indexOf(exact.id));
     assert.ok(recent.indexOf(variant.id) < recent.indexOf(exact.id));
-    const priced = await search(q, { priceMax: 75, category: 'gpu' });
+    const priced = await search(q, { priceMax: 75, currency: 'RUB', category: 'gpu' });
     includes(priced, variant);
     excludes(priced, exact);
     const first = await search(q, { limit: 1 });

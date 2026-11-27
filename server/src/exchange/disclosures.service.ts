@@ -7,6 +7,7 @@ import { ExchangeActions } from './actions'
 import { auditExchange } from './audit'
 import { ExchangeNotifications } from './notifications'
 import { PlatformSettings } from './platform-settings'
+import { verificationRequirements } from './verification-requirements'
 
 type Party = {
   userId: string
@@ -15,6 +16,7 @@ type Party = {
   participantType: string
   country: string
   telegram: string | null
+  telegramVerified?: boolean
 }
 
 type DisclosureRow = {
@@ -69,7 +71,8 @@ export class DisclosuresService implements OnModuleInit {
     })
   }
 
-  async assertRules(db: Queryable, actor: string, partner: string, accepted: unknown, requestedVersion?: string | null) {
+  async assertRules(db: Queryable, actor: string, partner: string, accepted: unknown,
+    requestedVersion?: string | null, deferPartnerVerification = false) {
     const min = await this.settings.get<number>('disclosure_min_level', db)
     if (accepted !== true) throw new BadRequestException('Подтвердите правила раскрытия')
     const current = await this.settings.get<string>('rules_version', db)
@@ -78,14 +81,18 @@ export class DisclosuresService implements OnModuleInit {
     }
     if (min > 0) {
       const { rows } = await db.query<{ id: string; level: number }>(`
-        SELECT id, coalesce((to_jsonb(u)->>'verification_level')::int, 0) AS level
+        SELECT id, verification_level AS level
         FROM users u WHERE id IN ($1, $2)
       `, [actor, partner])
       if ((rows.find(row => row.id === actor)?.level ?? 0) < min) {
-        throw new ForbiddenException('Контакты раскрываются только после проверки документов. Загрузите документы в профиле.')
+        const { requirements, principalEmail } = await verificationRequirements(db, actor)
+        throw new ForbiddenException({ code: 'VERIFICATION_REQUIRED_SELF',
+          message: 'Чтобы открыть контакты, загрузите документы.',
+          requiredDocuments: requirements, principalEmail })
       }
-      if ((rows.find(row => row.id === partner)?.level ?? 0) < min) {
-        throw new ForbiddenException('Собеседник ещё не прошёл проверку документов')
+      if ((rows.find(row => row.id === partner)?.level ?? 0) < min && !(deferPartnerVerification && min === 1)) {
+        throw new ForbiddenException({ code: 'VERIFICATION_REQUIRED_PARTNER',
+          message: 'Собеседник ещё не прошёл проверку документов' })
       }
     }
     return current
@@ -211,9 +218,14 @@ export class DisclosuresService implements OnModuleInit {
       partner: staff ? undefined : this.partner(row, user.id, true),
       listing: row.listing_snapshot, counterListing: row.counter_listing_snapshot,
       matchId: row.match_id, requestedAt: row.requested_at, rulesVersion: row.rules_version, timezone,
-      events: events.map(event => staff
-        ? { type: event.type, actorUserId: event.actor_user_id, data: event.data, at: event.created_at }
-        : { type: event.type, by: event.actor_user_id === user.id ? 'mine' : event.actor_user_id ? 'partner' : 'system', at: event.created_at }),
+      events: events.map(event => {
+        if (staff) return { type: event.type, actorUserId: event.actor_user_id, data: event.data, at: event.created_at };
+        const by = event.actor_user_id === user.id ? 'mine' : event.actor_user_id ? 'partner' : 'system';
+        const row = { type: event.type, by, at: event.created_at };
+        if (event.type !== 'DEAL_STATUS' || !event.data || typeof event.data !== 'object') return row;
+        const { action, status, resultingStatus, title } = event.data as Record<string, unknown>;
+        return { ...row, data: { action, status, resultingStatus, ...(typeof title === 'string' && { title: publicListingTitle(title) }) } };
+      }),
     }
   }
 
@@ -297,7 +309,7 @@ export class DisclosuresService implements OnModuleInit {
     const party = row.user_a_id === userId ? row.party_b : row.party_a
     return {
       nickname: party.nickname, companyName: this.company(party), participantType: party.participantType,
-      country: party.country, ...(withTelegram && { telegram: party.telegram }),
+      country: party.country, ...(withTelegram && { telegram: party.telegram, telegramVerified: party.telegramVerified === true }),
     }
   }
 
@@ -315,7 +327,9 @@ export class DisclosuresService implements OnModuleInit {
   private staffSummary(row: DisclosureRow) {
     return {
       id: row.id, number: disclosureNumber(row.number), kind: row.kind, acceptedAt: row.accepted_at,
-      partyA: row.party_a, partyB: row.party_b, listing: row.listing_snapshot, chatId: row.chat_id,
+      partyA: { ...row.party_a, telegramVerified: row.party_a.telegramVerified === true },
+      partyB: { ...row.party_b, telegramVerified: row.party_b.telegramVerified === true },
+      listing: row.listing_snapshot, chatId: row.chat_id,
       requestedBy: row.requested_by, acceptedBy: row.accepted_by, migrated: row.migrated,
     }
   }

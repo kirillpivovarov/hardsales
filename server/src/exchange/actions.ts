@@ -48,17 +48,19 @@ export class ExchangeActions {
     await this.limit(client, 'telegram-callback:' + hashToken(actorUserId), 1, 30);
   }
 
-  async runForUser(token: string, body: unknown, actorUserId: string, client?: PoolClient, telegramChatId?: string): Promise<object> {
-    if (client) return this.use(client, token, { body }, actorUserId, telegramChatId);
+  async runForUser(token: string, body: unknown, actorUserId: string, client?: PoolClient, telegramChatId?: string,
+    beforeExecute?: () => Promise<unknown>): Promise<object> {
+    if (client) return this.use(client, token, { body }, actorUserId, telegramChatId, beforeExecute);
     await this.limitTelegram(this.db, actorUserId);
-    return this.db.transaction(transaction => this.use(transaction, token, { body }, actorUserId, telegramChatId));
+    return this.db.transaction(transaction => this.use(transaction, token, { body }, actorUserId, telegramChatId, beforeExecute));
   }
 
   inspectForUser(client: PoolClient, token: string, actorUserId: string): Promise<object> {
     return this.use(client, token, undefined, actorUserId);
   }
 
-  private async use(client: PoolClient, token: string, input?: { body: unknown }, actorUserId?: string, telegramChatId?: string): Promise<object> {
+  private async use(client: PoolClient, token: string, input?: { body: unknown }, actorUserId?: string, telegramChatId?: string,
+    beforeExecute?: () => Promise<unknown>): Promise<object> {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new NotFoundException('Ссылка не найдена');
     const hash = hashToken(token);
     const load = async (lock = false) => (await client.query<ExchangeAction & { used: boolean; expired: boolean }>(`
@@ -89,6 +91,7 @@ export class ExchangeActions {
     if (!action) throw new NotFoundException('Ссылка не найдена');
     if (action.used) throw new ConflictException('Ссылка уже использована');
     if (action.expired) throw new GoneException('Срок ссылки истёк');
+    if (beforeExecute) await beforeExecute();
     const result = await handler.execute(client, action, input.body);
     await client.query('UPDATE action_tokens SET used_at=now() WHERE token_hash=$1', [hash]);
     return result;

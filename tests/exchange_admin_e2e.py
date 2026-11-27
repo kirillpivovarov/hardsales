@@ -18,8 +18,9 @@ from contextual_moderation_e2e import activate_staff
 BASE = os.getenv('HWFORAI_QA_BASE', 'http://127.0.0.1:3000').rstrip('/')
 CHROMIUM = os.getenv('CHROMIUM_PATH') or os.getenv('HWFORAI_QA_CHROMIUM')
 TAG = uuid4().hex[:8]
-COMMON = ['Модели оборудования', 'Журнал раскрытий', 'Принципалы', 'Совпадения', 'Проверки и сделки', 'Фоновые задачи', 'Показатели пробы', 'Дубли лотов']
-ADMIN_ONLY = ['Приглашения', 'Настройки биржи', 'Курсы валют', 'Ценовые ориентиры', 'Попытки обхода', 'Telegram', 'Запросы по данным']
+COMMON = ['Модели оборудования', 'Журнал раскрытий', 'Принципалы', 'Совпадения', 'Проверки и сделки', 'Фоновые задачи',
+          'Письма', 'Показатели пробы', 'Дубли лотов', 'Приглашения']
+ADMIN_ONLY = ['Настройки биржи', 'Курсы валют', 'Ценовые ориентиры', 'Попытки обхода', 'Telegram', 'Запросы по данным']
 GENERATED_MODEL_CODE_HINT = 'Можно оставить пустым, чтобы сформировать код из названия.'
 
 
@@ -385,7 +386,7 @@ def run(browser):
     desktop.goto(BASE + base_path)
     expect(heading(desktop, 'Закрытая биржа')).to_be_visible()
     check_sections(desktop, COMMON + ADMIN_ONLY)
-    invite_id = invites(desktop, admin)
+    invites(desktop, admin)
     original_trust = settings(desktop, admin)
     try:
         shared_sections(desktop, admin, administrator=True, buyer=buyer)
@@ -403,19 +404,21 @@ def run(browser):
         print('PASS 1440px admin invite clipboard and audit, settings and every Exchange tab', flush=True)
 
         tablet.goto(BASE + base_path + '&part=invites')
-        expect(heading(tablet, 'Модели оборудования')).to_be_visible()
+        expect(heading(tablet, 'Создать приглашения')).to_be_visible()
+        expect(tablet.get_by_role('checkbox', name='Знаю лично')).to_have_count(0)
         check_sections(tablet, COMMON)
         shared_sections(tablet, moderator, administrator=False, buyer=buyer)
-        for part in ['settings', 'rates', 'corridors', 'onboarding', 'contact-blocks', 'telegram', 'data-requests', 'user-consents']:
+        for part in ['settings', 'rates', 'corridors', 'contact-blocks', 'telegram', 'data-requests', 'user-consents']:
             tablet.goto(BASE + base_path + '&part=' + part + '&userId=' + participant_user['id'])
             expect(heading(tablet, 'Модели оборудования')).to_be_visible()
             check_layout(tablet)
-        for route in ['invites', 'settings', 'fx-rates', 'corridors', 'contact-blocks', 'telegram', 'data-requests']:
+        for route in ['settings', 'fx-rates', 'corridors', 'contact-blocks', 'telegram', 'data-requests']:
             api(moderator, 'admin/' + route, status=403)
         api(moderator, 'admin/matches')
-        api(moderator, f'admin/users/{participant_user["id"]}/onboarding', status=403)
-        api(moderator, 'admin/invites', 'POST', {'count': 1}, 403)
-        api(moderator, f'admin/invites/{invite_id}/revoke', 'PATCH', {'reason': 'Проверка границы роли'}, 403)
+        api(moderator, f'admin/users/{participant_user["id"]}/onboarding')
+        invite = api(moderator, 'admin/invites', 'POST', {'count': 1}, 201)['items'][0]
+        api(moderator, f'admin/invites/{invite["id"]}/revoke', 'PATCH', {'reason': 'Проверка границы роли'})
+        api(moderator, 'admin/invites', 'POST', {'count': 1, 'knownPersonally': True, 'note': 'Проверяем границу роли'}, 403)
         api(moderator, 'admin/settings/timezone', 'PUT', {'value': 'UTC'}, 403)
         api(moderator, 'admin/catalog-sync/sources/PCI_IDS', 'PUT', {'urls': ['https://pci-ids.ucw.cz/v2.2/pci.ids']}, 403)
         api(moderator, 'admin/catalog-sync/run', 'POST', {'source': 'PCI_IDS'}, 403)

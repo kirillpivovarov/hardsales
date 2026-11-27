@@ -77,7 +77,7 @@ test('fresh and concurrent administrator bootstrap, account singleton and demo s
         INSERT INTO users (username, display_name, email, password_hash, role, participant_type, city, country, telegram)
         VALUES ('customer', 'Customer', 'customer@example.test', 'fixture', 'BUYER', 'INDIVIDUAL', 'Самара', 'RU', 'customer')
       `);
-      await assert.rejects(db.query("UPDATE users SET role = 'ADMIN' WHERE username = 'customer'"), duplicateAdmin);
+      await assert.rejects(db.query("UPDATE users SET role = 'ADMIN', trade_sides = NULL WHERE username = 'customer'"), duplicateAdmin);
 
       await db.query("UPDATE users SET status = 'FROZEN' WHERE id = $1", [admin.id]);
       await assert.rejects(seedConfiguredUsers(db), /active and have a verified email/);
@@ -85,7 +85,7 @@ test('fresh and concurrent administrator bootstrap, account singleton and demo s
       await assert.rejects(seedConfiguredUsers(db), /active and have a verified email/);
 
       await simulateLegacyAdministratorSchema(db);
-      await db.query("UPDATE users SET role = 'ADMIN' WHERE username = 'customer'");
+      await db.query("UPDATE users SET role = 'ADMIN', trade_sides = NULL WHERE username = 'customer'");
       await assert.rejects(db.migrate(), /Multiple administrator accounts found/);
       assert.equal((await accounts(db)).rows.filter(user => user.role === 'ADMIN').length, 2);
     });

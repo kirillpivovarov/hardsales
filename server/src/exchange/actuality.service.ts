@@ -5,7 +5,8 @@ import type { PoolClient } from 'pg'
 import type { StaffSession } from '../auth/auth.types'
 import { DatabaseService, type Queryable } from '../database/database.service'
 import { MatchingService } from '../matching/matching.service'
-import { integer, object, oneOf, priceValue, str, uuid } from '../market/market.inputs'
+import { integer, maxUnitPrice, object, oneOf, priceValue, str, uuid } from '../market/market.inputs'
+import { lockListingPrices } from '../market/listing-price'
 import { actualityEnabledSql, actualityRequestedSql, listingColumnsFor, listingJoins } from '../market/market.queries'
 import { ExchangeActions } from './actions'
 import { auditExchange } from './audit'
@@ -62,6 +63,7 @@ export class ActualityService implements OnModuleInit {
     })
 
     this.actions.register('listing.actuality', {
+      lockSubjects: lockListingPrices,
       describe: async (client, token) => {
         const listing = await this.ownedListing(client, token.userId!, uuid(token.subjectId), false)
         return { title: listing.title, fields: {
@@ -386,6 +388,7 @@ export class ActualityService implements OnModuleInit {
 
   private async answerInTransaction(client: PoolClient, ownerId: string, id: string, raw: unknown, expectedAskedAt?: unknown) {
     await this.assertEnabled(client)
+    await lockListingPrices(client)
     await this.lockOwner(client, ownerId)
     const listing = await this.ownedListing(client, ownerId, id)
     if (listing.status !== 'ACTIVE') {
@@ -402,7 +405,7 @@ export class ActualityService implements OnModuleInit {
       if (input.price !== undefined && listing.price_mode === 'NEGOTIABLE') {
         throw new BadRequestException('У объявления договорная цена: измените условия цены в форме.')
       }
-      const price = input.price === undefined ? listing.price : priceValue(input.price, 'Цена')
+      const price = input.price === undefined ? listing.price : priceValue(input.price, 'Цена за шт.', 0.01, maxUnitPrice)
       const quantity = input.quantity === undefined ? listing.quantity : integer(input.quantity, 'Количество', 1, 1_000_000)
       if (quantity < listing.min_lot) throw new BadRequestException('Количество меньше минимальной партии. Измените её в объявлении.')
       await client.query("SELECT set_config('hwforai.listing_change_source', 'ACTUALITY', true)")

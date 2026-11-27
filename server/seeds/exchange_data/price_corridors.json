@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-26",
+  "description": "Начальные коридоры цен администратора: USD за одну единицу, базис SELLER_WAREHOUSE (склад продавца, delivery_included = false). Ориентиры для старта пробы: администратор проверяет их перед включением. Для базиса DELIVERED площадка умножает на delivered_markup.",
+  "delivered_markup": 1.06,
+  "corridors": [
+    {
+      "model_id": "hgx-h100-8",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 210000,
+      "max_usd": 250000
+    },
+    {
+      "model_id": "hgx-h200-8",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 285000,
+      "max_usd": 330000
+    },
+    {
+      "model_id": "hgx-b200-8",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 380000,
+      "max_usd": 440000
+    },
+    {
+      "model_id": "hgx-b300-8",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 470000,
+      "max_usd": 540000
+    },
+    {
+      "model_id": "mi300x-8",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 215000,
+      "max_usd": 265000
+    },
+    {
+      "model_id": "srv-l40s-8",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 75000,
+      "max_usd": 95000
+    },
+    {
+      "model_id": "rtx-pro-6000",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 8000,
+      "max_usd": 9600
+    },
+    {
+      "model_id": "h200-nvl",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 28500,
+      "max_usd": 34000
+    },
+    {
+      "model_id": "h100-pcie",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 22000,
+      "max_usd": 27000
+    },
+    {
+      "model_id": "l40s",
+      "basis": "SELLER_WAREHOUSE",
+      "min_usd": 7200,
+      "max_usd": 8600
+    }
+  ]
+}

@@ -60,6 +60,11 @@ class TrustController {
     return this.trust.summary((await this.auth.participant(request)).id)
   }
 
+  @Get('me/verification')
+  async personalVerification(@Req() request: Request) {
+    return this.verification.self((await this.auth.participant(request)).id)
+  }
+
   @Post('documents')
   @UseGuards(DocumentGuard)
   @UseInterceptors(DocumentCapacity, FileInterceptor('file', {
@@ -140,6 +145,12 @@ class TrustController {
     return this.verification.decide(await this.auth.staff(request), id, 'reject', input)
   }
 
+  @Post('admin/users/:id/verification-revoke')
+  @HttpCode(200)
+  async revokeVerification(@Req() request: Request, @Param('id') id: string, @Body() input: unknown) {
+    return this.verification.revoke(await this.auth.staff(request), id, input)
+  }
+
   @Post('admin/users/:id/restrict')
   @HttpCode(200)
   async restrict(@Req() request: Request, @Param('id') id: string, @Body() input: unknown) {
@@ -189,6 +200,6 @@ class TrustController {
   imports: [AuthModule],
   controllers: [TrustController],
   providers: [TrustService, VerificationService, DealsService, DocumentGuard, DocumentCapacity],
-  exports: [TrustService],
+  exports: [TrustService, DealsService],
 })
 export class TrustModule {}

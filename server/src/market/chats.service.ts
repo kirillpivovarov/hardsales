@@ -9,7 +9,10 @@ import { detectContacts, detectSplitContact, requestsOutsideChat } from '../cont
 import { publicListingTitle, withoutLegacyProfileContacts } from '../contact-guard/public-text'
 import { DatabaseService, type Queryable } from '../database/database.service'
 import { ExchangeActions } from '../exchange/actions'
+import { DealsService } from '../exchange/deals.service'
 import { disclosureTerms, DisclosuresService } from '../exchange/disclosures.service'
+import { chatUnread } from '../exchange/notification-queues'
+import { ExchangeNotifications } from '../exchange/notifications'
 import { OnboardingService } from '../exchange/onboarding.service'
 import { PlatformSettings } from '../exchange/platform-settings'
 import { integer, object, oneOf, pageParams, str, uuid } from './market.inputs'
@@ -24,6 +27,8 @@ type ChatContext = {
   current_b_version: string
   a_handle: string | null
   b_handle: string | null
+  a_telegram_verified: boolean
+  b_telegram_verified: boolean
   active: boolean
 }
 
@@ -87,6 +92,8 @@ const consentCurrent = `p.a_version = (${versionA}) AND p.b_version = (${version
 const pendingRulesCurrent = `(p.state <> 'REQUESTED' OR NOT (${managesDisclosures}) OR
   p.requested_rules_version IS NOT DISTINCT FROM (current_rules.value #>> '{}'))`
 const requiresDisclosureUpgrade = `(${managesDisclosures} AND p.state = 'ACCEPTED' AND disclosed.id IS NULL)`
+const sharedTelegram = `${chatActive} AND p.state = 'ACCEPTED' AND ${consentCurrent} AND NOT ${requiresDisclosureUpgrade}`
+const telegramBotEnabled = `EXISTS (SELECT 1 FROM platform_settings WHERE key = 'feature_telegram' AND value = 'true'::jsonb)`
 const changedA = `coalesce(p.last_accepted_a_version <> (${versionA}), false)`
 const changedB = `coalesce(p.last_accepted_b_version <> (${versionB}), false)`
 const reviewCheck = `EXISTS (SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id AND m.sender_id = $1)
@@ -101,6 +108,11 @@ const chatColumns = `
     'disclosedAt', disclosed.accepted_at
   ) AS partner,
   ${managesDisclosures} AS "disclosureRulesRequired",
+  CASE WHEN ${managesDisclosures} THEN jsonb_build_object(
+    'minimum', (SELECT value FROM platform_settings WHERE key='disclosure_min_level'),
+    'mine', CASE WHEN c.owner_id=$1 THEN owner.verification_level ELSE visitor.verification_level END,
+    'partner', partner.verification_level
+  ) END AS "verification",
   (NOT ${managesDisclosures} OR disclosed.id IS NOT NULL) AS "contactsAllowed",
   CASE WHEN ${managesDisclosures} THEN current_rules.value #>> '{}' END AS "disclosureRulesVersion",
   CASE WHEN disclosed.id IS NOT NULL THEN jsonb_build_object('id', disclosed.id,
@@ -113,10 +125,14 @@ const chatColumns = `
   CASE WHEN ${consentCurrent} AND ${pendingRulesCurrent} AND NOT ${requiresDisclosureUpgrade} THEN p.state ELSE 'NONE' END AS "revealState",
   CASE WHEN ${consentCurrent} AND ${pendingRulesCurrent} AND NOT ${requiresDisclosureUpgrade} THEN p.requested_by END AS "revealRequestedBy",
   CASE WHEN p.state = 'REQUESTED' AND ${consentCurrent} AND ${pendingRulesCurrent} THEN p.request_id END AS "revealRequestId",
-  CASE WHEN ${chatActive} AND p.state = 'ACCEPTED' AND ${consentCurrent} AND NOT ${requiresDisclosureUpgrade} THEN jsonb_build_object(
+  CASE WHEN ${sharedTelegram} THEN jsonb_build_object(
     'mine', CASE WHEN c.owner_id = $1 THEN owner.telegram ELSE visitor.telegram END,
     'partner', CASE WHEN c.owner_id = $1 THEN visitor.telegram ELSE owner.telegram END
   ) END AS telegram,
+  CASE WHEN ${sharedTelegram} THEN jsonb_build_object(
+    'mine', ${telegramBotEnabled} AND CASE WHEN c.owner_id = $1 THEN telegram_handle_verified(owner) ELSE telegram_handle_verified(visitor) END,
+    'partner', ${telegramBotEnabled} AND telegram_handle_verified(partner)
+  ) END AS "telegramVerification",
   CASE WHEN p.last_accepted_at IS NOT NULL AND
     (p.last_accepted_a_version IS NULL OR ${changedA} OR ${changedB}) THEN jsonb_build_object(
       'mine', CASE WHEN p.user_a_id = $1 THEN ${changedA} ELSE ${changedB} END,
@@ -139,6 +155,8 @@ export class ChatsService implements OnModuleInit {
     private readonly onboarding: OnboardingService,
     private readonly contactGuard: ContactGuardService,
     private readonly actions: ExchangeActions,
+    private readonly deals: DealsService,
+    private readonly notifications: ExchangeNotifications,
   ) {}
 
   onModuleInit() {
@@ -178,6 +196,20 @@ export class ChatsService implements OnModuleInit {
     return this.show(this.db, user.id, uuid(idInput))
   }
 
+  async startDeal(user: SessionUser<ParticipantRole>, idInput: string) {
+    const id = uuid(idInput)
+    return this.db.transaction(async client => {
+      const context = await this.context(client, user.id, id, true)
+      this.assertActive(context)
+      return this.deals.startFromChat(client, id, user.id, 'MANUAL')
+    })
+  }
+
+  async unreadCount(user: SessionUser<ParticipantRole>) {
+    const { rows: [result] } = await this.db.query<{ unread: number }>(`SELECT (${chatUnread}) AS unread`, [user.id])
+    return result
+  }
+
   async create(user: SessionUser<ParticipantRole>, raw: unknown) {
     const listingId = uuid(object(raw).listingId, 'Объявление')
     return this.db.transaction(async client => {
@@ -188,10 +220,12 @@ export class ChatsService implements OnModuleInit {
         ${visibleCategories}
         SELECT l.id, l.owner_id, l.counterparty, actor.participant_type AS actor_type
         FROM listings l JOIN users u ON u.id = l.owner_id
-        JOIN users actor ON actor.id = $3 AND actor.status = 'ACTIVE' AND actor.email_verified_at IS NOT NULL
-        WHERE l.id = $1 AND l.kind = $2 AND l.owner_id != $3 AND ${listingPublicWhere}
+        JOIN users actor ON actor.id = $2 AND actor.status = 'ACTIVE' AND actor.email_verified_at IS NOT NULL
+        WHERE l.id = $1 AND l.owner_id != $2
+          AND (CASE WHEN l.kind = 'SELL' THEN 'BUY' ELSE 'SELL' END) = ANY(actor.trade_sides)
+          AND ${listingPublicWhere}
         FOR SHARE OF l
-      `, [listingId, user.role === 'SELLER' ? 'BUY' : 'SELL', user.id])
+      `, [listingId, user.id])
       const listing = rows[0]
       if (!listing) throw new NotFoundException('Объявление недоступно')
       if (listing.counterparty === 'COMPANY' && listing.actor_type !== 'COMPANY') {
@@ -227,10 +261,10 @@ export class ChatsService implements OnModuleInit {
 
   async send(user: SessionUser<ParticipantRole>, idInput: string, raw: unknown) {
     const id = uuid(idInput)
-    const body = str(object(raw).body, 'Сообщение', 1, 4000)
     const outcome = await this.db.transaction(async client => {
       const context = await this.context(client, user.id, id, true)
       this.assertActive(context)
+      const body = str(object(raw).body, 'Сообщение', 1, 4000)
       await this.onboarding.assertOnboardingComplete(user.id, client)
       await client.query("SELECT key FROM platform_settings WHERE key = 'feature_disclosure_journal' FOR SHARE")
       const strict = await this.contactGuard.enabled(client)
@@ -265,6 +299,7 @@ export class ChatsService implements OnModuleInit {
         INSERT INTO chat_messages AS m (chat_id, sender_id, body, contact_warning, hidden_for_peer)
         VALUES ($1, $2, $3, $4, $5) RETURNING ${messages()}
       `, [id, user.id, body, strict ? !access.disclosed && requestsOutsideChat(body) : withContact(body, confirmed), Boolean(kinds.length)])
+      await this.notifications.chatMessage(client, id, this.partner(context, user.id), user.id, rows[0].id)
       await client.query(`
         UPDATE listing_matches SET
           seller_first_action_at = CASE WHEN seller_id = $2 THEN coalesce(seller_first_action_at, now()) ELSE seller_first_action_at END,
@@ -273,6 +308,7 @@ export class ChatsService implements OnModuleInit {
           (seller_id = $2 AND seller_first_action_at IS NULL) OR (buyer_id = $2 AND buyer_first_action_at IS NULL)
         )
       `, [id, user.id])
+      await this.deals.startFromChat(client, id, user.id, 'PAIR_CHAT')
       return { message: rows[0] }
     })
     if (outcome.blocked) throw new HttpException(outcome.blocked, 422)
@@ -283,15 +319,19 @@ export class ChatsService implements OnModuleInit {
     const id = uuid(idInput)
     const body = raw === undefined ? {} : object(raw)
     const messageId = body.messageId === undefined ? null : integer(body.messageId, 'Сообщение', 1, Number.MAX_SAFE_INTEGER)
-    const { rowCount } = await this.db.query(`
-      UPDATE chats c SET
-        owner_read_id = CASE WHEN c.owner_id = $1 THEN greatest(c.owner_read_id, position.id) ELSE c.owner_read_id END,
-        visitor_read_id = CASE WHEN c.visitor_id = $1 THEN greatest(c.visitor_read_id, position.id) ELSE c.visitor_read_id END
-      FROM (SELECT coalesce(max(m.id), 0) AS id FROM chat_messages m
-        WHERE m.chat_id = $2 AND m.sender_id != $1 AND ($3::bigint IS NULL OR m.id <= $3)) position
-      WHERE c.id = $2 AND ${memberWhere}
-    `, [user.id, id, messageId])
-    if (!rowCount) throw new NotFoundException('Чат не найден')
+    await this.db.transaction(async client => {
+      const { rows: [marker] } = await client.query<{ through: string }>(`
+        UPDATE chats c SET
+          owner_read_id = CASE WHEN c.owner_id = $1 THEN greatest(c.owner_read_id, position.id) ELSE c.owner_read_id END,
+          visitor_read_id = CASE WHEN c.visitor_id = $1 THEN greatest(c.visitor_read_id, position.id) ELSE c.visitor_read_id END
+        FROM (SELECT coalesce(max(m.id), 0) AS id FROM chat_messages m
+          WHERE m.chat_id = $2 AND m.sender_id != $1 AND ($3::bigint IS NULL OR m.id <= $3)) position
+        WHERE c.id = $2 AND ${memberWhere}
+        RETURNING (CASE WHEN c.owner_id=$1 THEN c.owner_read_id ELSE c.visitor_read_id END)::text AS through
+      `, [user.id, id, messageId])
+      if (!marker) throw new NotFoundException('Чат не найден')
+      await this.notifications.chatRead(client, id, user.id, marker.through)
+    })
   }
 
   async reveal(user: SessionUser<ParticipantRole>, idInput: string, raw: unknown) {
@@ -306,7 +346,8 @@ export class ChatsService implements OnModuleInit {
     const context = await this.context(client, userId, id, true)
     this.assertActive(context)
     await client.query(`SELECT key FROM platform_settings
-      WHERE key IN ('feature_disclosure_journal', 'rules_version', 'disclosure_min_level') ORDER BY key FOR SHARE`)
+      WHERE key IN ('feature_disclosure_journal', 'rules_version', 'disclosure_min_level',
+        'feature_telegram', 'disclosure_requires_verified_telegram') ORDER BY key FOR SHARE`)
     const journalling = await this.settings.enabled('feature_disclosure_journal', client)
     const pair = [context.user_a_id, context.user_b_id]
     await client.query(`
@@ -318,7 +359,7 @@ export class ChatsService implements OnModuleInit {
     const current = this.consentMatches(context, consent)
     if (action === 'REQUEST') {
       const rulesVersion = journalling
-        ? await this.disclosures.assertRules(client, userId, this.partner(context, userId), body.rulesAccepted)
+        ? await this.disclosures.assertRules(client, userId, this.partner(context, userId), body.rulesAccepted, undefined, true)
         : null
       if (journalling && body.rulesVersion !== undefined && body.rulesVersion !== rulesVersion) {
         throw new ConflictException('Правила раскрытия обновились. Ознакомьтесь с новой версией.')
@@ -330,6 +371,7 @@ export class ChatsService implements OnModuleInit {
         (consent.state === 'REQUESTED' && (!journalling || consent.requested_rules_version === rulesVersion)))) {
         throw new ConflictException('Запрос уже сделан')
       }
+      await this.assertTelegramVerification(client, context, userId)
       if (!context.a_handle || !context.b_handle) throw new ConflictException('Обоим участникам нужен привязанный Telegram')
       const { rows: [updated] } = await client.query<{ request_id: string }>(`
         UPDATE telegram_consents SET state = 'REQUESTED', requested_by = $3, request_id = gen_random_uuid(),
@@ -349,6 +391,7 @@ export class ChatsService implements OnModuleInit {
         if (journalling && body.rulesVersion !== undefined && body.rulesVersion !== rulesVersion) {
           throw new ConflictException('Правила раскрытия обновились. Запросите обмен заново.')
         }
+        await this.assertTelegramVerification(client, context, userId)
         if (!context.a_handle || !context.b_handle) throw new ConflictException('Обоим участникам нужен привязанный Telegram')
         const { rows: [exchange] } = await client.query<{ id: string }>(`
           WITH accepted AS (
@@ -364,6 +407,15 @@ export class ChatsService implements OnModuleInit {
         await client.query(`
           UPDATE telegram_consents SET state = 'DECLINED' WHERE user_a_id = $1 AND user_b_id = $2
         `, pair)
+        const { rows: [listing] } = await client.query<{ title: string }>(
+          'SELECT l.title FROM chats c JOIN listings l ON l.id=c.listing_id WHERE c.id=$1', [id],
+        )
+        await this.notifications.notify(client, consent.requested_by, {
+          kind: 'disclosure.declined', title: 'Обмен контактами отклонён',
+          body: `Собеседник пока не готов обменяться контактами по объявлению «${publicListingTitle(listing.title)}». Продолжайте переписку в чате.`,
+          actions: [{ label: 'Открыть чат', href: '/chats/' + id }], channels: ['EMAIL'],
+          dedupeKey: 'disclosure.declined:' + requestId,
+        })
       }
     }
     return this.show(client, userId, id)
@@ -424,7 +476,8 @@ export class ChatsService implements OnModuleInit {
       SELECT ${chatColumns} ${chatJoins} ${pairJoin} WHERE ${memberWhere} AND c.id = $2
     `, [userId, id])
     if (!rows[0]) throw new NotFoundException('Чат не найден')
-    return participantChat(rows[0])
+    const deal = await this.deals.chatStatus(db, id)
+    return { ...participantChat(rows[0]), ...(deal && { deal }) }
   }
 
   private async context(db: Queryable, userId: string, id: string, lock = false): Promise<ChatContext> {
@@ -437,6 +490,8 @@ export class ChatsService implements OnModuleInit {
         ${versionA} AS current_a_version, ${versionB} AS current_b_version,
         CASE WHEN c.owner_id < c.visitor_id THEN owner.telegram ELSE visitor.telegram END AS a_handle,
         CASE WHEN c.owner_id < c.visitor_id THEN visitor.telegram ELSE owner.telegram END AS b_handle,
+        CASE WHEN c.owner_id < c.visitor_id THEN telegram_handle_verified(owner) ELSE telegram_handle_verified(visitor) END AS a_telegram_verified,
+        CASE WHEN c.owner_id < c.visitor_id THEN telegram_handle_verified(visitor) ELSE telegram_handle_verified(owner) END AS b_telegram_verified,
         (${chatActive}) AS active
       ${chatJoins} WHERE ${memberWhere} AND c.id = $2
       ${lock ? 'FOR UPDATE OF c FOR SHARE OF l' : ''}
@@ -447,6 +502,19 @@ export class ChatsService implements OnModuleInit {
 
   private partner(chat: ChatContext, userId: string) {
     return chat.owner_id === userId ? chat.visitor_id : chat.owner_id
+  }
+
+  private async assertTelegramVerification(db: Queryable, chat: ChatContext, userId: string) {
+    if (!await this.settings.enabled('disclosure_requires_verified_telegram', db)) return
+    const available = await this.settings.enabled('feature_telegram', db)
+    const actorIsA = chat.user_a_id === userId
+    if (!available || !(actorIsA ? chat.a_telegram_verified : chat.b_telegram_verified)) {
+      throw new ForbiddenException({ code: 'TELEGRAM_NOT_VERIFIED_SELF',
+        message: available ? 'Подтвердите свой Telegram: откройте профиль и подключите бота' : 'Подтверждение Telegram временно недоступно' })
+    }
+    if (!(actorIsA ? chat.b_telegram_verified : chat.a_telegram_verified)) {
+      throw new ForbiddenException({ code: 'TELEGRAM_NOT_VERIFIED_PARTNER', message: 'Собеседник ещё не подтвердил Telegram' })
+    }
   }
 
   private async pairConsent(db: Queryable, chat: ChatContext, lock = false): Promise<PairConsent | undefined> {

@@ -93,7 +93,7 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
         participantType: 'INDIVIDUAL', city: 'Пермь', country: 'RU', telegram: 'invalid_admin_' + suffix,
       },
     });
-    assert.match(String(registration.payload.message), /Выберите роль покупателя или продавца/);
+    assert.match(String(registration.payload.message), /покупаете вы, продаёте или совмещаете обе стороны/);
 
     const passwordChange = { currentPassword: adminCredentials.password, newPassword: 'Unused-admin-replacement-' + suffix };
     for (const { cookie } of [buyer, seller]) {
@@ -144,6 +144,7 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
       method: 'POST', cookie: seller.cookie, status: 201,
       body: {
         categoryId: categories.find(category => category.slug === 'gpu').id,
+        modelId: 'h100-sxm',
         title,
         description: 'Демонстрационная карточка только для интеграционной проверки.',
         quantity: 2,
@@ -163,7 +164,7 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
     await call('/listings/' + listing.id, { status: 401 });
     const matching = await call('/listings?' + new URLSearchParams({
       q: suffix, category: 'gpu', availability: 'STOCK', originCountry: 'RU',
-      priceMin: '140000', priceMax: '160000', ownerType: 'COMPANY', paymentMethod: 'BANK_TRANSFER',
+      priceMin: '140000', priceMax: '160000', currency: 'RUB', ownerType: 'COMPANY', paymentMethod: 'BANK_TRANSFER',
       deliveryIncluded: 'true', sort: 'price-asc',
     }), { cookie: buyer.cookie });
     assert.deepEqual(matching.payload.items.map(item => item.id), [listing.id]);
@@ -211,6 +212,7 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
     const title = 'Тест географии отгрузки ' + suffix;
     const fixture = {
       categoryId: listing.categoryId,
+      modelId: listing.modelId,
       title,
       description: 'Проверяем условия отгрузки со склада и фильтр по стране.',
       availability: 'STOCK',
@@ -281,7 +283,7 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
     })).payload;
     const { payload: offer } = await call('/listings', {
       method: 'POST', cookie: seller.cookie, status: 201,
-      body: { categoryId: listing.categoryId, title: 'Дополнительная поставка ' + suffix,
+      body: { categoryId: listing.categoryId, modelId: listing.modelId, title: 'Дополнительная поставка ' + suffix,
         description: 'Второе объявление для проверки общего доступа к контакту.', availability: 'ORDER', originCountry: 'RU' },
     });
     const sibling = await open(offer.id, buyer.cookie);
@@ -303,7 +305,7 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
 
     const { payload: wanted } = await call('/listings', {
       method: 'POST', cookie: buyer.cookie, status: 201,
-      body: { categoryId: listing.categoryId, title: 'Запрос на поставку ' + suffix,
+      body: { categoryId: listing.categoryId, modelId: listing.modelId, title: 'Запрос на поставку ' + suffix,
         description: 'Проверка общей истории контактов с обратными ролями в чате.',
         destinationCountry: 'RU', deliveryBy: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10) },
     });
@@ -394,7 +396,7 @@ test('market authorization, search, chat consent, reports, reviews and agent mod
     const { payload: anotherListing } = await call('/listings', {
       method: 'POST', cookie: seller.cookie, status: 201,
       body: {
-        categoryId: listing.categoryId, title: 'Другой GPU ' + suffix,
+        categoryId: listing.categoryId, modelId: listing.modelId, title: 'Другой GPU ' + suffix,
         description: 'Карточка для проверки отзывов от повторного и нового собеседника.',
         quantity: 1, priceMode: 'NEGOTIABLE', availability: 'ORDER', originScope: 'ANY',
       },

@@ -84,6 +84,7 @@ test('listing images are compressed, watermarked, bounded, atomic and access-con
   const categories = await request('/categories').then(response => response.json());
   const fixture = {
     categoryId: categories.find(category => category.slug === 'gpu').id,
+    modelId: 'h100-sxm',
     title: 'Тест фотографий ' + suffix,
     description: 'Объявление для интеграционной проверки обработки фотографий.',
     availability: 'ORDER', originCountry: 'RU',

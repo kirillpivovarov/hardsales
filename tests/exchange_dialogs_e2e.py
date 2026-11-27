@@ -108,7 +108,7 @@ def disclosures(page, seller, buyer):
     title = 'Запись для журнала ' + TAG
     gpu = next(row for row in api(seller, 'categories') if row['slug'] == 'gpu')
     listing = api(seller, 'listings', 'POST', {
-        'categoryId': gpu['id'], 'title': title, 'description': 'Проверочное предложение оборудования со склада.',
+        'categoryId': gpu['id'], 'modelId': 'h100-pcie', 'title': title, 'description': 'Проверочное предложение оборудования со склада.',
         'availability': 'STOCK', 'originCountry': 'RU', 'stockCity': 'Казань',
     }, status=201)
     chat = api(buyer, 'chats', 'POST', {'listingId': listing['id']}, status=201)

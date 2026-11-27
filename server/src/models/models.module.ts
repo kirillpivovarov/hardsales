@@ -19,6 +19,11 @@ class ModelsController {
     return this.models.suggest(query)
   }
 
+  @Get(':id/price-check')
+  async priceCheck(@Req() req: Request, @Param('id') id: string, @Query() query: Record<string, unknown>) {
+    return this.models.priceCheck(await this.auth.require(req), id, query)
+  }
+
   @Get(':id/analogs')
   async analogs(@Req() req: Request, @Param('id') id: string) {
     return this.models.analogs(await this.auth.require(req), id)

@@ -8,6 +8,7 @@ import { ActionPage, ExchangeProvider, NotificationLink, NotificationsPage, useE
 import { OnboardingPage, RulesAcceptance, RulesBanner } from './Onboarding';
 import { MatchesPage } from './Matches';
 import { DisclosureDetailPage, DisclosuresPage } from './Disclosures';
+import { BlockedDisputeAppeal, DisputesPage } from './Disputes';
 import { PrincipalAnswerPage, RepresentationAccount, RepresentationAction } from './Representation';
 import { PaymentsPage, TrustAccount } from './Trust';
 import { DealsPage } from './Deals';
@@ -20,6 +21,7 @@ import { ChatPage } from './ChatPage';
 import { ListingDetail } from './Detail';
 import { useI18n } from './i18n';
 import { ListingEditorPage } from './ListingForm';
+import { ListingOwnerAction, StaffListingPage } from './StaffListing';
 import { MyListingsPage } from './MyListings';
 import { Button, Icon, Notice, Spinner } from './ui';
 import './contextual.css';
@@ -62,7 +64,19 @@ function Header({ user, onLogout, notificationRevision }: {
   const { features } = useExchange();
   const staff = isStaff(user);
   const member = user && !staff;
+  const account = user && !user.mustChangePassword ? user.id : undefined;
+  const [inbox, setInbox] = useState<{ account: string; unread: number; chats: number }>();
+  const unread = inbox && inbox.account === account ? inbox : undefined;
   useEffect(() => { setOpen(false); }, [location.pathname]);
+  useEffect(() => {
+    if (!account) return;
+    const controller = new AbortController();
+    const refresh = () => void api<{ unread: number; chats: number }>('/notifications/counts', { signal: controller.signal })
+      .then(counts => { if (!controller.signal.aborted) setInbox({ ...counts, account }); }).catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [account, notificationRevision]);
   const languageSelect = locales.length > 1 && <select aria-label={t('Язык интерфейса')} className="locale-select" value={locale} onChange={event => setLocale(event.target.value)}>
     {locales.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}
   </select>;
@@ -74,21 +88,24 @@ function Header({ user, onLogout, notificationRevision }: {
         {member ? <NavLink to="/my-listings">{t('Мои объявления')}</NavLink> :
           <Link to="/catalog?kind=BUY" className={location.pathname === '/catalog' && new URLSearchParams(location.search).get('kind') === 'BUY' ? 'active' : ''}>{t('Заявки')}</Link>}
         <NavLink to="/info/about">{t('Как это работает')}</NavLink>
-        {member && <NavLink to="/chats"><Icon name="messages-square" size={17} /> {t('Чаты')}</NavLink>}
+        {member && <NavLink to="/chats" aria-label={unread?.chats ? t('Чаты, непрочитанных: {count}', { count: unread.chats }) : undefined}>
+          <Icon name="messages-square" size={17} /> {t('Чаты')}
+          {!!unread?.chats && <span className="exchange-count" aria-hidden="true">{unread.chats > 99 ? '99+' : unread.chats}</span>}
+        </NavLink>}
         {staff && <NavLink to="/admin">{t(user?.role === 'ADMIN' ? 'Администрирование' : 'Модерация')}</NavLink>}
         {languageSelect}
       </nav>
       <div className="header-actions">
         {user ? <>
           {member && <Link className="button button-primary publish-link" aria-label={t('Разместить объявление')} to="/listings/new"><Icon name="plus" size={17} /> <span>{t('Разместить')}</span></Link>}
-          {!user.mustChangePassword && Object.entries(features).some(([key, value]) => key.startsWith('feature_') && value === true) &&
-            <NotificationLink key={user.id} revision={notificationRevision} />}
+          {account && <NotificationLink unread={unread?.unread ?? 0} />}
           <details className="account-menu" key={location.key}>
             <summary className="button button-secondary" aria-label={t('{name}, меню профиля', { name: user.displayName || user.username })}><Icon name="user-round" size={17} /><span>{user.displayName || user.username}</span><Icon name="chevron-down" size={14} className="account-chevron" /></summary>
             <div className="menu-popover">
               <Link to="/account">{t('Профиль')}</Link>
               {member && features.feature_matching === true && <MatchesLink />}
               {member && features.feature_disclosure_journal === true && <Link to="/disclosures">{t('Раскрытия')}</Link>}
+              {member && features.feature_disputes === true && <Link to="/disputes">{t('Споры')}</Link>}
               {member && features.feature_trust_rating === true && <Link to="/deals">{t('Сделки')}</Link>}
               {member && <Link to="/my-listings">{t('Мои объявления')}</Link>}
               <button type="button" onClick={() => { void onLogout().catch((error: Error) => setSessionError(error.message)); }}>{t('Выйти')}</button>
@@ -120,7 +137,7 @@ function Footer() {
 
 const fallbackContent: Record<string, { title: string; body: string }> = {
   about: { title: 'Как работает hwforai', body: 'hwforai помогает покупателям и продавцам серверного оборудования находить друг друга.\n\nПодтвердите электронную почту, чтобы смотреть объявления. Укажите модель, сроки и коммерческие условия в предложении или заявке.\n\nОбсудите детали в чате на площадке. Контакты Telegram открываются только по взаимному согласию.' },
-  rules: { title: 'Правила площадки', body: 'Указывайте точные сведения об оборудовании, состоянии, цене и условиях поставки.\n\nПервый контакт происходит в чате. Для продолжения в Telegram используйте контакт, открытый через профиль. Жалоба на переписку с другим аккаунтом Telegram не принимается.\n\nУчастники проверяют контрагента, оборудование и применимые требования при заключении сделки.' },
+  rules: { title: 'Правила площадки', body: 'Правила площадки временно недоступны. Обновите страницу позже.' },
   privacy: { title: 'Конфиденциальность', body: 'Почта нужна для подтверждения аккаунта и входа. Она не отображается в каталоге.\n\nУчастники видят ник, город, страну и репутацию автора объявления. После взаимного согласия имена Telegram доступны в диалогах между этими собеседниками. После смены имени требуется новое согласие. Площадка хранит историю изменений привязанного Telegram. Собеседникам доступны только имена, которыми обе стороны согласились обменяться в текущей версии.' },
 };
 
@@ -239,13 +256,15 @@ function AppRoutes() {
         <Route path="/matches/:id" element={secure(<MatchesPage />, 'MEMBER')} />
         <Route path="/disclosures" element={secure(<DisclosuresPage />, 'MEMBER')} />
         <Route path="/disclosures/:id" element={secure(<DisclosureDetailPage />, 'MEMBER')} />
+        <Route path="/disputes" element={secure(<DisputesPage userId={user?.id ?? ''} />, 'MEMBER')} />
+        <Route path="/disputes/:id" element={secure(<DisputesPage userId={user?.id ?? ''} />, 'MEMBER')} />
         <Route path="/deals" element={secure(<DealsPage />, 'MEMBER')} />
         <Route path="/deals/:id" element={secure(<DealsPage />, 'MEMBER')} />
         <Route path="/principal-answers" element={secure(<PrincipalAnswerPage />, 'MEMBER')} />
         <Route path="/payments" element={<PaymentsPage />} />
         <Route path="/info/payments" element={<PaymentsPage />} />
         <Route path="/a/:token" element={<ActionPage renderForm={(action, submit, pending) => {
-          if (pendingConsent && action.purpose !== 'email.optout') return <Navigate to={consentReturn} replace />;
+          if (pendingConsent && !['email.optout', 'dispute.review'].includes(action.purpose)) return <Navigate to={consentReturn} replace />;
           switch (action.purpose) {
             case 'principal.confirm':
             case 'company_email.confirm':
@@ -255,6 +274,11 @@ function AppRoutes() {
             case 'listing.actuality-all':
             case 'listing.extend':
               return <Button disabled={pending} onClick={() => void submit({ answer: 'ACTUAL' })}>{t('Подтвердить')}</Button>;
+            case 'dispute.review':
+              return <BlockedDisputeAppeal />;
+            case 'listing.owner-confirm':
+            case 'listing.owner-reject':
+              return <ListingOwnerAction purpose={action.purpose} fields={action.fields} onSubmit={() => void submit({})} pending={pending} />;
             case 'email.optout':
               return <Button disabled={pending} onClick={() => void submit({})}>{t('Отказаться от писем')}</Button>;
             case 'chat.reveal':
@@ -268,13 +292,15 @@ function AppRoutes() {
               return <Notice tone="error">{t('Действие недоступно.')}</Notice>;
           }
         }} />} />
-        <Route path="/my-listings" element={secure(<MyListingsPage />, 'MEMBER')} />
+        <Route path="/my-listings" element={secure(user && <MyListingsPage user={user} />, 'MEMBER')} />
         <Route path="/listings/new" element={secure(user && <ListingEditorPage user={user} />, 'MEMBER', true)} />
         <Route path="/listings/:id/edit" element={secure(user && <ListingEditorPage user={user} />, 'MEMBER', true)} />
         <Route path="/listings/:id" element={checking ? <Spinner /> : <ListingDetail user={user} />} />
         <Route path="/chats" element={secure(user && <ChatPage user={user} />, 'MEMBER', true)} />
-        <Route path="/chats/:id" element={secure(user && <ChatPage user={user} />, 'MEMBER', true)} />
+        <Route path="/chats/:id" element={secure(user && <ChatPage user={user}
+          onRead={() => setNotificationRevision(value => value + 1)} />, 'MEMBER', true)} />
         <Route path="/admin" element={secure(user && <AdminPage user={user} />, 'STAFF')} />
+        <Route path="/admin/users/:userId/listing/new" element={secure(<StaffListingPage />, 'STAFF')} />
         <Route path="/info/:key" element={<InfoPage user={user} onUser={setUser} />} />
         <Route path="*" element={<div className="container workflow-page"><h1>{t('Страница не найдена')}</h1><Link to="/catalog" className="button button-primary">{t('К каталогу')}</Link></div>} />
       </Routes>}

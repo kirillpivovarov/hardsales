@@ -64,6 +64,10 @@ test('model aliases, private proposals and moderated PCI import', { skip: !local
     await db.query(`INSERT INTO auth_sessions (user_id,token_hash,expires_at) VALUES ($1,$2,now() + interval '1 hour')`, [actorId, sessionHash]);
 
     assert.equal((await models.suggest({ q: 'Н200 SXM' })).items[0].id, 'h200-sxm');
+    for (const q of ['H100', 'h100', 'Н100', 'h-100']) {
+      assert.deepEqual(new Set((await models.suggest({ q })).items.map(model => model.id)),
+        new Set(['h100-sxm', 'h100-pcie', 'hgx-h100-8', 'dgx-h100']));
+    }
     assert.equal((await models.suggest({ q: 'H 200 NVL' })).items[0].id, 'h200-nvl');
     const serverMatches = await models.browse(member, { category: 'servers', q: 'Н-200' });
     const serverIds = serverMatches.families.flatMap(group => group.models.map(model => model.id));

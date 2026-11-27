@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api, isStaff } from './api';
+import { api, isStaff, tradeSidesFor } from './api';
 import type { User } from './api';
 import { ActualityBadges } from './ActualityWidgets';
 import { useExchange } from './Exchange';
@@ -11,7 +11,8 @@ import { LotAlternatives } from './LotGroups';
 import { useI18n } from './i18n';
 import { ListingPhoto } from './ListingImages';
 import { CountrySelect } from './CountrySelect';
-import { categoryIcon, categoryName, countryName, formatMoney, terms } from './market';
+import { categoryIcon, categoryName, countryName, terms } from './market';
+import { ListingPrice } from './ListingPrice';
 import type { Category, Listing } from './market';
 import { Button, Field, Icon, Notice, Spinner } from './ui';
 import './market-design.css';
@@ -39,7 +40,8 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   const [error, setError] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [retry, setRetry] = useState(0);
-  const oppositeKind = user?.role === 'SELLER' ? 'BUY' : user?.role === 'BUYER' ? 'SELL' : null;
+  const sides = tradeSidesFor(user);
+  const oppositeKind = sides.length === 1 ? sides[0] === 'BUY' ? 'SELL' : 'BUY' : null;
   const kind = oppositeKind ?? (query.get('kind') === 'BUY' ? 'BUY' : 'SELL');
   const selectedCategory = query.get('category') ?? '';
   const selectedOrigin = query.get('country') ?? '';
@@ -48,7 +50,7 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
   const destination = query.get('destinationCountry') ?? '';
   const priceMin = query.get('priceMin') ?? '';
   const priceMax = query.get('priceMax') ?? '';
-  const currency = query.get('currency') || (priceMin || priceMax ? 'RUB' : '');
+  const currency = query.get('currency') ?? '';
   const authenticated = Boolean(user?.emailVerified && !user.mustChangePassword);
   const staff = authenticated && isStaff(user);
   const requestedQuery = query.toString();
@@ -212,11 +214,11 @@ export function CatalogPage({ user, home = false }: { user: User | null; home?: 
               const minimum = String(data.get('priceMin') ?? '');
               const maximum = String(data.get('priceMax') ?? '');
               const selectedCurrency = String(data.get('currency') ?? '');
-              change({ priceMin: minimum, priceMax: maximum, currency: selectedCurrency || (minimum || maximum ? 'RUB' : '') });
+              change({ priceMin: minimum, priceMax: maximum, currency: selectedCurrency });
             }}>
-              <Field label={t('Цена от')}><input type="number" min="0" max="9999999999999.99" step="0.01" name="priceMin" defaultValue={priceMin} /></Field>
-              <Field label={t('Цена до')}><input type="number" min="0" max="9999999999999.99" step="0.01" name="priceMax" defaultValue={priceMax} /></Field>
-              <Field label={t('Валюта')} hint={t('Если задать диапазон и оставить валюту пустой, поиск применит RUB.')}>
+              <Field label={t('Цена за шт., от')}><input type="number" min="0" max="9999999999999.99" step="0.01" name="priceMin" defaultValue={priceMin} /></Field>
+              <Field label={t('Цена за шт., до')}><input type="number" min="0" max="9999999999999.99" step="0.01" name="priceMax" defaultValue={priceMax} /></Field>
+              <Field label={t('Валюта')} hint={t('Без выбранной валюты диапазон считается в USD для объявлений в любой валюте.')}>
                 <select name="currency" defaultValue={currency}><option value="">{t('Любая')}</option>{['RUB','USD','EUR','CNY','KZT','AED'].map(value => <option key={value}>{value}</option>)}</select>
               </Field>
               <Button type="submit" variant="secondary">{t('Применить цену')}</Button>
@@ -303,13 +305,12 @@ function ListingCard({ listing, category, returnTo }: { listing: Listing; catego
   const { t, locale } = useI18n();
   const place = listing.kind === 'SELL' && listing.originScope === 'ANY' ? t('Любая страна')
     : [listing.stockCity, listing.originCountry ? countryName(listing.originCountry, locale) : listing.destinationCountry ? countryName(listing.destinationCountry, locale) : listing.owner.city].filter(Boolean).join(', ');
-  const price = listing.price == null ? t('По договорённости') : (listing.kind === 'BUY' ? t('До {price}', { price: formatMoney(listing.price, listing.currency, locale) }) : formatMoney(listing.price, listing.currency, locale));
   const card = <Link className="listing-card" to={`/listings/${listing.id}`} state={{ returnTo }}>
     <ListingVisual listing={listing} category={category} />
     <div className="listing-card-body">
       <span className="listing-kicker">{listing.kind === 'BUY' ? t('Заявка на закупку') : listing.availability ? t(terms[listing.availability] ?? listing.availability) : t('Предложение')}</span>
       <h3>{listing.title}</h3>
-      <strong className="listing-price">{price}</strong>
+      <ListingPrice listing={listing} className="listing-price" usd />
       <span className="listing-place"><Icon name="map-pin" size={15} />{place || t('Любая страна')}</span>
       <div className="listing-card-labels">
         <ListingExchangeBadges listing={listing} /><ActualityBadges listing={listing} />

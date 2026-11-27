@@ -4,7 +4,10 @@ import { isStaffRole, type SessionUser, type StaffSession } from '../auth/auth.t
 import { outsideContact } from '../contact'
 import { auditExchange } from '../exchange/audit'
 import { ExchangeNotifications } from '../exchange/notifications'
-import { escapedSearch, integer, object, oneOf, pageParams, Parameters as SqlParameters, slug, str, uuid } from '../market/market.inputs'
+import {
+  boolean, currencies, escapedSearch, integer, maxUnitPrice, object, oneOf, pageParams, Parameters as SqlParameters,
+  priceValue, slug, str, uuid,
+} from '../market/market.inputs'
 import { hardwareModelId, validateListingModels } from './model-listings'
 
 const modelStatuses = ['ACTIVE', 'PENDING', 'DISABLED'] as const
@@ -144,6 +147,37 @@ export class ModelsService {
     return rows
   }
 
+  async priceCheck(user: SessionUser, idInput: string, query: Record<string, unknown>) {
+    const id = hardwareModelId(idInput)
+    const price = priceValue(query.price, 'Цена за шт.', 0.01, maxUnitPrice)
+    const quantity = integer(query.quantity, 'Количество', 1, 1_000_000)
+    const currency = oneOf(query.currency, currencies, 'Валюта')
+    const delivered = boolean(query.deliveryIncluded ?? false, 'Доставка')
+    if (quantity <= 50) return { looksLikeTotal: false }
+    const { rows: [result] } = await this.db.query<{ looksLikeTotal: boolean }>(`
+      WITH market AS (
+        SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY listing.price * rate.usd_per_unit) AS midpoint
+        FROM listings listing JOIN users owner ON owner.id = listing.owner_id
+        JOIN fx_rates rate ON rate.currency = listing.currency AND rate.usd_per_unit IS NOT NULL
+        WHERE listing.model_id = $1 AND listing.delivery_included = $4 AND listing.kind = 'SELL'
+          AND listing.status = 'ACTIVE' AND listing.price_mode = 'FIXED'
+          AND listing.confirmed_at >= now() - interval '14 days'
+          AND owner.id <> $5 AND owner.status = 'ACTIVE' AND owner.email_verified_at IS NOT NULL
+        HAVING count(*) >= 5
+      )
+      SELECT COALESCE($2::numeric * rate.usd_per_unit > 20 * coalesce(
+        (SELECT midpoint FROM market),
+        (SELECT (min_usd + max_usd)/2 FROM price_corridors
+          WHERE model_id = $1 AND basis = CASE WHEN $4 THEN 'DELIVERED' ELSE 'SELLER_WAREHOUSE' END),
+        (SELECT (min_usd + max_usd)/2 * 1.06 FROM price_corridors
+          WHERE $4 AND model_id = $1 AND basis = 'SELLER_WAREHOUSE')
+      ), false) AS "looksLikeTotal"
+      FROM hardware_models model JOIN fx_rates rate ON rate.currency = $3
+      WHERE model.id = $1 AND (model.status = 'ACTIVE' OR (model.status = 'PENDING' AND model.proposed_by = $5))
+    `, [id, price, currency, delivered, user.id])
+    return result ?? { looksLikeTotal: false }
+  }
+
   async analogs(user: SessionUser, idInput: string) {
     const id = hardwareModelId(idInput)
     const { rows: [selected] } = await this.db.query<{ category_slug: string }>(`
@@ -174,6 +208,7 @@ export class ModelsService {
         LEFT JOIN model_families f ON f.key = m.family WHERE lower(m.name_ru) = lower($1)
       `, [name])
       if (existing) {
+        if (existing.categorySlug !== categorySlug) throw new ConflictException('Модель относится к другой категории')
         if (existing.status === 'DISABLED') throw new ConflictException('Такая модель есть в справочнике, но выключена модератором')
         if (existing.status === 'PENDING' && existing.proposedBy !== user.id) {
           throw new ConflictException('Модель с таким названием уже ожидает проверки')

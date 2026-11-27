@@ -1,8 +1,11 @@
+export type TradeSide = 'BUY' | 'SELL';
+
 export interface User {
   id: string;
   username: string;
   displayName: string;
   role: 'BUYER' | 'SELLER' | 'ADMIN' | 'MODERATOR';
+  tradeSides?: TradeSide[];
   participantType: 'COMPANY' | 'INDIVIDUAL';
   city: string;
   country: string;
@@ -27,6 +30,11 @@ export interface User {
 
 export function isStaff(user?: User | null): boolean {
   return user?.role === 'ADMIN' || user?.role === 'MODERATOR';
+}
+
+export function tradeSidesFor(user?: User | null): TradeSide[] {
+  if (!user || isStaff(user)) return [];
+  return user.tradeSides ?? [user.role === 'SELLER' ? 'SELL' : 'BUY'];
 }
 
 export class ApiError extends Error {

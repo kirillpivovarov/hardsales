@@ -52,7 +52,7 @@ test('trust verification, private files and post-disclosure deals', { skip: !ori
     assert.equal(own.listingLimit, 3)
     const category = (await get(seller, '/categories').then(response => response.json())).find(item => item.slug === 'gpu')
     const limitOffer = {
-      categoryId: category.id, title: 'Проверяем лимит предложения ' + randomUUID().slice(0, 8),
+      categoryId: category.id, modelId: 'h100-sxm', title: 'Проверяем лимит предложения ' + randomUUID().slice(0, 8),
       description: 'Независимая фикстура для лимита активных объявлений.',
       stockCity: 'Пермь', availability: 'STOCK', originCountry: 'RU',
     }
@@ -83,7 +83,7 @@ test('trust verification, private files and post-disclosure deals', { skip: !ori
   await t.test('day proof case folding, listing privacy and manual publication suspension', async () => {
     const category = (await get(seller, '/categories').then(response => response.json())).find(item => item.slug === 'gpu')
     const source = {
-      categoryId: category.id, title: 'NVIDIA H200 для проверки ' + randomUUID().slice(0, 8),
+      categoryId: category.id, modelId: 'h200-sxm', title: 'NVIDIA H200 для проверки ' + randomUUID().slice(0, 8),
       description: 'Тестовое предложение по проверяемому оборудованию.',
       stockCity: 'Москва', availability: 'STOCK', originCountry: 'RU', paymentTerms: ['PREPAY_100'],
     }
@@ -152,11 +152,13 @@ test('trust verification, private files and post-disclosure deals', { skip: !ori
     const category = (await get(seller, '/categories').then(response => response.json())).find(item => item.slug === 'servers')
     const source = {
       categoryId: category.id, modelId: 'hgx-h200-8', availability: 'STOCK', originCountry: 'RU', stockCity: 'Москва',
-      priceMode: 'FIXED', currency: 'USD', deliveryIncluded: false,
+      priceMode: 'FIXED', currency: 'USD', deliveryIncluded: false, quantity: 10,
       description: 'Сервер для независимой проверки границ ценового коридора.',
     }
     for (const price of [290000, 300000, 310000, 320000, 330000]) {
-      await mutate(seller, '/listings', { ...source, price, title: `HGX H200 согласованное предложение ${price}` }, 201)
+      const listed = await mutate(seller, '/listings', { ...source, price, title: `HGX H200 согласованное предложение ${price}` }, 201)
+        .then(response => response.json())
+      assert.equal(listed.totalPrice, price * 10)
     }
     const title = 'Сервер для проверки пограничной цены ' + randomUUID().slice(0, 8)
     const item = await mutate(seller, '/listings', { ...source, price: 450000, title }, 201).then(response => response.json())

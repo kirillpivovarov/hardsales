@@ -9,6 +9,7 @@ type Invite = {
   id: string;
   code: string;
   note: string;
+  knownPersonally: boolean;
   presetRole: 'BUYER' | 'SELLER' | null;
   status: InviteStatus;
   expiresAt: string;
@@ -29,7 +30,7 @@ const statusLabels: Record<InviteStatus, string> = {
 const modeLabels = { DIRECT: 'Прямая сторона', AGENT: 'Агент', BOTH: 'Прямая сторона и агент' };
 const errorMessage = (cause: unknown, fallback: string) => cause instanceof Error ? cause.message : fallback;
 
-export function InvitesPanel() {
+export function InvitesPanel({ administrator = false }: { administrator?: boolean }) {
   const { t, locale } = useI18n();
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
@@ -37,6 +38,7 @@ export function InvitesPanel() {
   const [revision, setRevision] = useState(0);
   const [data, setData] = useState<InvitePage>();
   const [busy, setBusy] = useState(false);
+  const [knownPersonally, setKnownPersonally] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -99,9 +101,11 @@ export function InvitesPanel() {
           note: String(form.get('note') ?? '').trim(),
           presetRole: form.get('presetRole') || null,
           expiresInDays: Number(form.get('expiresInDays')),
+          ...(knownPersonally && { knownPersonally: true }),
         },
       });
       element.reset();
+      setKnownPersonally(false);
       setNotice(t('Создано приглашений: {count}', { count: items.length }));
       setPage(1);
       setRevision((current) => current + 1);
@@ -159,7 +163,14 @@ export function InvitesPanel() {
           <Field label={t('Роль')}><select name="presetRole">
             <option value="">{t('Любая')}</option><option value="BUYER">{t('Покупатель')}</option><option value="SELLER">{t('Продавец')}</option>
           </select></Field>
-          <Field label={t('Заметка')}><input name="note" maxLength={200} /></Field>
+          {administrator && <div className="workflow-span">
+            <label className="checkbox-label"><input name="knownPersonally" type="checkbox" checked={knownPersonally}
+              onChange={event => setKnownPersonally(event.target.checked)} />
+              {t('Знаю лично')}
+            </label>
+            {knownPersonally && <p className="muted">{t('Участник получит уровень 1 и метку «Проверен оператором». Добавьте заметку.')}</p>}
+          </div>}
+          <Field label={t('Заметка')}><input name="note" maxLength={200} minLength={knownPersonally ? 5 : undefined} required={knownPersonally} /></Field>
           <div className="workflow-span"><Button type="submit" disabled={busy}>{t('Создать приглашения')}</Button></div>
         </form>
       </section>
@@ -200,7 +211,7 @@ export function InvitesPanel() {
               <tbody>{data.items.map((invite) => (
                 <tr key={invite.id}>
                   <td data-label={t('Код')}><code>{invite.code}</code></td>
-                  <td data-label={t('Заметка')}>{invite.note || '—'}</td>
+                  <td data-label={t('Заметка')}>{invite.knownPersonally && <><strong>{t('Знаю лично')}</strong><br /></>}{invite.note || '—'}</td>
                   <td data-label={t('Роль')}>{t(invite.presetRole === 'BUYER' ? 'Покупатель' : invite.presetRole === 'SELLER' ? 'Продавец' : 'Любая')}</td>
                   <td data-label={t('Действует до')}><time dateTime={invite.expiresAt}>{dates.format(new Date(invite.expiresAt))}</time></td>
                   <td data-label={t('Статус')}>{t(statusLabels[invite.status])}{invite.usedBy && ' · ' + invite.usedBy.displayName}</td>

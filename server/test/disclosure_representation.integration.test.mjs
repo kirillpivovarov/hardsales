@@ -87,7 +87,7 @@ test('disclosure journal, company confirmation and principal privacy', {
     const category = (await call('/categories')).data.find(item => item.slug === 'gpu');
     const card = {
       kind: 'SELL', title: 'NVIDIA H100 SXM ' + suffix, description: 'Комплект для проверки скрытия реквизитов.',
-      categoryId: category.id, quantity: 1, condition: 'NEW', availability: 'STOCK', stockCity: 'Москва', originCountry: 'RU',
+      categoryId: category.id, modelId: 'h100-sxm', quantity: 1, condition: 'NEW', availability: 'STOCK', stockCity: 'Москва', originCountry: 'RU',
       representation: 'AGENT', agentFeeDisclosed: true, agentFeeKind: 'PERCENT', agentFeeValue: 1.5, agentFeePayer: 'SELLER',
     };
     await call('/listings', { method: 'POST', cookie: seller.cookie, status: 400, body: card });

@@ -1,17 +1,19 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import type { PoolClient } from 'pg';
-import type { SessionUser } from '../auth/auth.types';
+import type { SessionUser, StaffSession } from '../auth/auth.types';
 import { publicCity, publicListingTitle, withoutLegacyProfileContacts, type PublicProfileText } from '../contact-guard/public-text';
 import { DatabaseService, type Queryable } from '../database/database.service';
 import { ExchangeActions, type ExchangeAction } from '../exchange/actions';
+import { DealsService } from '../exchange/deals.service';
 import { auditExchange } from '../exchange/audit';
 import { ExchangeJobs, type ExchangeClock } from '../exchange/jobs';
 import { ExchangeNotifications } from '../exchange/notifications';
 import { OnboardingService } from '../exchange/onboarding.service';
 import { PlatformSettings } from '../exchange/platform-settings';
+import { lockTrustStaff } from '../exchange/trust-access';
 import { paymentForms } from '../exchange/trust-score';
 import { currencies, escapedSearch, object, oneOf, pageParams, uuid } from '../market/market.inputs';
-import { publicProfile, trustEnabledSql } from '../market/market.queries';
+import { trustEnabledSql } from '../market/market.queries';
 import {
   compareListings, eligibleListings, isInitialPass, matchingLock, matchingRates, operatorEligibleListings,
   recomputeAllPairs, recomputeListingPairs,
@@ -60,6 +62,7 @@ export class MatchingService implements OnModuleInit {
     private readonly db: DatabaseService, private readonly settings: PlatformSettings,
     private readonly jobs: ExchangeJobs, private readonly notifications: ExchangeNotifications,
     private readonly onboarding: OnboardingService, private readonly actions: ExchangeActions,
+    private readonly deals: DealsService,
   ) {}
 
   onModuleInit() {
@@ -228,7 +231,7 @@ export class MatchingService implements OnModuleInit {
       : `Совпадение по «${listing.title}»: контрагент ответил «Не подходит». Причина: ${reason}`;
     await this.notifications.notify(client, receiver, {
       kind, title: kind === 'match.chat' ? 'Открыт чат по совпадению' : 'Совпадение отклонено',
-      body, payload: { matchId: match.id }, dedupeKey: kind + ':' + match.id,
+      body, payload: { matchId: match.id }, dedupeKey: kind + ':' + match.id, channels: ['EMAIL'],
       actions: [chatId
         ? { label: 'Открыть чат', action: 'OPEN_CHAT', href: '/chats/' + chatId }
         : { label: 'Открыть', action: 'OPEN_MATCH', href: '/matches/' + match.id }],
@@ -310,6 +313,7 @@ export class MatchingService implements OnModuleInit {
     await client.query(`
       UPDATE listing_matches SET status = 'CHAT', chat_id = $3, updated_at = now(), ${firstAction} WHERE id = $1
     `, [id, userId, chat.id]);
+    await this.deals.startFromChat(client, chat.id, userId, 'PAIR_CHAT', true);
     if (current.status === 'NEW') await this.otherSideNotice(client, match, userId, 'match.chat', undefined, chat.id);
     return { chatId: chat.id };
   }
@@ -335,7 +339,15 @@ export class MatchingService implements OnModuleInit {
     return rows;
   }
 
-  async putRate(actor: SessionUser<'ADMIN'>, currencyInput: string, body: unknown) {
+  async putRate(actor: StaffSession<'ADMIN'>, currencyInput: string, body: unknown) {
+    return this.db.transaction(async client => {
+      await lockTrustStaff(client, actor);
+      return this.setRateWith(client, actor, currencyInput, body);
+    });
+  }
+
+  async setRateWith(client: PoolClient, actor: Pick<SessionUser<'ADMIN'>, 'id' | 'username' | 'role'>,
+    currencyInput: string, body: unknown) {
     const currency = oneOf(currencyInput, currencies, 'Валюта');
     const value = object(body).usdPerUnit;
     const rate = typeof value === 'number' && Number(value.toFixed(8)) === value ? value.toFixed(8)
@@ -343,23 +355,27 @@ export class MatchingService implements OnModuleInit {
     if (value !== null && (!/^\d{1,10}(\.\d{1,8})?$/.test(rate) || Number(rate) <= 0)) {
       throw new BadRequestException('Укажите положительный курс. Допустимо до 8 знаков после точки.');
     }
-    return this.db.transaction(async client => {
-      const { rows: [before] } = await client.query<RateRow>(
-        `SELECT ${rateColumns} FROM fx_rates WHERE currency = $1 FOR UPDATE`, [currency],
-      );
-      if (value === null ? before.usdPerUnit === null : canonicalRate(rate) === canonicalRate(before.usdPerUnit)) return before;
-      const { rows: [after] } = await client.query<RateRow>(`
-        UPDATE fx_rates SET usd_per_unit = $2, updated_at = now(), updated_by = $3 WHERE currency = $1
-        RETURNING ${rateColumns}
-      `, [currency, value === null ? null : rate, actor.id]);
-      await auditExchange(client, actor, 'fx_rate', currency, 'update', before, after);
-      // Changing a rate can admit or invalidate both same-currency and cross-currency pairs.
-      await client.query(`
-        INSERT INTO matching_pending(listing_id) SELECT id FROM listings WHERE currency = $1 AND model_id IS NOT NULL
-        ON CONFLICT (listing_id) DO UPDATE SET queued_at = EXCLUDED.queued_at
-      `, [currency]);
-      return after;
-    });
+    await client.query('SELECT pg_advisory_xact_lock(18403, 32)');
+    const { rows: [before] } = await client.query<RateRow>(
+      `SELECT ${rateColumns} FROM fx_rates WHERE currency = $1 FOR UPDATE`, [currency],
+    );
+    if (value === null ? before.usdPerUnit === null : canonicalRate(rate) === canonicalRate(before.usdPerUnit)) return before;
+    const { rows: [after] } = await client.query<RateRow>(`
+      UPDATE fx_rates SET usd_per_unit = $2, updated_at = now(), updated_by = $3 WHERE currency = $1
+      RETURNING ${rateColumns}
+    `, [currency, value === null ? null : rate, actor.id]);
+    await client.query(`
+      UPDATE listings SET price_usd = round(price * $2::numeric, 2)
+      WHERE currency = $1 AND price_mode = 'FIXED'
+        AND price_usd IS DISTINCT FROM round(price * $2::numeric, 2)
+    `, [currency, after.usdPerUnit]);
+    await auditExchange(client, actor, 'fx_rate', currency, 'update', before, after);
+    // Changing a rate can admit or invalidate both same-currency and cross-currency pairs.
+    await client.query(`
+      INSERT INTO matching_pending(listing_id) SELECT id FROM listings WHERE currency = $1 AND model_id IS NOT NULL
+      ON CONFLICT (listing_id) DO UPDATE SET queued_at = EXCLUDED.queued_at
+    `, [currency]);
+    return after;
   }
 
   private async notifyNew(client: PoolClient) {
@@ -391,19 +407,23 @@ export class MatchingService implements OnModuleInit {
         concat(CASE WHEN s.model_id IS DISTINCT FROM b.model_id THEN ' (по аналогу)' ELSE '' END, ', ',
           other.quantity, ' шт. (партия от ', other.min_lot, '), ',
           coalesce(other.origin_country, 'любая страна'), ', ',
-          coalesce(round(other.price / other.quantity, 2)::text || ' ' || other.currency || ' за ед.', 'договорная цена'),
+          coalesce(other.price::text || ' ' || other.currency || ' за шт.' ||
+            CASE WHEN other.quantity>1 THEN ' (' || (other.price*other.quantity)::text || ' ' || other.currency ||
+              ' за ' || other.quantity || ' шт.)' ELSE '' END, 'договорная цена'),
           ', оплата: ', array_to_string(ARRAY(
             SELECT coalesce(term->>'label_ru', method_label) FROM unnest(
               CASE WHEN cardinality(other.payment_terms) > 0 THEN other.payment_terms ELSE other.payment_methods END
             ) AS methods(code)
-            LEFT JOIN LATERAL (SELECT CASE code WHEN 'BANK_TRANSFER' THEN 'Безналичный перевод' WHEN 'CARD' THEN 'Карта'
+            LEFT JOIN LATERAL (SELECT CASE code WHEN 'BANK_TRANSFER' THEN 'Банковский перевод' WHEN 'CARD' THEN 'Карта'
               WHEN 'CASH' THEN 'Наличные' WHEN 'LETTER_OF_CREDIT' THEN 'Аккредитив' ELSE code END) ml(method_label) ON true
             LEFT JOIN LATERAL (SELECT t AS term FROM jsonb_array_elements($2::jsonb) t WHERE t->>'code' = code LIMIT 1) forms ON true
           ), ', '), '. Контрагент: ',
           CASE WHEN other.representation = 'AGENT' THEN 'агент' WHEN other.kind = 'SELL' THEN 'продавец' ELSE 'покупатель' END,
-          ', рейтинг ', coalesce(CASE WHEN m.seller_id = $1 THEN (${publicProfile('buyer')}) ->> 'rating'
-            ELSE (${publicProfile('seller')}) ->> 'rating' END, 'пока нет'),
-          CASE WHEN m.type = 'PARTIAL' THEN '. Различия в условиях — ' || coalesce((
+          ', ', CASE (CASE WHEN m.seller_id=$1 THEN listing_trust_projection(b,buyer) ELSE listing_trust_projection(s,seller) END)->>'ownerLevelName'
+            WHEN 'проверен сделкой' THEN 'сделка подтверждена' WHEN 'проверен документами' THEN 'документы проверены'
+            WHEN 'проверен оператором' THEN 'проверен оператором' ELSE 'участник не проверен' END,
+          ', рейтинг ', coalesce((CASE WHEN m.seller_id=$1 THEN buyer.trust_score ELSE seller.trust_score END)::text || ' из 100', 'считается'),
+          CASE WHEN m.type = 'PARTIAL' THEN '. Различия в условиях: ' || coalesce((
             SELECT string_agg(x->>'text', ' ') FROM jsonb_array_elements(m.mismatches) x), '') ELSE '' END) AS suffix
       ${matchJoins}
       JOIN listings mine ON mine.id = CASE WHEN m.seller_id = $1 THEN s.id ELSE b.id END

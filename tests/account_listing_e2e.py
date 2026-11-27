@@ -165,7 +165,8 @@ def listing_test(page: Page, kind: str):
     check_no_overflow(page)
     title = f"Сервер для QA {kind} {MARKER[:5]}qa{MARKER[5:]}"
     field(page, "title").fill(title)
-    field(page, "categoryId").select_option(index=1)
+    categories = page.request.get("/api/v1/categories").json()
+    field(page, "categoryId").select_option(next(category["id"] for category in categories if category["slug"] == "cpu"))
     description = "Проверяем публикацию, редактирование и архивирование объявления."
     field(page, "description").fill(description)
     field(page, "quantity").fill("3")

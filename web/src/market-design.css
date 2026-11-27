@@ -451,6 +451,17 @@
   overflow-wrap: anywhere;
 }
 
+.listing-price-block {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.listing-price-detail {
+  font-size: .875rem;
+}
+
 .listing-place {
   display: flex;
   align-items: flex-start;

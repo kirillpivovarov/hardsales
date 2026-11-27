@@ -17,6 +17,7 @@ export type ListingTrust = {
   ownerScore: number | null
   ownerLevel: number
   ownerLevelName: string
+  ownerLevelSource?: 'OPERATOR_KNOWN' | 'DOCUMENTS' | 'DEAL' | null
   ownerDeals: number
   reliable: boolean
   proof: 'STOCK' | 'FUNDS' | null
@@ -117,7 +118,8 @@ export function TrustBadges({ listing }: { listing: ListingFields }) {
   if (!features.feature_trust_rating || !trust) return null
   return <ul className="trust-badges" aria-label={t('Рейтинг и подтверждения')}>
     {trust.score != null && <li className="trust-tag">{t('Рейтинг объявления · {score}/100', { score: trust.score })}</li>}
-    <li className={'trust-tag trust-level-' + trust.ownerLevel}>{t(verificationLevels[trust.ownerLevel] ?? verificationLevels[0])}
+    <li className={'trust-tag trust-level-' + trust.ownerLevel}>{t(trust.ownerLevelSource === 'OPERATOR_KNOWN'
+      ? 'Проверен оператором' : verificationLevels[trust.ownerLevel] ?? verificationLevels[0])}
       {trust.ownerLevel === 2 && ` · ${t('Сделок: {count}', { count: trust.ownerDeals })}`}</li>
     {trust.reliable && <li className="trust-tag trust-level-2">{t('Надёжный участник')}</li>}
     {trust.proof && <li className="trust-tag trust-level-1">{t(trust.proof === 'STOCK' ? 'Наличие подтверждено' : 'Средства подтверждены')}</li>}
@@ -254,7 +256,7 @@ export function TrustAccount() {
         <ul className="trust-item-list">
           {value.factors.map(entry => <li key={entry.id}>
             <div className="trust-heading"><strong>{t(ratingFactorLabels[entry.id] ?? entry.name)}</strong><span>{entry.value} / {entry.max}</span></div>
-            <p>{t(entry.id === 'level' ? verificationLevels[value.level] ?? verificationLevels[0] : entry.detail)}</p>
+            <p>{t(entry.id === 'level' ? value.levelName : entry.detail)}</p>
             {entry.hint && <small className="muted">{t(entry.hint)} (+{new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(entry.max - entry.value)})</small>}
           </li>)}
           {value.penalties.map(penalty => <li key={penalty.id}>−{penalty.points} · {penalty.reason}</li>)}
@@ -262,7 +264,7 @@ export function TrustAccount() {
       </section>
       <section className="panel workflow-section">
         <h2>{t('Уровень проверки')}</h2>
-        <p><span className={'trust-tag trust-level-' + value.level}>{t(verificationLevels[value.level] ?? verificationLevels[0])}</span></p>
+        <p><span className={'trust-tag trust-level-' + value.level}>{t(value.levelName)}</span></p>
         <p>{t('Активных и скрытых объявлений: {used}', { used: value.listingsUsed })} · {value.listingLimit === null ? t('без ограничения') : t('лимит {limit}', { limit: value.listingLimit })}</p>
         {value.publishBanAt && <Notice tone="error">{t('Публикация закрыта до проверки документов.')} {value.publishBanNote}</Notice>}
         {value.verificationRejectedAt && <Notice>{t('Проверка документов не пройдена.')} {value.verificationNote}</Notice>}

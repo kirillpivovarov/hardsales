@@ -10,7 +10,7 @@ import { Button, Field, Notice, Spinner } from './ui'
 type Participant = {
   id: string; username: string; displayName: string; level: number; representationMode: string
   verificationNote?: string; publishBanAt?: string; actualitySuspendedAt?: string; linkGroup?: string
-  trustScore?: number; chain: Record<string, string>
+  trustScore?: number; source?: string; chain: Record<string, string>; requirements: Record<string, string>
   listings: { id: string; kind: string; title: string }[]
 }
 type Principal = { id: string; name: string; company: string; participantName: string; confirmedAt?: string; deniedAt?: string }
@@ -19,10 +19,12 @@ type DealReview = {
   amountMismatch: boolean; documents: { id: string; fileName: string; status: string }[]
 }
 type DayCode = { id: string; participantName: string; listingTitle?: string; code: string; spotCheck: boolean; result?: string; expiresAt: string }
-type Queue = { participants: Participant[]; documents: TrustDocument[]; principals: Principal[]; dealsToVerify: DealReview[]; dayCodes: DayCode[] }
+type Queue = { participants: Participant[]; documents: TrustDocument[]; principals: Principal[]; dealsToVerify: DealReview[];
+  dayCodes: DayCode[]; requiresDocuments: boolean }
 type Corridor = { modelId: string; modelName?: string; basis: string; minUsd: string; maxUsd: string }
 const chainNames: Record<string, string> = {
   dayCode: 'Фото с кодом дня', principal: 'Подтверждение полномочий', document: 'Документ на имя участника',
+  companyCard: 'Карточка компании', signatory: 'Кто подписывает', principalEmail: 'Подтверждение компании-принципала по почте',
 }
 const chainStatuses: Record<string, string> = {
   PASSED: 'Подтверждено', FAILED: 'Не подтверждено', WAITING: 'Ожидается подтверждение', NOT_NEEDED: 'Не требуется',
@@ -30,16 +32,16 @@ const chainStatuses: Record<string, string> = {
 const archiveStatuses: Record<string, string> = { APPROVED: 'Принят', REJECTED: 'Отклонён', PENDING: 'На проверке' }
 
 type Mutation = { path: string; method?: string; body?: unknown }
-function DecisionForm({ save, children, onSaved, label, onCancel, onBusy, destructive = false }: {
+function DecisionForm({ save, children, onSaved, label, onCancel, onBusy, destructive = false, blocked = false }: {
   save: (data: FormData) => Mutation; children: React.ReactNode; onSaved: () => void; label?: string;
-  onCancel?: () => void; onBusy?: (busy: boolean) => void; destructive?: boolean
+  onCancel?: () => void; onBusy?: (busy: boolean) => void; destructive?: boolean; blocked?: boolean
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (busy) return
+    if (busy || blocked) return
     setBusy(true); onBusy?.(true); setError('')
     try {
       const { path, method = 'POST', body } = save(new FormData(event.currentTarget))
@@ -52,7 +54,7 @@ function DecisionForm({ save, children, onSaved, label, onCancel, onBusy, destru
     {children}
     {error && <Notice tone="error">{t(error)}</Notice>}
     <div className="admin-actions">
-      <Button type="submit" variant={destructive ? 'danger' : 'primary'} disabled={busy}>{t(label ?? 'Сохранить решение')}</Button>
+      <Button type="submit" variant={destructive ? 'danger' : 'primary'} disabled={busy || blocked}>{t(label ?? 'Сохранить решение')}</Button>
       {onCancel && <Button variant="secondary" onClick={onCancel} disabled={busy}>{t('Отмена')}</Button>}
     </div>
   </form>
@@ -87,8 +89,10 @@ export function VerificationAdmin({ isAdmin = false }: { isAdmin?: boolean }) {
         {result.data.participants.length === 0 && <p className="muted">{t('Нет участников для проверки.')}</p>}
         <ul className="trust-item-list">{result.data.participants.map(participant => <li key={participant.id}>
           <details>
-            <summary><strong>{participant.displayName}</strong> · {participant.username} · {t(verificationLevels[participant.level] ?? verificationLevels[0])}</summary>
-            <ParticipantForm participant={participant} onSaved={afterSave} isAdmin={isAdmin} />
+            <summary><strong>{participant.displayName}</strong> · {participant.username} · {t(participant.source === 'OPERATOR_KNOWN'
+              ? 'Проверен оператором' : verificationLevels[participant.level] ?? verificationLevels[0])}</summary>
+            <ParticipantForm participant={participant} onSaved={afterSave} isAdmin={isAdmin}
+              requiresDocuments={result.data?.requiresDocuments === true} />
           </details>
         </li>)}</ul>
       </section>
@@ -135,29 +139,37 @@ export function VerificationAdmin({ isAdmin = false }: { isAdmin?: boolean }) {
   </div>
 }
 
-function ParticipantForm({ participant, onSaved, isAdmin }: { participant: Participant; onSaved: () => void; isAdmin: boolean }) {
+function ParticipantForm({ participant, onSaved, isAdmin, requiresDocuments }: {
+  participant: Participant; onSaved: () => void; isAdmin: boolean; requiresDocuments: boolean
+}) {
   const { t } = useI18n()
   const prefix = '/admin/users/' + participant.id
   const [action, setAction] = useState('verify')
   const [listing, setListing] = useState('')
+  const [override, setOverride] = useState(false)
+  const incomplete = requiresDocuments && Object.values(participant.requirements).includes('WAITING')
   const options: Record<string, string> = {
-    verify: 'Подтвердить проверку документов', 'verification-reject': 'Отклонить документы', restrict: 'Ограничить публикацию',
+    verify: requiresDocuments ? 'Подтвердить уровень' : 'Подтвердить проверку документов',
+    ...(participant.level > 0 ? { 'verification-revoke': 'Снять уровень' } : {}),
+    'verification-reject': 'Отклонить документы', restrict: 'Ограничить публикацию',
     'day-codes': 'Выдать код дня', penalties: 'Назначить штраф', 'link-group': 'Указать связанные аккаунты',
     ...(isAdmin && participant.actualitySuspendedAt ? { 'actuality/resume': 'Разрешить подтверждение актуальности' } : {}),
   }
   const outstanding = Object.values(participant.chain).filter(value => value === 'FAILED' || value === 'WAITING').length
   return <div className="workflow-stack">
+    {requiresDocuments && <ul className="trust-item-list">{Object.entries(participant.requirements).map(([key, value]) =>
+      <li key={key}>{t(chainNames[key])} · {t(chainStatuses[value])}</li>)}</ul>}
     <ul className="trust-item-list">{Object.entries(participant.chain).map(([key, value]) => <li key={key}>{t(chainNames[key] ?? key)} · {t(chainStatuses[value] ?? value)}</li>)}</ul>
     {outstanding >= 2 && <Notice>{t('Два или более условия ещё не подтверждены.')}</Notice>}
     {participant.publishBanAt && <Notice>{t('Публикация закрыта до проверки документов.')}</Notice>}
     {participant.actualitySuspendedAt && <Notice>{t('Действует ограничение после пропусков вопросов об актуальности.')}</Notice>}
-    <DecisionForm onSaved={onSaved} label={options[action]} save={form => {
+    <DecisionForm onSaved={onSaved} label={options[action]} blocked={action === 'verify' && incomplete && !override} save={form => {
       const note = String(form.get('note') ?? '').trim()
       const path = prefix + '/' + action
       if (action === 'day-codes') return { path, body: { listingId: listing || null, spotCheck: form.get('spotCheck') === 'on' } }
       if (action === 'link-group') return { path, method: 'PATCH', body: { linkGroup: String(form.get('group') ?? '').trim() || null } }
       if (action === 'penalties') return { path, body: { kind: form.get('kind'), points: Number(form.get('points')), reason: note } }
-      if (action === 'actuality/resume') return { path, body: { reason: note } }
+      if (action === 'actuality/resume' || action === 'verification-revoke') return { path, body: { reason: note } }
       return { path, body: action === 'verify' ? { note, level: 1 } : { note } }
     }}>
       <Field label={t('Действие')}>
@@ -186,8 +198,13 @@ function ParticipantForm({ participant, onSaved, isAdmin }: { participant: Parti
         </select></Field>
         <Field label={t('Баллы')}><input name="points" type="number" min="1" max="100" defaultValue="10" required /></Field>
       </>}
+      {action === 'verify' && incomplete && <label className="checkbox-label">
+        <input type="checkbox" checked={override} onChange={event => setOverride(event.target.checked)} />
+        {t('Подтвердить с исключением и указать причину')}
+      </label>}
       {!['link-group', 'day-codes'].includes(action) && <Field label={t('Причина или примечание')}>
-        <textarea name="note" required={action !== 'verify'} minLength={3} maxLength={action === 'penalties' ? 500 : 1000} rows={2} />
+        <textarea name="note" required={action !== 'verify' || incomplete && override} minLength={3}
+          maxLength={['penalties','verification-revoke'].includes(action) ? 500 : 1000} rows={2} />
       </Field>}
     </DecisionForm>
   </div>

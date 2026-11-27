@@ -44,7 +44,7 @@ export class LotGroupsService {
     private readonly matching: MatchingService) {}
 
   async publicMembers(actor: SessionUser, listingId: string) {
-    if (actor.role !== 'BUYER') throw new NotFoundException('Лот не найден')
+    if (!actor.tradeSides.includes('BUY')) throw new NotFoundException('Лот не найден')
     const id = uuid(listingId)
     const { rows } = await this.db.query<PublicListingText & { privateFields?: unknown } & Record<string, unknown>>(`
       ${visibleCategories}, source AS (
@@ -52,18 +52,18 @@ export class LotGroupsService {
         JOIN lot_groups g ON g.id=m.group_id AND g.status='OPEN'
         JOIN listings l ON l.id=m.listing_id AND g.lot_key=l.lot_key
         JOIN users u ON u.id=l.owner_id
-        WHERE m.listing_id=$1 AND m.role='MEMBER' AND ${listingPublicWhere} AND ${lotGroupsEnabledSql}
+        WHERE m.listing_id=$1 AND m.role='MEMBER' AND l.owner_id<>$2 AND ${listingPublicWhere} AND ${lotGroupsEnabledSql}
       ), alternatives AS (
         SELECT DISTINCT ON (l.owner_id) l.id
         FROM listings l JOIN users u ON u.id=l.owner_id
         JOIN lot_group_members m ON m.listing_id=l.id AND m.role='MEMBER'
         JOIN source g ON g.id=m.group_id AND g.lot_key=l.lot_key
-        WHERE l.owner_id<>g.owner_id AND ${listingPublicWhere}
+        WHERE l.owner_id<>g.owner_id AND l.owner_id<>$2 AND ${listingPublicWhere}
         ORDER BY l.owner_id,l.trust_score DESC NULLS LAST,l.created_at,l.id
       )
       SELECT ${listingColumnsFor()} ${listingJoins} JOIN alternatives a ON a.id=l.id
       ORDER BY l.trust_score DESC NULLS LAST,l.created_at,l.id
-    `, [id])
+    `, [id, actor.id])
     if (!rows.length) throw new NotFoundException('Лот не найден')
     const maskLegacyContacts = await this.settings.enabled('feature_disclosure_journal')
     // Public projections carry no owner-only privateFields marker.
@@ -91,7 +91,7 @@ export class LotGroupsService {
   }
 
   async myRequests(actor: SessionUser) {
-    if (actor.role !== 'SELLER' || !await this.settings.enabled('feature_lot_groups')) return { items: [] }
+    if (!actor.tradeSides.includes('SELL') || !await this.settings.enabled('feature_lot_groups')) return { items: [] }
     const { rows } = await this.db.query(`
       SELECT r.id,r.listing_id AS "listingId",r.asked_at AS "askedAt",l.title,
         l.principal_id AS "principalId",p.name AS "principalName"
@@ -105,7 +105,7 @@ export class LotGroupsService {
   }
 
   async answer(actor: SessionUser, id: string, raw: unknown) {
-    if (actor.role !== 'SELLER') throw new NotFoundException('Запрос не найден')
+    if (!actor.tradeSides.includes('SELL')) throw new NotFoundException('Запрос не найден')
     const data = object(raw)
     const name = str(data.principalLegalName, 'Юридическое наименование', 2, 200)
     const exclusive = boolean(data.exclusiveMandate, 'Эксклюзивный мандат')
@@ -344,7 +344,7 @@ export class LotGroupsService {
       SELECT m.group_id AS "groupId",l.id AS "listingId",m.owner_id AS "ownerId",m.role AS "membershipRole",l.title,
         u.display_name AS nickname,u.company_name AS "ownerCompany",l.status AS "listingStatus",l.hidden_reason AS "hiddenReason",
         l.quantity,l.stock_city AS city,l.origin_country AS country,l.price::float8 AS price,l.currency,
-        round(l.price/nullif(l.quantity,0),2)::float8 AS "pricePerUnit",
+        l.price::float8 AS "pricePerUnit",
         l.representation,l.principal_id AS "principalId",p.name AS "principalName",p.company AS "principalCompany",
         CASE WHEN p.removed_at IS NULL THEN p.confirmed_at END AS "confirmedAt",p.confirmed_via AS "confirmedVia",
         CASE WHEN p.removed_at IS NULL THEN p.platform_user_id END AS "principalUserId",

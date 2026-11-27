@@ -73,6 +73,7 @@ test('actuality lifecycle with real PostgreSQL, API, daily job slots and one-use
     const { payload: created } = await call('/listings', {
       method: 'POST', cookie: seller, status: 201, body: {
         categoryId: categories.find(category => category.slug === 'gpu').id,
+        modelId: 'h100-sxm',
         title: 'Проверка хранения срока',
         description: 'Проверка срока без активации ежедневных запросов.',
         priceMode: 'FIXED', price: 150000, condition: 'NEW', quantity: 1,
@@ -101,7 +102,7 @@ test('actuality lifecycle with real PostgreSQL, API, daily job slots and one-use
     assert.equal(rows[0].payload.listingIds.length, 8);
     assert.equal((await summary()).pending.length, 8);
     assert.equal((await listing(listings[0], buyer)).askedAt, null);
-    assert.ok((await listing(listings[0], buyer)).freshness);
+    assert.equal((await listing(listings[0], buyer)).freshness, null);
     if (mailpit) {
       await jobs.runNow('notifications.deliver');
       const mailbox = await (await fetch(mailpit + '/api/v1/messages')).json();

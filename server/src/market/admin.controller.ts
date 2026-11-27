@@ -44,6 +44,22 @@ export class AdminController {
     return this.admin.status(await this.auth.staff(request), 'users', id, body)
   }
 
+  @Get('users/:id/listing-options')
+  async listingOptions(@Req() request: Request, @Param('id') id: string) {
+    await this.auth.staff(request)
+    return this.catalog.staffListingOptions(id)
+  }
+
+  @Post('users/:id/listings')
+  @UseGuards(ListingStaffGuard)
+  @UseInterceptors(ListingUploadCapacity, ListingMultipart)
+  async createForOwner(@Req() request: StaffListingMutationRequest, @Param('id') id: string, @Body() body: unknown,
+    @UploadedFiles() files?: ListingImageUpload[]) {
+    const { data, uploads } = listingMutation(request, body, files)
+    await this.contactGuard.assertListing(data, uploads.length)
+    return this.catalog.createForOwner(request.listingEditor, id, data, uploads)
+  }
+
   @Get('listings')
   async listings(@Req() request: Request, @Query() query: Record<string, unknown>) {
     await this.auth.staff(request)
@@ -69,6 +85,11 @@ export class AdminController {
   @Patch('listings/:id/status')
   async listingStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     return this.admin.status(await this.auth.staff(request), 'listings', id, body)
+  }
+
+  @Post('listings/:id/review')
+  async reviewListing(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    return this.catalog.reviewListing(await this.auth.staff(request), id, body)
   }
 
   @Get('categories')

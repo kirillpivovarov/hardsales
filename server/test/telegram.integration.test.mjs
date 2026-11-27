@@ -158,9 +158,9 @@ test('Telegram webhook, private binds, actualities, split delivery and polling u
   const event = nextEvent();
   const write = async (chat, text, options) => update(event(chat, text, options));
   let callbackSeq = 4000;
-  async function press(chat, message, data) {
+  async function press(chat, message, data, username) {
     const id = `call_${++callbackSeq}`;
-    await update({ update_id: callbackSeq, callback_query: { id, from: { id: chat }, data,
+    await update({ update_id: callbackSeq, callback_query: { id, from: { id: chat, username }, data,
       message: { message_id: message.messageId, chat: { id: chat, type: 'private' } } } });
     return receipt(item => item.method === 'answerCallbackQuery' && item.body.callback_query_id === id, 'No callback acknowledgement');
   }
@@ -312,6 +312,73 @@ test('Telegram webhook, private binds, actualities, split delivery and polling u
     assert.equal(known.body.text, 'Подтверждено');
     assert.equal((await db.query(`SELECT 1 FROM disclosure_events e JOIN disclosures d ON d.id=e.disclosure_id
       WHERE d.chat_id=$1 AND e.type='ALREADY_KNOWN'`, [chat.id])).rowCount, 1);
+  });
+
+  await t.test('Telegram nickname evidence tracks versions, blocks stale callbacks and preserves disclosure snapshots', async () => {
+    const profile = async cookie => (await api('/me/telegram', { cookie })).data;
+    const setting = value => api('/admin/settings/disclosure_requires_verified_telegram', { cookie: admin, method: 'PUT', body: { value } });
+    const botEnabled = value => api('/admin/settings/feature_telegram', { cookie: admin, method: 'PUT', body: { value } });
+    const sellerHandle = (await profile(seller)).profileUsername;
+    const buyerHandle = (await profile(buyer)).profileUsername;
+    const { rows: [existing] } = await db.query("SELECT id,chat_id FROM disclosures WHERE kind='FIRST'");
+    const chatPath = '/chats/' + existing.chat_id;
+    const reveal = (cookie, action, status = 200, requestId) => api(chatPath + '/reveal', {
+      cookie, method: 'PATCH', body: { action, requestId, rulesAccepted: true }, status,
+    });
+    await write(sellerChat, '/start ' + await issue(seller), { from: { id: sellerChat, username: sellerHandle.toUpperCase() } });
+    assert.equal((await profile(seller)).verified, true);
+    assert.deepEqual((await api(chatPath, { cookie: buyer })).data.telegramVerification, { mine: false, partner: true });
+    const history = (await api('/disclosures/' + existing.id, { cookie: buyer })).data;
+    assert.equal(history.partner.telegramVerified, false);
+    await write(sellerChat, '/help', { from: { id: sellerChat } });
+    assert.equal((await profile(seller)).verified, false);
+    assert.equal((await profile(seller)).profileUsername, sellerHandle);
+
+    const replacement = 'seller_nickname_323';
+    await press(sellerChat, { messageId: 904 }, 'test', replacement);
+    assert.equal((await profile(seller)).verified, false);
+    const notice = await receipt(item => item.method === 'sendMessage' &&
+      item.body.reply_markup?.inline_keyboard?.[0]?.[0]?.text === 'Использовать @' + replacement, 'New nickname confirmation missing');
+    await press(sellerChat, notice, button(notice, 'Использовать @' + replacement), 'another_nickname');
+    assert.equal((await profile(seller)).profileUsername, sellerHandle);
+    const adopted = await press(sellerChat, notice, button(notice, 'Использовать @' + replacement), replacement);
+    assert.match(adopted.body.text, /подтверждён/);
+    assert.equal((await profile(seller)).profileUsername, replacement);
+    assert.equal((await profile(seller)).verified, true);
+    const oldChat = (await api(chatPath, { cookie: buyer })).data;
+    assert.equal(oldChat.telegram, null);
+    assert.equal(oldChat.telegramVerification, null);
+    assert.deepEqual(oldChat.telegramChanged, { mine: false, partner: true });
+    assert.equal((await db.query('SELECT 1 FROM telegram_handle_history WHERE user_id=$1 AND previous_handle=$2 AND new_handle=$3',
+      [sellerId, sellerHandle, replacement])).rowCount, 1);
+    await setting(true);
+    try {
+      assert.equal((await reveal(seller, 'REQUEST', 403)).data.code, 'TELEGRAM_NOT_VERIFIED_PARTNER');
+      assert.equal((await reveal(buyer, 'REQUEST', 403)).data.code, 'TELEGRAM_NOT_VERIFIED_SELF');
+      await write(buyerChat, '/help', { from: { id: buyerChat, username: buyerHandle.toUpperCase() } });
+      assert.equal((await profile(buyer)).verified, true);
+      const pending = (await reveal(seller, 'REQUEST')).data;
+      const newNotice = await receipt(item => item.method === 'sendMessage' && String(item.body.chat_id) === String(buyerChat) &&
+        item.body.text.startsWith('Запрос обмена контактами'), 'Current disclosure request missing');
+      const accept = button(newNotice, 'Принять обмен');
+      const stale = await press(buyerChat, newNotice, accept, 'buyer_new_unsaved_nick');
+      assert.match(stale.body.text, /Подтвердите свой Telegram/);
+      assert.equal((await profile(buyer)).verified, false);
+      assert.equal((await api(chatPath, { cookie: buyer })).data.revealRequestId, pending.revealRequestId);
+      assert.equal((await press(buyerChat, newNotice, accept, buyerHandle)).body.text, 'Обмен принят');
+      const currentChat = (await api(chatPath, { cookie: buyer })).data;
+      assert.deepEqual(currentChat.telegramVerification, { mine: true, partner: true });
+      const current = (await api('/disclosures/' + currentChat.disclosure.id, { cookie: buyer })).data;
+      assert.equal(current.partner.telegramVerified, true);
+
+      await botEnabled(false);
+      assert.deepEqual((await api(chatPath, { cookie: buyer })).data.telegramVerification, { mine: false, partner: false });
+      await api('/auth/profile', { cookie: seller, method: 'PATCH', body: { telegram: 'seller_new_profile_nick' } });
+      assert.equal((await profile(seller)).verified, false);
+      assert.equal((await reveal(seller, 'REQUEST', 403)).data.code, 'TELEGRAM_NOT_VERIFIED_SELF');
+      assert.equal((await api(chatPath, { cookie: buyer })).data.telegram, null);
+      assert.equal((await api('/disclosures/' + currentChat.disclosure.id, { cookie: buyer })).data.partner.telegramVerified, true);
+    } finally { await setting(false); await botEnabled(true); }
   });
 
   await t.test('per-chat throttling, Retry-After, disabled binding and immediate fallback', async () => {

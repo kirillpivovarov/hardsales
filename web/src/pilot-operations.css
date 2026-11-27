@@ -1,0 +1,20 @@
+.ops-panel { min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; }
+.ops-panel summary { cursor: pointer; font-weight: 700; overflow-wrap: anywhere; }
+.ops-panel[open] summary { margin-bottom: 12px; }
+.ops-panel p { margin: 0 0 12px; }
+.ops-checklist, .ops-job-list, .ops-mail-list { list-style: none; padding: 0; display: grid; gap: 8px; margin: 0 0 12px; }
+.ops-checklist li, .ops-before-after > div, .ops-job-list li, .ops-mail-list li {
+  border: 1px solid var(--line); border-radius: 8px; display: flex; flex-wrap: wrap;
+  align-items: center; gap: 8px 12px; padding: 10px; min-width: 0; overflow-wrap: anywhere;
+}
+.ops-pass { color: #146844; }
+.ops-pending { color: #925300; }
+.ops-rates { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(140px,100%),1fr)); gap: 8px 12px; }
+.ops-before-after { display: grid; gap: 6px; }
+.ops-job-list li > strong, .ops-mail-list li > strong { flex: 1 1 150px; }
+.ops-mail-list li > .ops-mail-details { flex-basis: 100%; }
+.ops-mail-details { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0; }
+.ops-mail-details dt, .ops-mail-details dd { margin: 0; }
+.ops-mail-details div { min-width: 0; }
+.ops-mail-details dt { font-weight: 600; }
+.ops-mail-filters { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(150px,100%),1fr)); gap: 8px 12px; align-items: end; }

@@ -106,10 +106,12 @@ export async function readPilotDays(client: Queryable, period: PilotPeriod, time
       SELECT (reached_at AT TIME ZONE $3)::date AS day, count(*)::int AS total FROM live GROUP BY 1
     ), disclosure_days AS (
       SELECT (d.accepted_at AT TIME ZONE $3)::date AS day, count(*)::int AS total,
-        count(*) FILTER (WHERE t.status IN ('AGREED','EXECUTED')
-          AND t.seller_agreed IS NOT NULL AND t.buyer_agreed IS NOT NULL)::int AS converted
+        count(*) FILTER (WHERE EXISTS (
+          SELECT 1 FROM deals t WHERE t.disclosure_id=d.id AND t.status IN ('AGREED','EXECUTED')
+            AND t.seller_agreed IS NOT NULL AND t.buyer_agreed IS NOT NULL
+        ))::int AS converted
       FROM disclosures d JOIN participants a ON a.id=d.user_a_id JOIN participants b ON b.id=d.user_b_id
-      LEFT JOIN deals t ON t.disclosure_id=d.id CROSS JOIN bounds
+      CROSS JOIN bounds
       WHERE d.kind='FIRST' AND d.accepted_at >= starts AND d.accepted_at < ends
       GROUP BY 1
     ), deal_days AS (

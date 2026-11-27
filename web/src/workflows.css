@@ -258,3 +258,14 @@
     width: 100%;
   }
 }
+
+.listing-more-fields {
+  min-width: 0;
+}
+.listing-more-fields > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.listing-more-fields[open] > .form-grid {
+  margin-top: 0.85rem;
+}

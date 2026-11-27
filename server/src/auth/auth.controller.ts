@@ -96,3 +96,13 @@ export class ModeratorAccountsController {
     return { user: await this.auth.createModerator(request, input) };
   }
 }
+
+@Controller('me/trade-sides')
+export class TradeSidesController {
+  constructor(private readonly auth: AuthService) {}
+
+  @Patch()
+  async change(@Req() request: Request, @Body() input: unknown) {
+    return { user: await this.auth.changeTradeSides(request, input) };
+  }
+}

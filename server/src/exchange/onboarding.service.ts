@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import {
-  isStaffRole, sessionUser, type ParticipantRole, type RepresentationMode, type SessionUser, type UserRow,
+  isStaffRole, sessionUser, type ParticipantRole, type RepresentationMode, type SessionUser, type TradeSide, type UserRow,
 } from '../auth/auth.types';
 import { outsideContact } from '../contact';
 import { DatabaseService, type Queryable } from '../database/database.service';
@@ -14,9 +14,9 @@ import type { PoolClient } from 'pg';
 const modes = ['DIRECT', 'AGENT', 'BOTH'] as const;
 const staleRules = 'Правила обновились. Обновите страницу и примите текущую версию';
 
-function groupsFor(role: ParticipantRole, mode: RepresentationMode) {
-  return onboardingGroups.filter((group) => group.key === (role === 'SELLER' ? 'seller' : 'buyer') ||
-    (group.key === 'agent' && mode !== 'DIRECT'));
+function groupsFor(sides: TradeSide[] | null, mode: RepresentationMode) {
+  return onboardingGroups.filter((group) => (group.key === 'seller' && sides?.includes('SELL')) ||
+    (group.key === 'buyer' && sides?.includes('BUY')) || (group.key === 'agent' && mode !== 'DIRECT'));
 }
 
 @Injectable()
@@ -57,7 +57,7 @@ export class OnboardingService {
       ),
     ]);
     return {
-      groups: groupsFor(user.role, current.representation_mode),
+      groups: groupsFor(current.onboarding_added_side ? [current.onboarding_added_side] : current.trade_sides, current.representation_mode),
       agentGroup: onboardingGroups.find((group) => group.key === 'agent'),
       optionalHeading: onboardingOptionalHeading,
       answers: current.onboarding_answers,
@@ -78,7 +78,8 @@ export class OnboardingService {
       const rules = await this.lockRules(client);
       const current = await this.lockParticipant(client, user.id);
       if (version !== rules.version) throw new ConflictException(staleRules);
-      const answers = this.validateAnswers(rawAnswers, current.onboarding_answers, user.role, mode);
+      const sides = current.onboarding_added_side ? [current.onboarding_added_side] : current.trade_sides;
+      const answers = this.validateAnswers(rawAnswers, current.onboarding_answers, sides, mode);
       if (mode === 'DIRECT' && current.representation_mode !== 'DIRECT') {
         await this.assertNoAgentListings(client, user.id);
       } else if (mode !== 'DIRECT' && !(await this.hasPrincipal(client, user.id))) {
@@ -87,11 +88,12 @@ export class OnboardingService {
       const { rows: [updated] } = await client.query<UserRow>(`
         UPDATE users SET
           onboarding_answers = $2, representation_mode = $3, onboarding_state = 'DONE',
+          onboarding_added_side = NULL,
           onboarding_submitted_at = coalesce(onboarding_submitted_at, now()),
           rules_accepted_version = $4, rules_accepted_at = now(), updated_at = now()
         WHERE id = $1 RETURNING *
       `, [user.id, answers, mode, version]);
-      if (!current.onboarding_submitted_at) await this.notifyAdmin(client, updated);
+      if (!current.onboarding_submitted_at) await this.notifyStaff(client, updated);
       return sessionUser(updated, version, rules.enabled, await policyVersion(client));
     });
   }
@@ -116,7 +118,7 @@ export class OnboardingService {
     const current = await this.marketUser(this.db, id);
     if (isStaffRole(current.role)) throw new NotFoundException('У участника нет анкеты');
     const known = onboardingGroups.flatMap((group) => group.questions);
-    const questions = groupsFor(current.role, current.representation_mode).flatMap((group) => group.questions);
+    const questions = groupsFor(current.trade_sides, current.representation_mode).flatMap((group) => group.questions);
     const present = new Set(questions.map((question) => question.id));
     for (const key of Object.keys(current.onboarding_answers)) {
       if (!present.has(key)) {
@@ -171,20 +173,21 @@ export class OnboardingService {
   }
 
   private validateAnswers(input: Record<string, unknown>, previous: Record<string, string>,
-    role: ParticipantRole, mode: RepresentationMode): Record<string, string> {
-    const questions = groupsFor(role, mode).flatMap((group) => group.questions);
+    sides: TradeSide[] | null, mode: RepresentationMode): Record<string, string> {
+    const questions = groupsFor(sides, mode).flatMap((group) => group.questions);
     const supported = new Set(questions.map((question) => question.id));
     for (const key of Object.keys(input)) {
       if (!supported.has(key) && !Object.hasOwn(previous, key)) throw new BadRequestException('Неизвестный вопрос анкеты');
     }
-    const entries: [string, string][] = [];
+    const answers = { ...previous };
     for (const question of questions) {
-      const value = Object.hasOwn(input, question.id) ? input[question.id] : '';
+      const value = Object.hasOwn(input, question.id) ? input[question.id] : previous[question.id] ?? '';
       const answer = str(value, question.text, question.required ? 2 : 0, onboardingAnswerMaxLength);
       if (outsideContact(answer)) throw new BadRequestException('Уберите контакты из ответов анкеты');
-      if (answer) entries.push([question.id, answer]);
+      if (answer) answers[question.id] = answer;
+      else delete answers[question.id];
     }
-    return Object.fromEntries(entries);
+    return answers;
   }
 
   private async hasPrincipal(db: Queryable, userId: string): Promise<boolean> {
@@ -212,19 +215,15 @@ export class OnboardingService {
     if (result.rowCount) throw new ConflictException('Сначала архивируйте агентские объявления');
   }
 
-  private async notifyAdmin(client: PoolClient, user: UserRow) {
-    const { rows: [owner] } = await client.query<{ id: string }>(
-      "SELECT id FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE'",
-    );
-    if (!owner) return;
-    await this.notifications.notify(client, owner.id, {
+  private async notifyStaff(client: PoolClient, user: UserRow) {
+    await this.notifications.notifyStaff(client, {
       kind: 'onboarding.submitted',
       title: `Новый участник ${user.display_name} заполнил анкету`,
       body: 'Ответы доступны в профиле участника.',
       payload: { userId: user.id },
       actions: [{ label: 'Открыть', href: `/admin?section=exchange&part=onboarding&userId=${user.id}` }],
       dedupeKey: `onboarding.submitted:${user.id}`,
-      channels: [],
+      channels: ['EMAIL'],
     });
   }
 }

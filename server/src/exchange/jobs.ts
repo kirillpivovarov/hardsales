@@ -1,11 +1,17 @@
-import { Injectable, Logger, NotFoundException, OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
+import { ForbiddenException, HttpException, Injectable, Logger, NotFoundException, OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
 import type { PoolClient } from 'pg';
+import type { StaffSession } from '../auth/auth.types';
 import { DatabaseService, type Queryable } from '../database/database.service';
 import { pageParams, str } from '../market/market.inputs';
+import { auditExchange } from './audit';
 import { PlatformSettings } from './platform-settings';
+import { lockTrustStaff } from './trust-access';
 
 export type ExchangeClock = { now: Date; timezone: string; day: string; hour: number };
 type JobResult = Record<string, unknown> | void;
+const moderatorJobs = new Set(['actuality.sweep', 'matching.recompute', 'notifications.deliver', 'chat.digest', 'staff.digest', 'pilot.snapshot']);
+type FailureObserver = (client: PoolClient, job: string, clock: ExchangeClock) => Promise<void>;
+type RunContext = { actor: StaffSession; disabled: boolean };
 type ExchangeJob = {
   name: string;
   lock: number;
@@ -20,6 +26,7 @@ type ExchangeJob = {
 export class ExchangeJobs implements OnApplicationBootstrap, OnApplicationShutdown {
   private readonly jobs = new Map<string, ExchangeJob>();
   private readonly logger = new Logger(ExchangeJobs.name);
+  private failureObserver?: FailureObserver;
   private timer?: NodeJS.Timeout;
   private startup?: NodeJS.Timeout;
   private ticking: Promise<void> | null = null;
@@ -30,6 +37,24 @@ export class ExchangeJobs implements OnApplicationBootstrap, OnApplicationShutdo
   register(job: ExchangeJob): void {
     if (this.jobs.has(job.name)) throw new Error('Duplicate exchange job ' + job.name);
     this.jobs.set(job.name, job);
+  }
+
+  onFailure(observer: FailureObserver) {
+    this.failureObserver = observer;
+  }
+
+  available(actor: StaffSession) {
+    return [...this.jobs.keys()].sort().map(name => ({ name, canRun: actor.role === 'ADMIN' || moderatorJobs.has(name) }));
+  }
+
+  async runManual(actor: StaffSession, name: string) {
+    if (actor.role !== 'ADMIN' && !moderatorJobs.has(name)) throw new ForbiddenException('Задача доступна только администратору');
+    const job = this.jobs.get(name);
+    if (!job) throw new NotFoundException('Задача не найдена');
+    const clock = await this.clock();
+    const disabled = Boolean(job.enabled && !await job.enabled());
+    const { jobRunId, status, ...stats } = await this.run(job, clock, 'manual:' + clock.now.toISOString(), { actor, disabled });
+    return { jobRunId, status, stats };
   }
 
   onApplicationBootstrap(): void {
@@ -82,8 +107,10 @@ export class ExchangeJobs implements OnApplicationBootstrap, OnApplicationShutdo
     const job = query.job === undefined ? null : str(query.job, 'Задача', 1, 80);
     const [items, count] = await Promise.all([
       this.db.query(`
-        SELECT id, job, slot, status, attempts, started_at AS "startedAt", finished_at AS "finishedAt", stats, error
-        FROM job_runs WHERE ($1::text IS NULL OR job=$1) ORDER BY id DESC LIMIT $2 OFFSET $3
+        SELECT r.id, r.job, r.slot, r.status, r.attempts, r.started_at AS "startedAt", r.finished_at AS "finishedAt",
+          r.stats, r.error, r.manual_by IS NOT NULL AS manual, u.display_name AS "manualBy"
+        FROM job_runs r LEFT JOIN users u ON u.id=r.manual_by
+        WHERE ($1::text IS NULL OR r.job=$1) ORDER BY r.id DESC LIMIT $2 OFFSET $3
       `, [job, limit, offset]),
       this.db.query<{ total: number }>('SELECT count(*)::int AS total FROM job_runs WHERE ($1::text IS NULL OR job=$1)', [job]),
     ]);
@@ -105,19 +132,35 @@ export class ExchangeJobs implements OnApplicationBootstrap, OnApplicationShutdo
     }
   }
 
-  private run(job: ExchangeJob, clock: ExchangeClock, slot: string | null) {
+  private run(job: ExchangeJob, clock: ExchangeClock, slot: string | null, manual?: RunContext) {
     return this.db.transaction(async client => {
+      if (manual) {
+        await lockTrustStaff(client, manual.actor);
+        const reserved = await client.query(`
+          INSERT INTO ops_job_requests(job,requested_at) VALUES ($1,now())
+          ON CONFLICT (job) DO UPDATE SET requested_at=EXCLUDED.requested_at
+          WHERE ops_job_requests.requested_at <= now()-interval '1 minute' RETURNING job
+        `, [job.name]);
+        if (!reserved.rowCount) throw new HttpException('Задача уже запускалась, повторите через минуту', 429);
+      }
       const { rows: [lock] } = await client.query<{ locked: boolean }>(
         'SELECT pg_try_advisory_xact_lock(18403,$1) AS locked', [job.lock],
       );
-      if (!lock.locked) return { jobRunId: null, status: 'SKIPPED' };
+      if (!lock.locked && !manual) return { jobRunId: null, status: 'SKIPPED' };
       if (slot === null) {
-        await job.run(client, clock);
-        return { jobRunId: null, status: 'DONE' };
+        await client.query('SAVEPOINT exchange_job');
+        try {
+          const result = await job.run(client, clock);
+          if (result && result.jobStatus === 'FAILED') return this.recordContinuousFailure(client, job.name, clock);
+          return { jobRunId: null, status: 'DONE' };
+        } catch {
+          await client.query('ROLLBACK TO SAVEPOINT exchange_job');
+          return this.recordContinuousFailure(client, job.name, clock);
+        }
       }
       const { rows: [entry] } = await client.query<{ id: string; status: string; started: boolean }>(`
         WITH run AS (
-          INSERT INTO job_runs (job,slot,status) VALUES ($1,$2,'RUNNING')
+          INSERT INTO job_runs (job,slot,status,manual_by) VALUES ($1,$2,'RUNNING',$4)
           ON CONFLICT (job,slot) DO UPDATE SET status='RUNNING', started_at=now(), finished_at=NULL,
             error=NULL, attempts=job_runs.attempts+1
           WHERE job_runs.status='FAILED' AND job_runs.attempts < $3
@@ -126,12 +169,12 @@ export class ExchangeJobs implements OnApplicationBootstrap, OnApplicationShutdo
         )
         SELECT id,status,true AS started FROM run
         UNION ALL SELECT id,status,false FROM job_runs WHERE job=$1 AND slot=$2 AND NOT EXISTS (SELECT 1 FROM run)
-      `, [job.name, slot, job.maxAttempts ?? 5]);
+      `, [job.name, slot, job.maxAttempts ?? 5, manual?.actor.id ?? null]);
       if (!entry?.started) return { jobRunId: entry?.id ?? null, status: entry?.status ?? 'SKIPPED' };
       await client.query('SAVEPOINT exchange_job');
       let result: Exclude<JobResult, void> = {};
       try {
-        result = (await job.run(client, clock, slot)) ?? {};
+        result = !lock.locked || manual?.disabled ? { jobStatus: 'SKIPPED' } : (await job.run(client, clock, slot)) ?? {};
       } catch {
         await client.query('ROLLBACK TO SAVEPOINT exchange_job');
         result = { jobStatus: 'FAILED' };
@@ -145,7 +188,32 @@ export class ExchangeJobs implements OnApplicationBootstrap, OnApplicationShutdo
           retry_at=CASE WHEN $2='FAILED' THEN now()+$4::float8*interval '1 millisecond' END
         WHERE id=$1
       `, [entry.id, status, JSON.stringify(stats), Math.max(retry, job.minRetryMs ?? 60_000)]);
+      if (manual) await auditExchange(client, manual.actor, 'job_runs', entry.id, 'manual_run', null, { name: job.name, status });
+      if (status === 'FAILED') await this.reportFailure(client, job.name, clock);
       return { jobRunId: entry.id, status, ...stats };
     });
+  }
+
+  private async recordContinuousFailure(client: PoolClient, name: string, clock: ExchangeClock) {
+    await client.query(`
+      INSERT INTO job_runs(job,slot,status,finished_at,error)
+      VALUES ($1,$2,'FAILED',now(),'Не удалось завершить задачу')
+      ON CONFLICT (job,slot) DO NOTHING
+    `, [name, 'failure:' + clock.now.toISOString().slice(0, 16)]);
+    await this.reportFailure(client, name, clock);
+    return { jobRunId: null, status: 'FAILED' };
+  }
+
+  private async reportFailure(client: PoolClient, name: string, clock: ExchangeClock) {
+    if (!this.failureObserver) return;
+    await client.query('SAVEPOINT exchange_job_notification');
+    try {
+      await this.failureObserver(client, name, clock);
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT exchange_job_notification');
+      this.logger.warn('Could not record job failure notice: ' + name);
+    } finally {
+      await client.query('RELEASE SAVEPOINT exchange_job_notification');
+    }
   }
 }

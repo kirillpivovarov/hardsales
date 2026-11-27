@@ -23,7 +23,7 @@ export function countryOptions(locale = 'ru', extra?: string) {
 }
 
 export function formatMoney(value: number, currency: string, locale = 'ru') {
-  try { return new Intl.NumberFormat(locale, { style: 'currency', currency, maximumFractionDigits: 2 }).format(value); }
+  try { return new Intl.NumberFormat(locale, { style: 'currency', currency, minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value); }
   catch { return value + ' ' + currency; }
 }
 
@@ -38,6 +38,7 @@ export interface Category {
   count?: number;
   parentId?: string | null;
   attributeKeys?: string[];
+  requiresModel?: boolean;
   translations?: Record<string, { name: string; shortName?: string; description?: string }>;
 }
 
@@ -62,6 +63,9 @@ export interface Listing {
   categoryId: string;
   category?: Category;
   price: number | null;
+  priceUsd?: number | null;
+  totalPrice?: number | null;
+  totalPriceUsd?: number | null;
   currency: string;
   priceMode: 'FIXED' | 'NEGOTIABLE';
   availability: string | null;
@@ -80,6 +84,10 @@ export interface Listing {
   specs: Record<string, string>;
   owner: { id?: string; nickname?: string; displayName?: string; city: string | null; country: string; accountType?: string; participantType?: string; rating: number | null; ratingCount: number };
   status: string;
+  createdByStaff?: string | null;
+  ownerConfirmedAt?: string | null;
+  reviewReasons?: string[];
+  reviewReturnNote?: string | null;
   imageKey?: string | null;
   images?: ListingImage[];
   createdAt: string;
@@ -88,6 +96,7 @@ export interface Listing {
   shipDays?: number | null;
   paymentTerms?: string[];
   modelId?: string | null;
+  requiresModel?: boolean;
   model?: { id: string; nameRu: string; status: string } | null;
   analogModelIds?: string[];
   representation?: 'DIRECT' | 'AGENT' | null;
@@ -109,6 +118,8 @@ export interface Listing {
   duplicateAppealed?: boolean;
 }
 
+export const maxUnitPrice = 999_999_999.99;
+
 export const categoryIcons: Record<string, string> = {
   gpu: 'gpu', servers: 'server', cpu: 'cpu', memory: 'memory-stick', storage: 'hard-drive',
   network: 'network', racks: 'panels-top-left', power: 'zap', cooling: 'fan', components: 'circuit-board',
@@ -128,3 +139,5 @@ export const terms: Record<string, string> = {
   BANK_TRANSFER: 'Банковский перевод', CARD: 'Банковская карта', CASH: 'Наличные',
   LETTER_OF_CREDIT: 'Аккредитив', ESCROW: 'Эскроу',
 };
+
+export const reportReasonNames = { FRAUD: 'Подозрение на мошенничество', ABUSE: 'Оскорбления, угрозы или спам', OTHER: 'Другая причина' };

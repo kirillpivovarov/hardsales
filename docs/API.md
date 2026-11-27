@@ -18,7 +18,7 @@
 | `POST /auth/password` | `{currentPassword, newPassword}`. |
 | `PATCH /auth/credentials` | `{currentPassword, newPassword, username?}` для администратора. |
 
-Вызов подтверждения содержит `challengeId`, `expiresIn` в секундах и маскированный `email`. Роли при регистрации имеют значения `BUYER` и `SELLER`, типы участника — `COMPANY` и `INDIVIDUAL`. Статус ответа перед вводом кода не раскрывает, зарегистрирован ли этот email.
+Вызов подтверждения содержит `challengeId`, `expiresIn` в секундах и маскированный `email`. Роли при регистрации имеют значения `BUYER`, `SELLER` и `BOTH`, типы участника — `COMPANY` и `INDIVIDUAL`. Статус ответа перед вводом кода не раскрывает, зарегистрирован ли этот email.
 
 ### Каталог и объявления
 
@@ -32,9 +32,11 @@
 | `POST /listings`, `PATCH /listings/:id` | Создание и изменение объявления. |
 | `DELETE /listings/:id`, `POST /listings/:id/restore` | Архивирование и восстановление. |
 
-Поиск принимает `q`, пагинацию `page` и `limit` и сортировку `sort`. При `q` по умолчанию используется релевантность, без текста — новизна. Допустимы `relevance`, `newest`, `price-asc` и `price-desc`. Фильтр `category` принимает код и включает подкатегории. Другие фильтры включают `kind`, `ownerType`, `availability`, `condition`, `originScope`, `priceMode`, `vat`, `counterparty`, `originCountry`, `destinationCountry`, `ownerCountry`, `city`, `paymentMethod`, `deliveryIncluded`, `customsIncluded`, `priceMin`, `priceMax` и `currency`. При ценовом диапазоне без валюты используется RUB. Псевдоним фильтра `originCountry` — `country`.
+Поиск принимает `q`, пагинацию `page` и `limit` и сортировку `sort`. При `q` по умолчанию используется релевантность, без текста — новизна. Допустимы `relevance`, `newest`, `price-asc` и `price-desc`. Сортировка по цене использует стоимость единицы в USD. Договорные цены и цены без курса идут в конце. Фильтр `category` принимает код и включает подкатегории. Другие фильтры включают `kind`, `ownerType`, `availability`, `condition`, `originScope`, `priceMode`, `vat`, `counterparty`, `originCountry`, `destinationCountry`, `ownerCountry`, `city`, `paymentMethod`, `deliveryIncluded`, `customsIncluded`, `priceMin`, `priceMax` и `currency`. Ценовой диапазон применяется к одной единице. Без параметра `currency` сравниваются эквиваленты в USD. Псевдоним фильтра `originCountry` — `country`.
 
-Для создания объявления передайте `categoryId`, `title`, `description` и параметры направления. Роль задаёт `kind` (`SELL` или `BUY`). Для покупателя нужны `destinationCountry`, `deliveryBy` и `originScope`. Для `COUNTRY` передайте `originCountry`, для `DOMESTIC` он совпадает со страной получения. Продавцу нужны `availability` и география отгрузки. Для склада требуется `stockCity`.
+Для создания объявления передайте `categoryId`, `title`, `description` и параметры направления. Передайте `kind` (`SELL` или `BUY`) для аккаунта, имеющего обе стороны, или используйте доступную по умолчанию сторону. В фиксированной цене `price` задаётся сумма за единицу до 999 999 999,99. Карточка возвращает `totalPrice` за всё количество и, если курс задан, эквиваленты `priceUsd` и `totalPriceUsd`. Для покупателя нужны `destinationCountry`, `deliveryBy` и `originScope`. Для `COUNTRY` передайте `originCountry`, для `DOMESTIC` он совпадает со страной получения. Продавцу нужны `availability` и география отгрузки. Для склада требуется `stockCity`.
+
+В категориях `gpu` и `servers` и их подкатегориях при создании и редактировании укажите `modelId`. Отсутствие модели возвращает `400 MODEL_REQUIRED` с `field: "modelId"`. Сохранить карточку с собственной моделью на проверке можно сразу. Поиск совпадений по ней начнётся после одобрения. `GET /models/suggest?q=H100` возвращает подходящие конкретные модели. Сотрудники находят старые карточки без модели через `GET /admin/listings?withoutModel=true`.
 
 Для конкретного пункта отправления укажите `originScope: "COUNTRY"` и двухбуквенный код `originCountry`. Для гибкой отгрузки передайте `originScope: "ANY"` и `originCountry: null`. Старое тело с конкретным кодом без `originScope` остаётся допустимым. Частичное обновление без двух полей сохраняет прежнюю географию. Фильтр конкретной страны включает гибкие заявки и предложения. `originCountry=ANY` выбирает только записи с гибкой географией. В `deliveryBy` покупатель передаёт крайний срок поставки, продавец может передать последний день публикации предложения. Цена хранится до сотых, договорная цена передаётся как `null`.
 
@@ -123,3 +125,32 @@ curl --fail-with-body --request PATCH \
 Маршруты настройки и управления сотрудниками требуют сессии администратора. Ручная проверка в рамках полномочий сотрудника фиксируется в журнале. Код приглашения передаётся как `inviteCode` при регистрации. Для публичного каталога доступны фильтры `model`, `withAnalogs`, `representation`, `principalConfirmed`, `showAll` и сортировка `trust`. Служебные поля, контакты и файлы возвращаются по правам конкретного участника.
 
 Регистрация передаёт `pdConsent: true`, `pdPolicyVersion` из `GET /auth/me` и необязательное `infoEmailConsent`. При смене политики запись от имени участника возвращает `403 PD_CONSENT_REQUIRED`, пока он не примет текущую версию. Чтение и запросы по своим данным доступны. Архив выгрузки возвращается владельцу в формате gzip в течение семи дней.
+
+### Проба и эксплуатация
+
+| Метод и путь | Назначение |
+| --- | --- |
+| `GET\|POST /admin/presets/trial` | Предпросмотр и атомарное применение. Администратор передаёт `fxRates` с курсами RUB, USD, EUR, CNY, KZT, AED. Не пройденные проверки возвращают `409`. |
+| `GET /admin/jobs/available`, `POST /admin/jobs/:name/run` | Доступные по роли задачи и запуск с отдельным слотом. Подтверждение запуска рассылки в рабочем режиме передаётся полем `confirm`. Повтор в течение минуты возвращает `429`. |
+| `GET /admin/mail-queue`, `POST /admin/mail-queue/:source/:id/retry` | `source=deliveries\|outbox`, фильтры `status,kind,from,to,page,limit`. Адреса для модератора маскируются. Перезапуск доступен для ошибки доставки. |
+| `POST /admin/mail/test` | Администратор передаёт `{to}` для SMTP-проверки. |
+| `GET /admin/readiness`, `PUT /admin/readiness/:key` | Администратор получает чек-лист и сохраняет ручные отметки `{checked}`. |
+| `GET\|POST /admin/rules/schedule` | Администратор планирует публикацию заготовки через `{version,effectiveAt}`. Минимальный срок предупреждения семь дней. |
+| `GET /health/ops`, `POST /health/ops/backup` | Авторизация Bearer из `OPS_MONITOR_TOKEN`. Отчёт включает `kind,ok,finishedAt,sizeBytes,diskFreePercent`. |
+
+### Участники, сделки и споры
+
+| Метод и путь | Назначение |
+| --- | --- |
+| `PATCH /me/trade-sides` | Поле `tradeSides` принимает список `BUY` и `SELL`. Регистрация с обеими сторонами передаёт `role: "BOTH"`. Сотрудники используют отдельные роли. |
+| `POST /chats/:id/deal`, `GET /deals?pairUserId=` | Повторная сделка в чате раскрытой пары и список сделок пары. |
+| `GET\|POST /disputes`, `GET /disputes/:id` | Список и карточка спора, открытие по сделке. |
+| `POST /disputes/:id/position\|materials\|messages\|review\|withdraw` | Позиция стороны, материалы, ответы, пересмотр и отзыв. Для отправки файла используется `multipart/form-data`. |
+| `GET /disputes/:id/materials/:materialId/file` | Материал доступен автору либо уполномоченному сотруднику спора. |
+| `GET /admin/disputes`, `GET /admin/disputes/:id/evidence` | Очередь споров и доказательства. |
+| `POST /admin/disputes/:id/notify\|start-review\|decide` | Уведомление, рассмотрение и решение с аудитом. |
+| `GET /notifications/counts`, `GET /chats/unread-count` | Счётчики для шапки и чатов. |
+
+Раскрытие возвращает признак подтверждённого ника в `telegramVerification`. При обязательном подтверждении коды отказа `TELEGRAM_NOT_VERIFIED_SELF` и `TELEGRAM_NOT_VERIFIED_PARTNER` объясняют, какой стороне нужно подключить бота.
+
+Для сопровождения объявления доступны `GET /admin/users/:id/listing-options`, `POST /admin/users/:id/listings` и `POST /admin/listings/:id/review`. Черновик подтверждает или отклоняет владелец. Уровень и способ подтверждения возвращает `GET /me/verification`, сброс сотрудником доступен через `POST /admin/users/:id/verification-revoke`.

@@ -47,12 +47,15 @@ def activate_staff(admin, moderator):
 
 
 def publish(context, category_id, title, kind):
+    category = next(row['slug'] for row in api(context, 'categories') if row['id'] == category_id)
+    model = {'gpu': 'l40s', 'servers': 'hgx-h200-8'}.get(category)
     terms = {'availability': 'STOCK', 'stockCity': 'Москва', 'originCountry': 'RU'} if kind == 'SELL' else {
         'originScope': 'ANY', 'destinationCountry': 'RU', 'deliveryBy': (date.today() + timedelta(days=30)).isoformat(),
     }
     return api(context, 'listings', 'POST', {
         'title': title, 'description': 'Объявление для проверки контекстной модерации.', 'kind': kind,
         'categoryId': category_id, 'quantity': 1, 'condition': 'NEW', 'paymentMethods': ['BANK_TRANSFER'], **terms,
+        **({'modelId': model} if model else {}),
     })['id']
 
 
@@ -182,15 +185,19 @@ def run(browser):
     expect_stayed(mobile, detail_url)
     print('PASS mobile moderator both catalog roles, listing status and observed author profile edit', flush=True)
 
-    info_url = BASE + '/info/rules'
+    info_url = BASE + '/info/about'
     mobile.goto(info_url)
     expect(button(mobile, 'Редактировать страницу')).to_have_count(0)
     expect(button(mobile, 'Редактировать язык интерфейса')).to_have_count(0)
     content_url = BASE + '/admin?section=content'
     mobile.goto(content_url)
-    button(mobile.get_by_role('row').filter(has_text='/info/rules'), 'Редактировать').click()
+    for legal_page in ('/info/rules', '/info/rules_draft', '/info/pd_policy'):
+        legal_row = mobile.get_by_role('row').filter(has=mobile.get_by_text(legal_page, exact=True))
+        expect(legal_row).to_have_count(1)
+        expect(button(legal_row, 'Редактировать')).to_have_count(0)
+    button(mobile.get_by_role('row').filter(has_text='/info/about'), 'Редактировать').click()
     dialog = mobile.get_by_role('dialog')
-    new_title = f'Правила площадки {TAG}'
+    new_title = f'О площадке {TAG}'
     dialog.locator('input[name="title.ru"]').fill(new_title)
     button(dialog, 'Сохранить').click()
     expect_stayed(mobile, content_url)
